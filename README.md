@@ -6,7 +6,7 @@ Multi-agent AI system where specialized agents collaborate on software engineeri
 
 **Status:** Architecture phase - implementation starting soon
 
-See [MVP v1 Spec](docs/mvp-v1.md) for implementation plan.
+See [MVP v1 Plan](plans/mvp-v1.md) for implementation details.
 
 ## Architecture
 
@@ -28,12 +28,15 @@ Specialized AI agents coordinate like a human engineering team:
 
 ## Documentation
 
-- **[Architecture Overview](docs/architecture-overview.md)** - System design and concepts
-- **[MVP v1](docs/mvp-v1.md)** - Initial implementation plan
-- **[Agent Architecture](docs/agent-architecture.md)** - AI agent specifications
-- **[System Orchestration](docs/system-orchestration.md)** - Backend implementation
-- **[Task Persistence](docs/task-persistence.md)** - Storage and state
-- **[Slack Integration](docs/slack-integration.md)** - UX layer
+**Architecture:**
+- [Architecture Overview](docs/architecture-overview.md) - System design and concepts
+- [Agent Architecture](docs/agent-architecture.md) - AI agent specifications
+- [System Orchestration](docs/system-orchestration.md) - Backend implementation
+- [Task Persistence](docs/task-persistence.md) - Storage and state
+- [Slack Integration](docs/slack-integration.md) - UX layer
+
+**Implementation Plans:**
+- [MVP v1](plans/mvp-v1.md) - Initial 4-week implementation plan
 
 ## Technology Stack
 
@@ -45,7 +48,7 @@ Specialized AI agents coordinate like a human engineering team:
 
 ## Development
 
-Coming soon - see [MVP v1 Spec](docs/mvp-v1.md) for timeline.
+Coming soon - see [MVP v1 Plan](plans/mvp-v1.md) for timeline.
 
 ## License
 
