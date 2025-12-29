@@ -12,16 +12,29 @@ import type { AgentHandle } from '../types/agent.js';
 import { getTaskPath } from '../system/task-manager.js';
 import { MessageQueue, createAgentInputGenerator } from '../system/message-queue.js';
 import { createPMAgentMcpServer, type ToolCallbacks } from '../mcp/tools.js';
-import { logAgentToolCall } from '../system/agent-logging.js';
+import { processAgentEventForLogging } from '../system/agent-logging.js';
+import { getAllRepoConfigs } from './repo-configs.js';
 
-const PM_SYSTEM_PROMPT = `You are the PM Agent for Archie, managing task coordination and user communication.
+/**
+ * Generate PM system prompt with dynamically loaded engineering team
+ */
+function generatePMSystemPrompt(): string {
+  const repoConfigs = getAllRepoConfigs();
+  const teamList = repoConfigs
+    .map((c) => `- ${c.agentId}: ${c.role}`)
+    .join('\n');
+
+  const assignmentGuidelines = repoConfigs
+    .map((c) => `- ${c.agentId}: ${c.expertise}`)
+    .join('\n');
+
+  return `You are the PM Agent for Archie, managing task coordination and user communication.
 
 Archie is an AI engineering assistant (ARCHIE = Autonomous Repository Collaborative Hybrid Intelligent Engineer).
 When communicating with users via Slack, you represent Archie.
 
 Your engineering team:
-- backend-agent: Senior Ruby on Rails engineer (backend repository)
-- mobile-agent: Senior React Native engineer (mobile app, iOS/Android)
+${teamList}
 
 Available Tools:
 - assign_task_owner: Designate an agent as the task owner (MUST be called before sending assignment message)
@@ -42,8 +55,8 @@ If the next action belongs to AGENTS (they're working, you're waiting):
 
 Examples:
 ✅ post_to_slack("Looking into this") → assign_task_owner → send_message_to_agent
-✅ post_to_slack("I've assigned this to backend") → WAIT for backend to report back (managing work)
-❌ report_completion("I've assigned this to backend") (WRONG - backend is working, don't complete)
+✅ post_to_slack("I've assigned this to an agent") → WAIT for agent to report back (managing work)
+❌ report_completion("I've assigned this to an agent") (WRONG - agent is working, don't complete)
 ✅ report_completion("Can I proceed?") (CORRECT - waiting for USER)
 ✅ report_completion("Here's the answer") (CORRECT - task done, waiting for USER)
 
@@ -62,23 +75,24 @@ When you receive "New task created, assign owner":
    - **Work request needing clarification**: Use report_completion with your follow-up questions
 2. If it's a work request with details:
    - Call assign_task_owner to designate the owner
-   - Use send_message_to_agent to send clear instructions
+   - Use send_message_to_agent with clear instructions. IMPORTANT: Start your message with "You are the task owner for this request." so the agent knows their role
    - Use post_to_slack to acknowledge: "Looking into this"
    - Do NOT call report_completion yet (work is ongoing)
 
 Task Assignment Guidelines:
-- iOS, Android, React Native, app, mobile UI → mobile-agent
-- API, database, Rails, backend, server → backend-agent
-- Auth, login issues that span both → Start with mobile-agent (they'll pull in backend)
+Use each agent's expertise to determine the best fit. Each agent's areas of expertise:
+${assignmentGuidelines}
 
 When you receive "New user input":
 1. Evaluate if the new input requires a different agent:
-   - **If topic changes** (mobile → backend, or vice versa): Call assign_task_owner to reassign, then send message to new owner
+   - **If topic changes** and different expertise is needed:
+     1. Call assign_task_owner to reassign to the new agent
+     2. Use send_message_to_agent with clear instructions. IMPORTANT: Start with "You are now the task owner for this request." to inform them of their new role
    - **If continuing same topic**: Forward to current owner via send_message_to_agent
    - **If simple question**: Use report_completion with your answer
 2. You can reassign the task owner at any time based on what the user needs
 
-When you receive a message from task owner (backend-agent or mobile-agent):
+When you receive a message from task owner:
 1. Evaluate if the work is complete or if more is needed:
    - **If complete and ready to implement**: Use report_completion to ask user for permission/approval
    - **If complete with just information**: Use report_completion with your synthesized summary
@@ -109,6 +123,7 @@ You do NOT:
 - Monitor logs continuously
 - Micromanage technical work
 - Make code decisions`;
+}
 
 /**
  * Spawn a PM agent with streaming input from a message queue
@@ -122,6 +137,7 @@ export async function spawnPMAgent(
   existingSessionId?: string,
   agentName: string = 'pm-agent'
 ): Promise<AgentHandle> {
+  const PM_SYSTEM_PROMPT = generatePMSystemPrompt();
   // Get task folder path (contains shared-knowledge.log and metadata.json)
   const taskPath = getTaskPath(metadata.task_id);
 
@@ -151,11 +167,16 @@ Files available to read:
     prompt: inputGenerator as any,
     options: {
       model: (process.env.SONNET_MODEL || 'claude-sonnet-4-5-20250929') as any,
+      betas: ['context-1m-2025-08-07'],
       systemPrompt: `${PM_SYSTEM_PROMPT}\n\nCurrent Task Context:\n${context}`,
       cwd: taskPath,
       executable: 'node',
       pathToClaudeCodeExecutable: process.env.CLAUDE_PATH || 'claude',
-      env: process.env as Record<string, string>,
+      env: {
+        NODE_ENV: process.env.NODE_ENV || 'development',
+        ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
+        PATH: process.env.PATH,
+      },
       resume: existingSessionId,
       maxTurns: 100,
       permissionMode: 'dontAsk',
@@ -189,23 +210,8 @@ Files available to read:
           onSessionId(event.session_id);
         }
 
-        // Log tool calls with details (only file operations, not MCP tools)
-        if (event.type === 'assistant') {
-          const content = event.message.content;
-          if (typeof content !== 'string') {
-            for (const block of content) {
-              if (block.type === 'tool_use') {
-                const toolName = block.name;
-                const input = block.input as any;
-
-                // Only log file operation tools (not MCP tools)
-                if (['Read', 'Grep', 'Glob'].includes(toolName)) {
-                  logAgentToolCall(agentName, toolName, input, taskPath);
-                }
-              }
-            }
-          }
-        }
+        // Log file operation tool calls
+        processAgentEventForLogging(event, agentName, taskPath);
       }
     } catch (error) {
       if (!queue.isStopped()) {

@@ -10,7 +10,7 @@ import { z } from 'zod';
 import { zodToJsonSchema } from 'zod-to-json-schema';
 import type { TriageResult, SlackMessage } from '../types/index.js';
 import { findTaskIdByThread } from '../system/task-runtime.js';
-import { logAgentToolCall } from '../system/agent-logging.js';
+import { processAgentEventForLogging } from '../system/agent-logging.js';
 
 /**
  * Zod schema for triage result
@@ -133,7 +133,11 @@ Classify this message and respond with JSON only.`;
       cwd: 'sessions',
       executable: 'node',
       pathToClaudeCodeExecutable: process.env.CLAUDE_PATH || 'claude',
-      env: process.env as Record<string, string>,
+      env: {
+        NODE_ENV: process.env.NODE_ENV || 'development',
+        ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
+        PATH: process.env.PATH,
+      },
       allowedTools: ['Glob', 'Grep', 'Read'],
       outputFormat: {
         type: 'json_schema',
@@ -141,25 +145,8 @@ Classify this message and respond with JSON only.`;
       },
     },
   })) {
-    // Log tool calls with details
-    if (event.type === 'assistant') {
-      const content = event.message.content;
-      if (typeof content !== 'string') {
-        for (const block of content) {
-          if (block.type === 'tool_use') {
-            const toolName = block.name;
-            const input = block.input as any;
-
-            // Log file operation tools
-            if (['Read', 'Grep', 'Glob'].includes(toolName)) {
-              logAgentToolCall('triage-agent', toolName, input, 'sessions');
-            } else {
-              console.log(`[triage-agent] Tool: ${toolName}`);
-            }
-          }
-        }
-      }
-    }
+    // Log file operation tool calls
+    processAgentEventForLogging(event, 'triage-agent', 'sessions');
 
     if (event.type === 'result') {
       if (event.subtype === 'success' && event.structured_output) {
