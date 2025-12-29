@@ -8,6 +8,7 @@
 import { tool, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import type { AgentName, FindingType } from '../types/index.js';
+import { getAllRepoAgentIds } from '../agents/repo-configs.js';
 
 /**
  * Callback types for tool implementations
@@ -18,7 +19,7 @@ export interface ToolCallbacks {
   onLogFinding: (entry: string, type: FindingType) => Promise<void>;
   onPostToSlack: (message: string) => Promise<void>;
   onReportCompletion: () => Promise<void>;
-  onAssignTaskOwner: (agent: 'backend-agent' | 'mobile-agent') => Promise<void>;
+  onAssignTaskOwner: (agent: AgentName) => Promise<void>;
 }
 
 /**
@@ -28,12 +29,15 @@ export interface ToolCallbacks {
  * The sending agent pauses until a response is received.
  */
 export function createSendMessageTool(callbacks: ToolCallbacks) {
+  // Build dynamic list of all agents
+  const allAgents = ['pm-agent', ...getAllRepoAgentIds()] as [string, ...string[]];
+
   return tool(
     'send_message_to_agent',
     'Send a message to another agent and wait for their response. Use this to coordinate with peer agents.',
     {
       target: z
-        .enum(['pm-agent', 'backend-agent', 'mobile-agent'])
+        .enum(allAgents)
         .describe('The agent to send the message to'),
       message: z.string().describe('The message content to send'),
     },
@@ -115,16 +119,19 @@ export function createPostToSlackTool(callbacks: ToolCallbacks) {
  * The task owner is responsible for leading the investigation.
  */
 export function createAssignTaskOwnerTool(callbacks: ToolCallbacks) {
+  // Only repo agents can be task owners
+  const repoAgents = getAllRepoAgentIds() as [string, ...string[]];
+
   return tool(
     'assign_task_owner',
     'Assign a task owner who will lead the investigation. Call this before sending the initial assignment message.',
     {
       agent: z
-        .enum(['backend-agent', 'mobile-agent'])
+        .enum(repoAgents)
         .describe('The agent to assign as task owner'),
     },
     async (args) => {
-      await callbacks.onAssignTaskOwner(args.agent);
+      await callbacks.onAssignTaskOwner(args.agent as AgentName);
       return {
         content: [
           {
