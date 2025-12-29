@@ -4,7 +4,11 @@
 
 export type TaskStatus = 'in_progress' | 'stopped' | 'completed';
 
-export type AgentName = 'pm-agent' | 'backend-agent' | 'mobile-agent' | 'triage-agent';
+/** Core agent names - repo agents can be any string ending in '-agent' */
+export type CoreAgentName = 'pm-agent' | 'triage-agent';
+
+/** Agent name - core agents or any repo agent (e.g., 'backend-agent', 'mobile-agent', 'web-agent') */
+export type AgentName = CoreAgentName | `${string}-agent`;
 
 export type FindingType = 'discovery' | 'decision' | 'completion' | 'blocker';
 

@@ -8,7 +8,7 @@
 import { mkdir, readFile, writeFile, appendFile, readdir } from 'fs/promises';
 import { existsSync } from 'fs';
 import { join } from 'path';
-import type { TaskMetadata, LogEntry, FindingType, SlackThread } from '../types/index.js';
+import type { TaskMetadata, LogEntry, FindingType, SlackThread, AgentName } from '../types/index.js';
 
 const SESSIONS_DIR = 'sessions';
 
@@ -300,7 +300,7 @@ export async function updateThreadTimestamp(
  */
 export async function setTaskOwner(
   taskId: string,
-  owner: 'backend-agent' | 'mobile-agent'
+  owner: AgentName
 ): Promise<void> {
   const metadata = await loadMetadata(taskId);
   if (!metadata) {
@@ -319,7 +319,7 @@ export async function setTaskOwner(
  */
 export async function addParticipant(
   taskId: string,
-  participant: 'backend-agent' | 'mobile-agent'
+  participant: AgentName
 ): Promise<void> {
   const metadata = await loadMetadata(taskId);
   if (!metadata) {
