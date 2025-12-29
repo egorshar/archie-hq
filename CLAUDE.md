@@ -31,3 +31,18 @@ Slack messages → Triage Agent → PM Agent → Specialist Agents (Backend, Mob
 ## Development Setup
 
 No build or test commands yet - this is an early-stage architecture specification project.
+
+## Git Workflow
+
+When creating commits:
+
+- **Use atomic commits**: Each commit should represent a single logical change
+- **Group related changes**: If multiple files change for the same feature, commit them together
+- **Clear commit messages**: Use descriptive messages that explain what changed and why
+- **Exclude docs/plans**: Don't commit draft documentation or plans unless specifically requested
+
+Example atomic commit structure:
+1. Security improvements → one commit
+2. New configuration system → one commit
+3. Refactoring for code reuse → one commit
+4. Type updates → one commit
