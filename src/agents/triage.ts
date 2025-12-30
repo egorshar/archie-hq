@@ -8,6 +8,7 @@
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import { zodToJsonSchema } from 'zod-to-json-schema';
+import { join } from 'path';
 import type { TriageResult, SlackMessage } from '../types/index.js';
 import { findTaskIdByThread } from '../system/task-runtime.js';
 import { processAgentEventForLogging } from '../system/agent-logging.js';
@@ -43,16 +44,16 @@ How This Works:
 Task Storage:
 - All tasks stored in current directory (sessions/)
 - Each task folder (task-*) contains:
-  - metadata.json - Task info, participants, Slack thread_ids
-  - shared-knowledge.log - Conversation history
+  - shared/metadata.json - Task info, participants, Slack thread_ids
+  - shared/knowledge.log - Conversation history
 
 Available Tools:
-- Glob: Find all task folders (e.g., "*/metadata.json" or "task-*/metadata.json")
+- Glob: Find all task folders (e.g., "*/shared/metadata.json" or "task-*/shared/metadata.json")
 - Grep: Search for thread_id in metadata files or keywords in logs
-- Read: Examine specific metadata.json or shared-knowledge.log
+- Read: Examine specific metadata.json or knowledge.log
 
 How to Search:
-1. Use Grep to search for the thread_id across all metadata.json files (e.g., "*/metadata.json")
+1. Use Grep to search for the thread_id across all metadata.json files (e.g., "*/shared/metadata.json")
 2. If found, extract the task_id from the path and classify based on user intent (existing_task, status_request, or cancel_task)
 3. If not found anywhere, classify as new_task
 
@@ -122,6 +123,8 @@ Classify this message and respond with JSON only.`;
   // Convert Zod schema to JSON Schema
   const jsonSchema = zodToJsonSchema(TriageResultSchema, { $refStrategy: 'none' });
 
+  // Get absolute path to sessions directory for consistency with other agents
+  const sessionsDir = join(process.cwd(), 'sessions');
 
   // Run the triage agent with tools and structured output
   // Set cwd to sessions directory for searching task metadata
@@ -130,7 +133,7 @@ Classify this message and respond with JSON only.`;
     options: {
       model: (process.env.HAIKU_MODEL || 'claude-haiku-4-5-20251001') as any,
       systemPrompt: TRIAGE_SYSTEM_PROMPT,
-      cwd: 'sessions',
+      cwd: sessionsDir,
       executable: 'node',
       pathToClaudeCodeExecutable: process.env.CLAUDE_PATH || 'claude',
       env: {
@@ -146,7 +149,7 @@ Classify this message and respond with JSON only.`;
     },
   })) {
     // Log file operation tool calls
-    processAgentEventForLogging(event, 'triage-agent', 'sessions');
+    processAgentEventForLogging(event, 'triage-agent', [sessionsDir]);
 
     if (event.type === 'result') {
       if (event.subtype === 'success' && event.structured_output) {
