@@ -10,21 +10,34 @@ import { relative } from 'path';
 const PROJECT_ROOT = process.cwd();
 
 /**
- * Trim a file path to be relative to cwd first, then relative to project root
+ * Trim a file path to be relative to one of the provided directories
+ * Returns the shortest relative path found, or the original path if none match
  */
-function trimFilePath(filePath: string, cwd: string): string {
-  // First try relative to cwd
-  if (filePath.startsWith(cwd)) {
-    return relative(cwd, filePath);
+function trimFilePath(filePath: string, cwds: string[]): string {
+  let shortest = filePath;
+  let shortestLength = filePath.length;
+
+  // Try each cwd in order
+  for (const cwd of cwds) {
+    if (filePath.startsWith(cwd)) {
+      const rel = relative(cwd, filePath);
+      // Only use if it doesn't start with .. (going outside the directory)
+      if (!rel.startsWith('..') && rel.length < shortestLength) {
+        shortest = rel;
+        shortestLength = rel.length;
+      }
+    }
   }
 
-  // Then try relative to project root
-  if (filePath.startsWith(PROJECT_ROOT)) {
-    return relative(PROJECT_ROOT, filePath);
+  // If no match found, try project root as fallback
+  if (shortest === filePath && filePath.startsWith(PROJECT_ROOT)) {
+    const rel = relative(PROJECT_ROOT, filePath);
+    if (!rel.startsWith('..')) {
+      shortest = rel;
+    }
   }
 
-  // Otherwise return as-is
-  return filePath;
+  return shortest;
 }
 
 /**
@@ -34,10 +47,10 @@ export function logAgentToolCall(
   agentName: string,
   toolName: string,
   input: any,
-  cwd: string
+  cwds: string[]
 ): void {
   if (toolName === 'Read') {
-    const displayPath = trimFilePath(input.file_path, cwd);
+    const displayPath = trimFilePath(input.file_path, cwds);
     console.log(`[${agentName}] Reading: ${displayPath}`);
   } else if (toolName === 'Grep') {
     console.log(`[${agentName}] Searching: "${input.pattern}"`);
@@ -56,7 +69,7 @@ export function logAgentToolCall(
 export function processAgentEventForLogging(
   event: any,
   agentName: string,
-  cwd: string
+  cwds: string[]
 ): void {
   if (event.type === 'assistant') {
     const content = event.message.content;
@@ -68,7 +81,7 @@ export function processAgentEventForLogging(
 
           // Only log file operation tools (not MCP tools)
           if (['Read', 'Grep', 'Glob'].includes(toolName)) {
-            logAgentToolCall(agentName, toolName, input, cwd);
+            logAgentToolCall(agentName, toolName, input, cwds);
           }
         }
       }
