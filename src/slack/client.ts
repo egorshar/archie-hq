@@ -81,6 +81,60 @@ export async function postToThreads(
 }
 
 /**
+ * Post an interactive message with blocks to a Slack thread
+ * Used for messages with buttons (e.g., edit mode approval)
+ */
+export async function postInteractiveToThread(
+  channel: string,
+  threadTs: string,
+  text: string,
+  blocks: unknown[]
+): Promise<string | undefined> {
+  const client = getSlackClient();
+
+  const result = await client.chat.postMessage({
+    channel,
+    thread_ts: threadTs,
+    text, // Fallback text for notifications
+    blocks: blocks as any,
+  });
+
+  return result.ts;
+}
+
+/**
+ * Post an interactive message to multiple threads
+ */
+export async function postInteractiveToThreads(
+  threads: SlackThread[],
+  text: string,
+  blocks: unknown[]
+): Promise<void> {
+  for (const thread of threads) {
+    await postInteractiveToThread(thread.channel_id, thread.thread_id, text, blocks);
+  }
+}
+
+/**
+ * Update an existing message (e.g., to remove buttons after action)
+ */
+export async function updateMessage(
+  channel: string,
+  ts: string,
+  text: string,
+  blocks?: unknown[]
+): Promise<void> {
+  const client = getSlackClient();
+
+  await client.chat.update({
+    channel,
+    ts,
+    text,
+    blocks: blocks as any,
+  });
+}
+
+/**
  * Helper: Fetch user, group, and channel info for all mentions in messages
  * Returns maps that can be used to replace IDs with names
  */

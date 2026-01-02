@@ -1,6 +1,6 @@
 display_information:
   name: Archie
-  description: "Autonomous Repository Collaborative Hybrid Intelligent Engineer"
+  description: "Autonomous Repository Collaborative Hyper Intelligent Engineer"
   background_color: "#2c2d30"
 features:
   bot_user:
@@ -16,8 +16,11 @@ oauth_config:
       - users:read
       - usergroups:read
 settings:
+  interactivity:
+    is_enabled: true
+    request_url: https://8d5ac472ff08.ngrok-free.app/slack/events
   event_subscriptions:
-    request_url: https://REPLACE-WITH-YOUR-NGROK-URL.ngrok.io/slack/events
+    request_url: https://8d5ac472ff08.ngrok-free.app/slack/events
     bot_events:
       - app_mention
       - message.channels
