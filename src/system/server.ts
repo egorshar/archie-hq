@@ -17,6 +17,7 @@ import { initSlackClient, postToThreads, postInteractiveToThreads, updateMessage
 import { handleSlackMessage, setRepoPaths } from '../slack/events.js';
 import { setSlackCallbacks, handleEditModeApproval, handleEditModeDenial } from './task-runtime.js';
 import { loadMetadata } from './task-manager.js';
+import { logger } from './logger.js';
 
 /**
  * Server configuration
@@ -92,7 +93,7 @@ export async function startServer(config: ServerConfig): Promise<void> {
         thread_ts: event.thread_ts,
       });
     } catch (error) {
-      console.error('[Server] Error handling message:', error);
+      logger.error('Server', 'Error handling message', error);
     }
   });
 
@@ -121,7 +122,7 @@ export async function startServer(config: ServerConfig): Promise<void> {
           thread_ts: event.thread_ts,
         });
       } catch (error) {
-        console.error('[Server] Error handling message:', error);
+        logger.error('Server', 'Error handling message', error);
       }
     }
   });
@@ -134,7 +135,7 @@ export async function startServer(config: ServerConfig): Promise<void> {
     const taskId = action.value;
     const userId = body.user?.id || 'unknown';
 
-    console.log(`[Server] Edit mode approved by ${userId} for task ${taskId}`);
+    logger.server(`Edit mode approved by ${userId} for task ${taskId}`);
 
     try {
       // Update the original message to show approval
@@ -150,7 +151,7 @@ export async function startServer(config: ServerConfig): Promise<void> {
       // Handle the approval
       await handleEditModeApproval(taskId);
     } catch (error) {
-      console.error('[Server] Error handling edit mode approval:', error);
+      logger.error('Server', 'Error handling edit mode approval', error);
     }
   });
 
@@ -162,9 +163,9 @@ export async function startServer(config: ServerConfig): Promise<void> {
     const taskId = action.value;
     const userId = body.user?.id || 'unknown';
 
-    console.log(`[Server] Edit mode denied by ${userId} for task ${taskId}`);
+    logger.server(`Edit mode denied by ${userId} for task ${taskId}`);
 
-    try {
+    try{
       // Update the original message to show denial
       if (body.channel?.id && body.message?.ts) {
         await updateMessage(
@@ -178,26 +179,26 @@ export async function startServer(config: ServerConfig): Promise<void> {
       // Handle the denial
       await handleEditModeDenial(taskId);
     } catch (error) {
-      console.error('[Server] Error handling edit mode denial:', error);
+      logger.error('Server', 'Error handling edit mode denial', error);
     }
   });
 
   // Start the app
   await app!.start(config.port);
 
-  console.log(`AI Engineer server is running on port ${config.port}`);
-  console.log(`Webhook endpoint: POST /slack/events`);
-  console.log(`Health check: GET /health`);
+  logger.plain(`AI Engineer server is running on port ${config.port}`);
+  logger.plain(`Webhook endpoint: POST /slack/events`);
+  logger.plain(`Health check: GET /health`);
 }
 
 /**
  * Graceful shutdown
  */
 export async function stopServer(): Promise<void> {
-  console.log('Shutting down AI Engineer server...');
+  logger.plain('Shutting down AI Engineer server...');
 
   if (app) {
     await app.stop();
-    console.log('Server closed');
+    logger.plain('Server closed');
   }
 }

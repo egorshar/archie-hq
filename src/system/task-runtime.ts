@@ -22,6 +22,7 @@ import { spawnPMAgent, PM_PROMPTS } from '../agents/pm.js';
 import { spawnRepoAgent } from '../agents/repo-agent.js';
 import { getRepoConfig, getAllRepoConfigs } from '../agents/repo-configs.js';
 import type { ToolCallbacks } from '../mcp/tools.js';
+import { logger } from './logger.js';
 
 /**
  * Runtime state for a single task
@@ -106,7 +107,7 @@ function createToolCallbacks(
      * Adds message to target's queue - they'll process it when ready
      */
     onSendMessage: async (target: AgentName, message: string): Promise<string> => {
-      console.log(`[${agentName}] → [${target}]: ${message.substring(0, 100)}...`);
+      logger.agentMessage(agentName, target, message, { truncate: 100 });
 
       runtime.lastActivity = new Date();
 
@@ -115,7 +116,7 @@ function createToolCallbacks(
 
       // Safety check: If sending to PM and task is inactive, reactivate it
       if (target === 'pm-agent' && !isTaskActive(runtime.taskId)) {
-        console.log(`[System] Task was completed but ${agentName} is reporting - reactivating`);
+        logger.system(`Task was completed but ${agentName} is reporting - reactivating`);
         await reactivateTask(runtime.taskId);
         // Get the fresh runtime after reactivation
         const freshRuntime = activeTasks.get(runtime.taskId);
@@ -148,9 +149,9 @@ function createToolCallbacks(
     onLogFinding: async (entry: string, type: FindingType): Promise<void> => {
       // Log full message for decisions, truncate for discoveries
       if (type === 'decision') {
-        console.log(`[${agentName}] [${type}]: ${entry}`);
+        logger.agentFinding(agentName, type, entry);
       } else {
-        console.log(`[${agentName}] [${type}]: ${entry.substring(0, 100)}...`);
+        logger.agentFinding(agentName, type, entry, { truncate: 100 });
       }
 
       runtime.lastActivity = new Date();
@@ -172,7 +173,7 @@ function createToolCallbacks(
      * Post a message to Slack
      */
     onPostToSlack: async (message: string): Promise<void> => {
-      console.log(`[${agentName}] → Slack: ${message}`);
+      logger.agentToSlack(agentName, message);
 
       runtime.lastActivity = new Date();
 
@@ -180,7 +181,7 @@ function createToolCallbacks(
       if (slackPostCallback) {
         await slackPostCallback(runtime.taskId, message);
       } else {
-        console.log(`[SLACK POST] ${message}`);
+        logger.slack(`POST: ${message}`);
       }
 
       // Log with arrow prefix to show this is sent to user via Slack
@@ -193,7 +194,7 @@ function createToolCallbacks(
      * (message already logged by post_to_slack if using report_completion tool)
      */
     onReportCompletion: async (): Promise<void> => {
-      console.log(`[${agentName}] Reporting completion`);
+      logger.agentAction(agentName, 'Reporting completion', '');
 
       runtime.lastActivity = new Date();
       runtime.completionDetected = true;
@@ -209,7 +210,7 @@ function createToolCallbacks(
      * Assign a task owner (PM only)
      */
     onAssignTaskOwner: async (agent: AgentName): Promise<void> => {
-      console.log(`[${agentName}] Assigning task owner: ${agent}`);
+      logger.agentAction(agentName, 'Assigning task owner', agent);
 
       runtime.lastActivity = new Date();
 
@@ -230,7 +231,7 @@ function createToolCallbacks(
         runtime.metadata = metadata;
       }
 
-      console.log(`[System] Task ${runtime.taskId} owner set to ${agent}`);
+      logger.system(`Task ${runtime.taskId} owner set to ${agent}`);
     },
 
     /**
@@ -238,7 +239,7 @@ function createToolCallbacks(
      * Logs the request, posts to Slack with buttons, and pauses the task
      */
     onRequestEditMode: async (reason: string): Promise<void> => {
-      console.log(`[${agentName}] Requesting edit mode: ${reason}`);
+      logger.agentAction(agentName, 'Requesting edit mode', reason);
 
       runtime.lastActivity = new Date();
 
@@ -318,7 +319,9 @@ async function ensureAgentSpawned(runtime: TaskRuntimeState, agentName: AgentNam
 
   const onSessionId = (sessionId: string) => {
     runtime.sessions.set(agentName, sessionId);
-    storeAgentSession(runtime.taskId, agentName, sessionId).catch(console.error);
+    storeAgentSession(runtime.taskId, agentName, sessionId).catch((err) =>
+      logger.error('task-runtime', 'Failed to store agent session', err)
+    );
   };
 
   // Get existing session ID if available
@@ -354,9 +357,9 @@ async function ensureAgentSpawned(runtime: TaskRuntimeState, agentName: AgentNam
 
   // Log spawning (single consolidated message)
   if (existingSessionId) {
-    console.log(`[System] Resumed ${agentName} for task ${runtime.taskId} (session: ${existingSessionId})`);
+    logger.system(`Resumed ${agentName} for task ${runtime.taskId} (session: ${existingSessionId})`);
   } else {
-    console.log(`[System] Spawned ${agentName} for task ${runtime.taskId}`);
+    logger.system(`Spawned ${agentName} for task ${runtime.taskId}`);
   }
 }
 
@@ -365,17 +368,17 @@ async function ensureAgentSpawned(runtime: TaskRuntimeState, agentName: AgentNam
  * Used both for Slack-triggered reactivation and internal safety checks
  */
 export async function reactivateTask(taskId: string): Promise<void> {
-  console.log(`[System] Reactivating completed task ${taskId}`);
+  logger.system(`Reactivating completed task ${taskId}`);
 
   // Check if task is actually inactive
   if (isTaskActive(taskId)) {
-    console.log(`[System] Task ${taskId} is already active, skipping reactivation`);
+    logger.system(`Task ${taskId} is already active, skipping reactivation`);
     return;
   }
 
   // Ensure Slack callbacks are set
   if (!slackPostCallback) {
-    console.error(`[System] Cannot reactivate task ${taskId} - Slack callbacks not set`);
+    logger.error('System', `Cannot reactivate task ${taskId} - Slack callbacks not set`);
     return;
   }
 
@@ -454,7 +457,7 @@ export async function startTask(taskId: string): Promise<void> {
 export async function notifyNewUserInput(taskId: string): Promise<void> {
   const runtime = activeTasks.get(taskId);
   if (!runtime) {
-    console.warn(`TaskRuntime for ${taskId} not found, cannot notify`);
+    logger.warn('task-runtime', `TaskRuntime for ${taskId} not found, cannot notify`);
     return;
   }
 
@@ -471,7 +474,7 @@ export async function notifyNewUserInput(taskId: string): Promise<void> {
 export async function handleStatusRequest(taskId: string): Promise<void> {
   const runtime = activeTasks.get(taskId);
   if (!runtime) {
-    console.warn(`TaskRuntime for ${taskId} not found, cannot handle status`);
+    logger.warn('task-runtime', `TaskRuntime for ${taskId} not found, cannot handle status`);
     return;
   }
 
@@ -493,7 +496,7 @@ export async function stopTask(taskId: string): Promise<void> {
 
   // Prevent multiple concurrent stops
   if (!runtime.isActive) {
-    console.log(`[System] Task ${taskId} already stopped`);
+    logger.system(`Task ${taskId} already stopped`);
     return;
   }
 
@@ -510,7 +513,7 @@ export async function stopTask(taskId: string): Promise<void> {
   // Remove from active tasks
   activeTasks.delete(taskId);
 
-  console.log(`[System] Task ${taskId} stopped`);
+  logger.system(`Task ${taskId} stopped`);
 }
 
 /**
@@ -524,7 +527,7 @@ export async function completeTask(taskId: string): Promise<void> {
 
   // Prevent multiple concurrent completions
   if (!runtime.isActive) {
-    console.log(`[System] Task ${taskId} already completed/stopped`);
+    logger.system(`Task ${taskId} already completed/stopped`);
     return;
   }
 
@@ -541,7 +544,7 @@ export async function completeTask(taskId: string): Promise<void> {
   // Remove from active tasks
   activeTasks.delete(taskId);
 
-  console.log(`[System] Task ${taskId} completed`);
+  logger.system(`Task ${taskId} completed`);
 }
 
 /**
@@ -552,7 +555,7 @@ export async function handleEditModeApproval(taskId: string): Promise<void> {
   // Load metadata and set edit_allowed
   const metadata = await loadMetadata(taskId);
   if (!metadata) {
-    console.error(`[System] Task ${taskId} not found for edit approval`);
+    logger.error('System', `Task ${taskId} not found for edit approval`);
     return;
   }
 
@@ -585,7 +588,7 @@ export async function handleEditModeDenial(taskId: string): Promise<void> {
 async function reactivateTaskWithMessage(taskId: string, message: string): Promise<void> {
   // Ensure Slack callbacks are set
   if (!slackPostCallback) {
-    console.error(`[System] Cannot reactivate task ${taskId} - Slack callbacks not set`);
+    logger.error('System', `Cannot reactivate task ${taskId} - Slack callbacks not set`);
     return;
   }
 

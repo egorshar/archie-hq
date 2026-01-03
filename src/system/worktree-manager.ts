@@ -9,6 +9,7 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import * as path from 'path';
 import * as fs from 'fs/promises';
+import { logger } from './logger.js';
 
 const execAsync = promisify(exec);
 
@@ -21,11 +22,17 @@ export interface WorktreeResult {
  * Execute a git command in a directory
  */
 async function gitExec(cwd: string, args: string): Promise<string> {
-  const { stdout, stderr } = await execAsync(`git ${args}`, { cwd });
-  if (stderr && !stderr.includes('Fetching') && !stderr.includes('From ')) {
-    console.log(`[worktree-manager] git stderr: ${stderr}`);
+  try {
+    const { stdout } = await execAsync(`git ${args}`, { cwd });
+    return stdout.trim();
+  } catch (error: any) {
+    // Only log stderr when command fails
+    if (error.stderr) {
+      logger.error('worktree-manager', `git command failed: git ${args}`);
+      logger.error('worktree-manager', `stderr: ${error.stderr}`);
+    }
+    throw error;
   }
-  return stdout.trim();
 }
 
 /**
@@ -49,7 +56,7 @@ async function getDefaultBranch(repoPath: string): Promise<string> {
         return 'master';
       } catch {
         // Last resort fallback
-        console.log(`[worktree-manager] Could not detect default branch, falling back to 'main'`);
+        logger.worktree(`Could not detect default branch, falling back to 'main'`);
         return 'main';
       }
     }
@@ -76,20 +83,16 @@ export async function setupWorktree(
   reposPath: string,
   baseRepoPath: string
 ): Promise<WorktreeResult> {
-  console.log(`[worktree-manager] Setting up worktree for ${repoKey} in task ${taskId}`);
-
   // 1. Detect the default branch (main, master, etc.)
   const defaultBranch = await getDefaultBranch(baseRepoPath);
-  console.log(`[worktree-manager] Detected default branch: ${defaultBranch}`);
 
   // 2. Fetch latest commits from origin
-  console.log(`[worktree-manager] Fetching origin ${defaultBranch} in ${baseRepoPath}`);
   try {
     await gitExec(baseRepoPath, `fetch origin ${defaultBranch}`);
   } catch (error) {
     // If fetch fails (e.g., no network), log but continue
     // The worktree will be created from whatever origin/<branch> exists
-    console.log(`[worktree-manager] Warning: fetch failed, using existing origin/${defaultBranch}: ${error}`);
+    logger.worktree(`Fetch failed for ${repoKey}, using existing origin/${defaultBranch}`);
   }
 
   // 3. Create branch name
@@ -103,7 +106,7 @@ export async function setupWorktree(
   const worktreePath = path.join(reposPath, repoKey);
 
   // 5. Create worktree with new branch from origin/<defaultBranch>
-  console.log(`[worktree-manager] Creating worktree at ${worktreePath} with branch ${featureBranch} from origin/${defaultBranch}`);
+  logger.worktree(`Creating worktree for ${repoKey} (${featureBranch})`);
 
   try {
     await gitExec(baseRepoPath, `worktree add -b ${featureBranch} "${worktreePath}" origin/${defaultBranch}`);
@@ -111,7 +114,7 @@ export async function setupWorktree(
     const errorMessage = error instanceof Error ? error.message : String(error);
     // If branch already exists, try to use it
     if (errorMessage.includes('already exists')) {
-      console.log(`[worktree-manager] Branch ${featureBranch} already exists, creating worktree with existing branch`);
+      logger.worktree(`Branch ${featureBranch} already exists, creating worktree with existing branch`);
       // First check if there's already a worktree for this branch
       const worktreeList = await gitExec(baseRepoPath, 'worktree list --porcelain');
       if (worktreeList.includes(featureBranch)) {
@@ -121,7 +124,7 @@ export async function setupWorktree(
         for (let i = 0; i < lines.length; i++) {
           if (lines[i].startsWith('worktree ') && lines[i + 2]?.includes(featureBranch)) {
             const existingPath = lines[i].replace('worktree ', '');
-            console.log(`[worktree-manager] Found existing worktree at ${existingPath}`);
+            logger.worktree(`Found existing worktree at ${existingPath}`);
             return {
               worktree_path: existingPath,
               feature_branch: featureBranch,
@@ -135,8 +138,6 @@ export async function setupWorktree(
       throw error;
     }
   }
-
-  console.log(`[worktree-manager] Worktree created successfully`);
 
   return {
     worktree_path: worktreePath,
