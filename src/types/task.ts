@@ -25,6 +25,8 @@ export interface RepositoryInfo {
   base_sha?: string;
   worktree_path?: string;     // Path to active worktree (edit mode)
   feature_branch?: string;    // Branch name in worktree (feature/task-{id})
+  pr_number?: number;         // PR number for this repo in this task
+  last_processed_comment_id?: number;  // Last processed PR comment ID (for triage)
 }
 
 export interface TaskMetadata {
@@ -48,7 +50,7 @@ export interface LogEntry {
 }
 
 export interface TriageResult {
-  action: 'new_task' | 'existing_task' | 'status_request' | 'cancel_task' | 'noop';
+  action: 'new_task' | 'existing_task' | 'cancel_task' | 'noop';
   task_id?: string;
   confidence: 'high' | 'medium' | 'low';
   similar_tasks?: string[];

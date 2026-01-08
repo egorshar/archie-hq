@@ -5,7 +5,7 @@
  */
 
 import type { SlackMessage, SlackThread } from '../types/index.js';
-import { triageMessage } from '../agents/index.js';
+import { triageSlackMessage } from '../agents/index.js';
 import {
   createTask,
   appendSlackMessage,
@@ -16,8 +16,7 @@ import {
 import {
   initializeTaskRuntime,
   startTask,
-  notifyNewUserInput,
-  handleStatusRequest,
+  notifyNewInput,
   stopTask,
   isTaskActive,
   reactivateTask,
@@ -86,7 +85,7 @@ export async function handleSlackMessage(event: {
   };
 
   // Always run triage to understand user intent
-  const triageResult = await triageMessage(message, threadHistory);
+  const triageResult = await triageSlackMessage(message, threadHistory);
 
   // Route based on intent
   switch (triageResult.action) {
@@ -97,12 +96,6 @@ export async function handleSlackMessage(event: {
     case 'existing_task':
       if (triageResult.task_id) {
         await handleExistingTask(triageResult.task_id, message, threadId, threadHistory, channelInfo);
-      }
-      break;
-
-    case 'status_request':
-      if (triageResult.task_id) {
-        await handleStatusRequest(triageResult.task_id);
       }
       break;
 
@@ -231,7 +224,7 @@ async function handleExistingTask(
   }
 
   // Notify PM of new input
-  await notifyNewUserInput(taskId);
+  await notifyNewInput(taskId);
 }
 
 /**
