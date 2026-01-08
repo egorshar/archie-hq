@@ -1,7 +1,7 @@
 {
-  "name": "ai-engineer",
+  "name": "archie-hq",
   "version": "0.1.0",
-  "description": "Multi-agent AI software engineering system",
+  "description": "Archie - Autonomous Repository Collaborative Hyper Intelligent Engineer",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
