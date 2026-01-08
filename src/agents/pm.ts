@@ -12,9 +12,9 @@ import type { AgentHandle } from "../types/agent.js";
 import { getSharedPath } from "../system/task-manager.js";
 import {
   MessageQueue,
-  createAgentInputGenerator,
+  createRecoverableInputGenerator,
 } from "../system/message-queue.js";
-import { createPMAgentMcpServer, type ToolCallbacks } from "../mcp/tools.js";
+import { createPMAgentMcpServer, type PMToolCallbacks } from "../mcp/tools.js";
 import { processAgentEventForLogging, logger } from "../system/logger.js";
 import { getAllRepoConfigs } from "./repo-configs.js";
 import { loadPrompt } from "../utils/prompt-loader.js";
@@ -41,11 +41,14 @@ async function generatePMSystemPrompt(): Promise<string> {
 /**
  * Spawn a PM agent with streaming input from a message queue
  * Returns an AgentHandle to track the running agent
+ *
+ * Includes automatic session recovery: if resuming a session fails,
+ * it will retry once with a fresh session (consumed messages are replayed).
  */
 export async function spawnPMAgent(
   metadata: TaskMetadata,
   queue: MessageQueue,
-  callbacks: ToolCallbacks,
+  callbacks: PMToolCallbacks,
   onSessionId: (sessionId: string) => void,
   existingSessionId?: string,
   agentName: string = "pm-agent"
@@ -76,55 +79,50 @@ Files available to read (in your working directory):
 - metadata.json (task metadata)
 `;
 
-  // Create streaming input generator from queue
-  const inputGenerator = createAgentInputGenerator(queue);
-
-  // Run the agent with streaming input - this runs until queue is stopped
-  const agentQuery = query({
-    prompt: inputGenerator as any,
-    options: {
-      model: (process.env.SONNET_MODEL || "claude-sonnet-4-5-20250929") as any,
-      betas: ["context-1m-2025-08-07"],
-      systemPrompt: `${PM_SYSTEM_PROMPT}\n\nCurrent Task Context:\n${context}`,
-      cwd: sharedPath,
-      executable: "node",
-      pathToClaudeCodeExecutable: process.env.CLAUDE_PATH || "claude",
-      env: {
-        NODE_ENV: process.env.NODE_ENV || "development",
-        ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
-        PATH: process.env.PATH,
-      },
-      resume: existingSessionId,
-      maxTurns: 100,
-      permissionMode: "dontAsk",
-      mcpServers: {
-        "pm-agent-tools": mcpServer,
-      },
-      allowedTools: [
-        "mcp__pm-agent-tools__send_message_to_agent",
-        "mcp__pm-agent-tools__post_to_slack",
-        "mcp__pm-agent-tools__assign_task_owner",
-        "mcp__pm-agent-tools__report_completion",
-        "mcp__pm-agent-tools__request_edit_mode",
-        // GitHub tools - only available when edit mode is approved
-        ...(metadata.edit_allowed
-          ? [
-              "mcp__pm-agent-tools__push_branch",
-              "mcp__pm-agent-tools__create_pull_request",
-              "mcp__pm-agent-tools__get_pr_status",
-              "mcp__pm-agent-tools__get_pr_reviews",
-              "mcp__pm-agent-tools__update_pr_description",
-              "mcp__pm-agent-tools__add_pr_comment",
-              "mcp__pm-agent-tools__add_review_comment",
-              "mcp__pm-agent-tools__resolve_review_thread",
-              "mcp__pm-agent-tools__request_re_review",
-            ]
-          : []),
-        "Read",
-        "Glob",
-        "Grep",
-      ],
+  // Build query options (session ID may change on retry)
+  const buildQueryOptions = (sessionId?: string) => ({
+    model: (process.env.SONNET_MODEL || "claude-sonnet-4-5-20250929") as any,
+    betas: ["context-1m-2025-08-07"] as any,
+    systemPrompt: `${PM_SYSTEM_PROMPT}\n\nCurrent Task Context:\n${context}`,
+    cwd: sharedPath,
+    executable: "node" as const,
+    pathToClaudeCodeExecutable: process.env.CLAUDE_PATH || "claude",
+    env: {
+      NODE_ENV: process.env.NODE_ENV || "development",
+      ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
+      PATH: process.env.PATH,
     },
+    resume: sessionId,
+    maxTurns: 100,
+    permissionMode: "dontAsk" as const,
+    mcpServers: {
+      "pm-agent-tools": mcpServer,
+    },
+    allowedTools: [
+      "mcp__pm-agent-tools__send_message_to_agent",
+      "mcp__pm-agent-tools__post_to_slack",
+      "mcp__pm-agent-tools__assign_task_owner",
+      "mcp__pm-agent-tools__report_completion",
+      "mcp__pm-agent-tools__request_edit_mode",
+      // GitHub tools - only available when edit mode is approved
+      ...(metadata.edit_allowed
+        ? [
+            "mcp__pm-agent-tools__push_branch",
+            "mcp__pm-agent-tools__create_pull_request",
+            "mcp__pm-agent-tools__get_pr_status",
+            "mcp__pm-agent-tools__get_pr_reviews",
+            "mcp__pm-agent-tools__update_pr_description",
+            "mcp__pm-agent-tools__add_pr_comment",
+            "mcp__pm-agent-tools__add_review_comment",
+            "mcp__pm-agent-tools__resolve_review_thread",
+            "mcp__pm-agent-tools__request_re_review",
+            "mcp__pm-agent-tools__trigger_merge_check",
+          ]
+        : []),
+      "Read",
+      "Glob",
+      "Grep",
+    ],
   });
 
   // Create handle to track agent state
@@ -133,21 +131,53 @@ Files available to read (in your working directory):
     isRunning: true,
   };
 
-  // Process agent output in background
-  handle.running = (async () => {
-    try {
-      for await (const event of agentQuery) {
-        // Capture session ID
-        if (event.type === "system" && event.subtype === "init") {
-          onSessionId(event.session_id);
-        }
+  // Create recoverable input generator (tracks consumed messages for retry)
+  const recoverable = createRecoverableInputGenerator(queue);
 
-        // Log file operation tool calls
-        processAgentEventForLogging(event, agentName, [sharedPath]);
-      }
-    } catch (error) {
-      if (!queue.isStopped()) {
-        logger.error(agentName, 'Error', error);
+  // Process agent output in background with session recovery
+  handle.running = (async () => {
+    let sessionId = existingSessionId;
+    let hasRetried = false;
+
+    try {
+      while (true) {
+        try {
+          const agentQuery = query({
+            prompt: recoverable.generator() as any,
+            options: buildQueryOptions(sessionId),
+          });
+
+          for await (const event of agentQuery) {
+            // Capture session ID
+            if (event.type === "system" && event.subtype === "init") {
+              onSessionId(event.session_id);
+            }
+
+            // Log file operation tool calls
+            processAgentEventForLogging(event, agentName, [sharedPath]);
+          }
+
+          // Clean exit - loop completed normally
+          return;
+        } catch (error) {
+          // If we had a session ID, retry once without it
+          if (sessionId && !hasRetried) {
+            logger.warn(
+              agentName,
+              `Agent failed with session ${sessionId}, retrying fresh`
+            );
+            recoverable.reset(); // Put consumed messages back in queue
+            sessionId = undefined;
+            hasRetried = true;
+            continue;
+          }
+
+          // Already retried or no session - give up
+          if (!queue.isStopped()) {
+            logger.error(agentName, "Error", error);
+          }
+          return;
+        }
       }
     } finally {
       handle.isRunning = false;
