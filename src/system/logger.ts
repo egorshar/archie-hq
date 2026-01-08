@@ -257,6 +257,17 @@ export class Logger {
   plain(message: string): void {
     console.log(message);
   }
+
+  /**
+   * Log a debug message with an object (logged as-is for console inspection)
+   */
+  debug(prefix: string, message: string, data?: any): void {
+    if (data !== undefined) {
+      console.log(`${c.dim('[' + prefix + ']')} ${message}`, data);
+    } else {
+      console.log(`${c.dim('[' + prefix + ']')} ${message}`);
+    }
+  }
 }
 
 /**
