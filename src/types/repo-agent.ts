@@ -21,4 +21,10 @@ export interface RepoAgentConfig {
 
   /** Detailed expertise, used in agent's own prompt, e.g., 'APIs, databases, authentication, background jobs' */
   expertise: string;
+
+  /** GitHub repository identifier, e.g., 'sweatco/backend' */
+  githubRepo: string;
+
+  /** Base branch for PRs and merges, e.g., 'main', 'master', 'develop'. Defaults to 'main' if not specified. */
+  baseBranch?: string;
 }
