@@ -45,7 +45,7 @@ function loadConfig(): ServerConfig {
  */
 async function main(): Promise<void> {
   logger.plain('Archie - Autonomous Repository Collaborative Hyper Intelligent Engineer');
-  logger.plain('======================================================');
+  logger.plain('=======================================================================');
   logger.plain('');
 
   // Fix PATH for spawned processes - npm/tsx strips PATH to node_modules only
