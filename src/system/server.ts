@@ -1,7 +1,7 @@
 /**
  * Main Server
  *
- * Entry point for the AI Engineer system.
+ * Entry point for the Archie system.
  * Uses Slack Bolt in HTTP mode for webhook events.
  */
 
@@ -230,7 +230,7 @@ export async function startServer(config: ServerConfig): Promise<void> {
   // Start the app
   await app!.start(config.port);
 
-  logger.plain(`AI Engineer server is running on port ${config.port}`);
+  logger.plain(`Archie server is running on port ${config.port}`);
   logger.plain(`Slack webhook: POST /slack/events`);
   logger.plain(`GitHub webhook: POST /github/webhooks`);
   logger.plain(`Health check: GET /health`);
@@ -240,7 +240,7 @@ export async function startServer(config: ServerConfig): Promise<void> {
  * Graceful shutdown
  */
 export async function stopServer(): Promise<void> {
-  logger.plain('Shutting down AI Engineer server...');
+  logger.plain('Shutting down Archie server...');
 
   if (app) {
     await app.stop();

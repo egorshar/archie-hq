@@ -1,5 +1,5 @@
 /**
- * AI Engineer - Multi-Agent Software Engineering System
+ * Archie - Autonomous Repository Collaborative Hyper Intelligent Engineer
  *
  * Main entry point for the application.
  */
@@ -44,7 +44,7 @@ function loadConfig(): ServerConfig {
  * Main function
  */
 async function main(): Promise<void> {
-  logger.plain('AI Engineer - Multi-Agent Software Engineering System');
+  logger.plain('Archie - Autonomous Repository Collaborative Hyper Intelligent Engineer');
   logger.plain('======================================================');
   logger.plain('');
 
