@@ -1,0 +1,43 @@
+# Dependencies
+node_modules/
+
+# Build output (will be rebuilt in container)
+dist/
+
+# Sessions (mounted as volume)
+sessions/
+
+# Repos (mounted as volume)
+repos/
+
+# Secrets (mounted as volume)
+secrets/
+*.pem
+
+# Environment files (passed via env_file or environment)
+.env
+.env.local
+.env.*.local
+
+# Development files
+.git/
+.gitignore
+*.md
+docs/
+plans/
+
+# IDE
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# Testing
+coverage/
+.nyc_output/
