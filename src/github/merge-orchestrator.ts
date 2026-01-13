@@ -17,11 +17,11 @@ export interface MergeCheckResult {
   conflicts: string[]; // PRs with merge conflicts
 }
 
-import { loadMetadata } from '../system/task-manager.js';
-import { notifyNewInput, isTaskActive, reactivateTask } from '../system/task-runtime.js';
+import { loadMetadata, appendAgentFinding } from '../system/task-manager.js';
 import { createGitHubClient, type GitHubClient } from './client.js';
 import { getRepoConfig } from '../agents/repo-configs.js';
 import { logger } from '../system/logger.js';
+import { routeToSpawnOrNotify } from '../workers/triage-worker.js';
 import type { PRStatus } from '../mcp/tools.js';
 import type { TaskMetadata } from '../types/index.js';
 
@@ -234,6 +234,7 @@ async function fetchAllPRStatuses(
 
 /**
  * Notify PM about PRs with conflicts
+ * Logs to knowledge.log and routes through spawn queue
  */
 async function notifyPMAboutConflicts(
   taskId: string,
@@ -247,19 +248,16 @@ async function notifyPMAboutConflicts(
 
   logger.system(`Task ${taskId}: Notifying PM about conflicts`);
 
-  // Ensure task is active
-  if (!isTaskActive(taskId)) {
-    await reactivateTask(taskId);
-  }
-
-  const { appendAgentFinding } = await import('../system/task-manager.js');
+  // Log to knowledge.log (PM will read this)
   await appendAgentFinding(taskId, 'system', message, 'blocker');
 
-  await notifyNewInput(taskId);
+  // Route through spawn queue
+  await routeToSpawnOrNotify(taskId);
 }
 
 /**
  * Notify PM that PRs were merged (or failed to merge)
+ * Logs to knowledge.log and routes through spawn queue
  */
 async function notifyPMAboutMerge(
   taskId: string,
@@ -283,15 +281,10 @@ async function notifyPMAboutMerge(
 
   logger.system(`Task ${taskId}: Notifying PM about merge results`);
 
-  // Ensure task is active
-  if (!isTaskActive(taskId)) {
-    await reactivateTask(taskId);
-  }
-
-  // Append to knowledge log
-  const { appendAgentFinding } = await import('../system/task-manager.js');
+  // Log to knowledge.log (PM will read this)
   const findingType = failedPRs.length > 0 ? 'blocker' : 'completion';
   await appendAgentFinding(taskId, 'system', message, findingType);
 
-  await notifyNewInput(taskId);
+  // Route through spawn queue
+  await routeToSpawnOrNotify(taskId);
 }

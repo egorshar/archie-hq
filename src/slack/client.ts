@@ -12,6 +12,7 @@ import { logger } from '../system/logger.js';
 
 let slackClient: WebClient | null = null;
 let botUserId: string | null = null;
+let botId: string | null = null;
 
 /**
  * Initialize the Slack client and fetch bot user ID
@@ -19,11 +20,12 @@ let botUserId: string | null = null;
 export async function initSlackClient(token: string): Promise<void> {
   slackClient = new WebClient(token);
 
-  // Fetch bot's user ID for filtering bot messages
+  // Fetch bot's user ID and bot ID for filtering bot messages
   try {
     const authResult = await slackClient.auth.test();
     botUserId = authResult.user_id as string;
-    logger.slack(`Bot user ID: ${botUserId}`);
+    botId = authResult.bot_id as string | undefined ?? null;
+    logger.slack(`Bot user ID: ${botUserId}, bot ID: ${botId}`);
   } catch (error) {
     logger.warn('Slack', 'Failed to get bot user ID', error);
   }
@@ -34,6 +36,13 @@ export async function initSlackClient(token: string): Promise<void> {
  */
 export function getBotUserId(): string | null {
   return botUserId;
+}
+
+/**
+ * Get the bot's bot ID (different from user ID)
+ */
+export function getBotId(): string | null {
+  return botId;
 }
 
 /**

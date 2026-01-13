@@ -6,11 +6,11 @@
  * Each agent has its own queue and runs with a streaming generator.
  */
 
-import { exec } from 'child_process';
-import { promisify } from 'util';
-import type { TaskMetadata, AgentName, FindingType } from '../types/index.js';
-import type { AgentHandle } from '../types/agent.js';
-import { MessageQueue } from './message-queue.js';
+import { exec } from "child_process";
+import { promisify } from "util";
+import type { AgentName, FindingType } from "../types/index.js";
+import type { AgentHandle } from "../types/agent.js";
+import { MessageQueue } from "./message-queue.js";
 import {
   loadMetadata,
   saveMetadata,
@@ -19,14 +19,32 @@ import {
   addParticipant,
   storeAgentSession,
   updateTaskStatus,
-} from './task-manager.js';
-import { spawnPMAgent, PM_PROMPTS } from '../agents/pm.js';
-import { spawnRepoAgent } from '../agents/repo-agent.js';
-import { getRepoConfig, getAllRepoConfigs } from '../agents/repo-configs.js';
-import type { PMToolCallbacks, PRStatus, PRReview } from '../mcp/tools.js';
-import { GitHubClient, createGitHubClient } from '../github/client.js';
-import { triggerMergeCheck } from '../github/merge-orchestrator.js';
-import { logger } from './logger.js';
+} from "./task-manager.js";
+import { spawnPMAgent, PM_PROMPTS } from "../agents/pm.js";
+import { spawnRepoAgent } from "../agents/repo-agent.js";
+import { getRepoConfig, getAllRepoConfigs } from "../agents/repo-configs.js";
+import type { PMToolCallbacks, PRStatus, PRReview } from "../mcp/tools.js";
+import { GitHubClient, createGitHubClient } from "../github/client.js";
+import { triggerMergeCheck } from "../github/merge-orchestrator.js";
+import { logger } from "./logger.js";
+import {
+  activeTasks,
+  isTaskActive,
+  type TaskRuntimeState,
+} from "./active-tasks.js";
+import { routeToSpawnOrNotify } from "../workers/triage-worker.js";
+
+// Re-export from active-tasks for backwards compatibility
+export {
+  isTaskActive,
+  getActiveTaskIds,
+  getTaskRuntime,
+  waitForTaskCompletion,
+  isAgentRunning,
+  getAgentStatus,
+  findTaskIdByThread,
+} from "./active-tasks.js";
+export type { TaskRuntimeState } from "./active-tasks.js";
 
 const execAsync = promisify(exec);
 
@@ -34,73 +52,34 @@ const execAsync = promisify(exec);
 let githubClient: GitHubClient | null | undefined = undefined;
 
 /**
- * Runtime state for a single task
- */
-export interface TaskRuntimeState {
-  taskId: string;
-  metadata: TaskMetadata;
-
-  // Message queues for each agent (dynamic, keyed by agent name)
-  queues: Map<AgentName, MessageQueue>;
-
-  // Agent handles for tracking running agents (dynamic, keyed by agent name)
-  handles: Map<AgentName, AgentHandle>;
-
-  // Session IDs for resume capability (dynamic, keyed by agent name)
-  sessions: Map<AgentName, string>;
-
-  // Track which agents have been spawned (dynamic, keyed by agent name)
-  spawned: Set<AgentName>;
-
-  // Activity tracking
-  lastActivity: Date;
-  completionDetected: boolean;
-  isActive: boolean;
-}
-
-/**
- * Global map of active tasks
- */
-const activeTasks = new Map<string, TaskRuntimeState>();
-
-/**
  * Callback for Slack posting (injected by server)
  */
-let slackPostCallback: ((taskId: string, message: string) => Promise<void>) | null = null;
+let slackPostCallback:
+  | ((taskId: string, message: string) => Promise<void>)
+  | null = null;
 
 /**
  * Callback for Slack interactive messages (injected by server)
  */
-let slackPostInteractiveCallback: ((
-  taskId: string,
-  text: string,
-  blocks: unknown[]
-) => Promise<void>) | null = null;
+let slackPostInteractiveCallback:
+  | ((taskId: string, text: string, blocks: unknown[]) => Promise<void>)
+  | null = null;
 
 /**
  * Set the Slack callback functions
  */
 export function setSlackCallbacks(
   postFn: (taskId: string, message: string) => Promise<void>,
-  postInteractiveFn?: (taskId: string, text: string, blocks: unknown[]) => Promise<void>
+  postInteractiveFn?: (
+    taskId: string,
+    text: string,
+    blocks: unknown[]
+  ) => Promise<void>
 ): void {
   slackPostCallback = postFn;
   if (postInteractiveFn) {
     slackPostInteractiveCallback = postInteractiveFn;
   }
-}
-
-/**
- * Find task ID by thread ID by iterating over active tasks
- */
-export function findTaskIdByThread(threadId: string): string | null {
-  for (const [taskId, runtime] of activeTasks.entries()) {
-    const hasThread = runtime.metadata.slack_threads.some((t) => t.thread_id === threadId);
-    if (hasThread) {
-      return taskId;
-    }
-  }
-  return null;
 }
 
 /**
@@ -125,29 +104,36 @@ function createToolCallbacks(
      * Send a message to another agent
      * Adds message to target's queue - they'll process it when ready
      */
-    onSendMessage: async (target: AgentName, message: string): Promise<string> => {
+    onSendMessage: async (
+      target: AgentName,
+      message: string
+    ): Promise<string> => {
       logger.agentMessage(agentName, target, message, { truncate: 100 });
 
       runtime.lastActivity = new Date();
 
       // Log agent-to-agent communication to shared knowledge
-      await appendAgentFinding(runtime.taskId, agentName, `→ ${target}: ${message}`, 'decision');
+      await appendAgentFinding(
+        runtime.taskId,
+        agentName,
+        `→ ${target}: ${message}`,
+        "decision"
+      );
 
-      // Safety check: If sending to PM and task is inactive, reactivate it
-      if (target === 'pm-agent' && !isTaskActive(runtime.taskId)) {
-        logger.system(`Task was completed but ${agentName} is reporting - reactivating`);
-        await reactivateTask(runtime.taskId);
-        // Get the fresh runtime after reactivation
-        const freshRuntime = activeTasks.get(runtime.taskId);
-        if (!freshRuntime) {
-          throw new Error(`Failed to reactivate task ${runtime.taskId}`);
-        }
-        // Update the closure's runtime reference
-        Object.assign(runtime, freshRuntime);
+      // Safety check: If task is inactive, route through spawn queue to wake PM
+      if (!isTaskActive(runtime.taskId)) {
+        logger.warn(
+          "task-runtime",
+          `Task ${runtime.taskId} is inactive but ${agentName} is sending message - routing to spawn queue`
+        );
+        await routeToSpawnOrNotify(runtime.taskId);
+        return `Message logged to knowledge.log. PM will be notified.`;
       }
 
       // Get the target queue (triage-agent doesn't have a queue)
-      const targetQueue = runtime.queues.get(target as 'pm-agent' | 'backend-agent' | 'mobile-agent');
+      const targetQueue = runtime.queues.get(
+        target as "pm-agent" | "backend-agent" | "mobile-agent"
+      );
       if (!targetQueue) {
         throw new Error(`No queue found for agent ${target}`);
       }
@@ -167,7 +153,7 @@ function createToolCallbacks(
      */
     onLogFinding: async (entry: string, type: FindingType): Promise<void> => {
       // Log full message for decisions, truncate for discoveries
-      if (type === 'decision') {
+      if (type === "decision") {
         logger.agentFinding(agentName, type, entry);
       } else {
         logger.agentFinding(agentName, type, entry, { truncate: 100 });
@@ -176,16 +162,6 @@ function createToolCallbacks(
       runtime.lastActivity = new Date();
 
       await appendAgentFinding(runtime.taskId, agentName, entry, type);
-
-      // Check for completion
-      if (type === 'completion') {
-        runtime.completionDetected = true;
-        // Notify PM about completion
-        const pmQueue = runtime.queues.get('pm-agent');
-        if (pmQueue) {
-          pmQueue.addMessage(PM_PROMPTS.taskCompleted);
-        }
-      }
     },
 
     /**
@@ -204,7 +180,12 @@ function createToolCallbacks(
       }
 
       // Log with arrow prefix to show this is sent to user via Slack
-      await appendAgentFinding(runtime.taskId, agentName, `→ Slack: ${message}`, 'decision');
+      await appendAgentFinding(
+        runtime.taskId,
+        agentName,
+        `→ Slack: ${message}`,
+        "decision"
+      );
     },
 
     /**
@@ -213,13 +194,17 @@ function createToolCallbacks(
      * (message already logged by post_to_slack if using report_completion tool)
      */
     onReportCompletion: async (): Promise<void> => {
-      logger.agentAction(agentName, 'Reporting completion', '');
+      logger.agentAction(agentName, "Reporting completion", "");
 
       runtime.lastActivity = new Date();
-      runtime.completionDetected = true;
 
       // Log a brief completion marker (not the full message since it was already posted to Slack)
-      await appendAgentFinding(runtime.taskId, agentName, 'Task completed', 'completion');
+      await appendAgentFinding(
+        runtime.taskId,
+        agentName,
+        "Task completed",
+        "completion"
+      );
 
       // Complete the task immediately
       await completeTask(runtime.taskId);
@@ -229,7 +214,7 @@ function createToolCallbacks(
      * Assign a task owner (PM only)
      */
     onAssignTaskOwner: async (agent: AgentName): Promise<void> => {
-      logger.agentAction(agentName, 'Assigning task owner', agent);
+      logger.agentAction(agentName, "Assigning task owner", agent);
 
       runtime.lastActivity = new Date();
 
@@ -241,7 +226,7 @@ function createToolCallbacks(
         runtime.taskId,
         agentName,
         `Assigned ${agent} as task owner`,
-        'decision'
+        "decision"
       );
 
       // Reload metadata to reflect the change
@@ -258,44 +243,44 @@ function createToolCallbacks(
      * Logs the request, posts to Slack with buttons, and pauses the task
      */
     onRequestEditMode: async (reason: string): Promise<void> => {
-      logger.agentAction(agentName, 'Requesting edit mode', reason);
+      logger.agentAction(agentName, "Requesting edit mode", reason);
 
       runtime.lastActivity = new Date();
 
       // Log the request to shared knowledge
       await appendAgentFinding(
         runtime.taskId,
-        'system',
+        "system",
         `Edit mode requested: ${reason}`,
-        'decision'
+        "decision"
       );
 
       // Post to Slack with interactive buttons
       if (slackPostInteractiveCallback) {
         const blocks = [
           {
-            type: 'section',
+            type: "section",
             text: {
-              type: 'mrkdwn',
+              type: "mrkdwn",
               text: `*Edit mode request:* ${reason}`,
             },
           },
           {
-            type: 'actions',
+            type: "actions",
             elements: [
               {
-                type: 'button',
-                text: { type: 'plain_text', text: 'Approve' },
-                action_id: 'approve_edit_mode',
+                type: "button",
+                text: { type: "plain_text", text: "Approve" },
+                action_id: "approve_edit_mode",
                 value: runtime.taskId,
-                style: 'primary',
+                style: "primary",
               },
               {
-                type: 'button',
-                text: { type: 'plain_text', text: 'Deny' },
-                action_id: 'deny_edit_mode',
+                type: "button",
+                text: { type: "plain_text", text: "Deny" },
+                action_id: "deny_edit_mode",
                 value: runtime.taskId,
-                style: 'danger',
+                style: "danger",
               },
             ],
           },
@@ -326,16 +311,22 @@ function createToolCallbacks(
      * Trigger merge check for all linked PRs
      * Returns status of each PR and merges any that are ready
      */
-    onTriggerMergeCheck: async (): Promise<{ merged: string[]; pending: string[]; conflicts: string[] }> => {
-      logger.agentAction(agentName, 'Triggering merge check', runtime.taskId);
+    onTriggerMergeCheck: async (): Promise<{
+      merged: string[];
+      pending: string[];
+      conflicts: string[];
+    }> => {
+      logger.agentAction(agentName, "Triggering merge check", runtime.taskId);
       return triggerMergeCheck(runtime.taskId);
     },
 
     /**
      * Push a branch to origin
      */
-    onPushBranch: async (repoKey: string): Promise<{ success: boolean; message: string }> => {
-      logger.agentAction(agentName, 'Pushing branch', repoKey);
+    onPushBranch: async (
+      repoKey: string
+    ): Promise<{ success: boolean; message: string }> => {
+      logger.agentAction(agentName, "Pushing branch", repoKey);
 
       const repoInfo = runtime.metadata.repositories[repoKey];
       if (!repoInfo?.worktree_path) {
@@ -344,13 +335,18 @@ function createToolCallbacks(
 
       try {
         // Push using git CLI from the worktree
-        await execAsync('git push -u origin HEAD', { cwd: repoInfo.worktree_path });
-        const message = `Pushed ${repoInfo.feature_branch || 'branch'} to origin`;
+        await execAsync("git push -u origin HEAD", {
+          cwd: repoInfo.worktree_path,
+        });
+        const message = `Pushed ${
+          repoInfo.feature_branch || "branch"
+        } to origin`;
         logger.system(`GitHub: ${message}`);
         return { success: true, message };
       } catch (error) {
-        const message = error instanceof Error ? error.message : 'Unknown error';
-        logger.error('task-runtime', `Failed to push ${repoKey}: ${message}`);
+        const message =
+          error instanceof Error ? error.message : "Unknown error";
+        logger.error("task-runtime", `Failed to push ${repoKey}: ${message}`);
         return { success: false, message };
       }
     },
@@ -363,11 +359,11 @@ function createToolCallbacks(
       title: string,
       body: string
     ): Promise<{ pr_number: number; pr_url: string }> => {
-      logger.agentAction(agentName, 'Creating PR', `${repoKey}: ${title}`);
+      logger.agentAction(agentName, "Creating PR", `${repoKey}: ${title}`);
 
       const client = getGitHubClient();
       if (!client) {
-        throw new Error('GitHub client not configured');
+        throw new Error("GitHub client not configured");
       }
 
       const config = getRepoConfig(`${repoKey}-agent`);
@@ -377,9 +373,15 @@ function createToolCallbacks(
 
       const repoInfo = runtime.metadata.repositories[repoKey];
       const head = repoInfo?.feature_branch || `feature/task-${runtime.taskId}`;
-      const base = repoInfo?.base_branch || 'main';
+      const base = repoInfo?.base_branch || "main";
 
-      const result = await client.createPullRequest(config.githubRepo, head, base, title, body);
+      const result = await client.createPullRequest(
+        config.githubRepo,
+        head,
+        base,
+        title,
+        body
+      );
 
       // Store PR number in metadata
       if (repoInfo) {
@@ -391,7 +393,7 @@ function createToolCallbacks(
         runtime.taskId,
         agentName,
         `Created PR #${result.pr_number}: ${result.pr_url}`,
-        'decision'
+        "decision"
       );
 
       return result;
@@ -400,10 +402,13 @@ function createToolCallbacks(
     /**
      * Get PR status
      */
-    onGetPRStatus: async (repoKey: string, prNumber: number): Promise<PRStatus> => {
+    onGetPRStatus: async (
+      repoKey: string,
+      prNumber: number
+    ): Promise<PRStatus> => {
       const client = getGitHubClient();
       if (!client) {
-        throw new Error('GitHub client not configured');
+        throw new Error("GitHub client not configured");
       }
 
       const config = getRepoConfig(`${repoKey}-agent`);
@@ -417,10 +422,13 @@ function createToolCallbacks(
     /**
      * Get PR reviews
      */
-    onGetPRReviews: async (repoKey: string, prNumber: number): Promise<PRReview[]> => {
+    onGetPRReviews: async (
+      repoKey: string,
+      prNumber: number
+    ): Promise<PRReview[]> => {
       const client = getGitHubClient();
       if (!client) {
-        throw new Error('GitHub client not configured');
+        throw new Error("GitHub client not configured");
       }
 
       const config = getRepoConfig(`${repoKey}-agent`);
@@ -441,7 +449,7 @@ function createToolCallbacks(
     ): Promise<void> => {
       const client = getGitHubClient();
       if (!client) {
-        throw new Error('GitHub client not configured');
+        throw new Error("GitHub client not configured");
       }
 
       const config = getRepoConfig(`${repoKey}-agent`);
@@ -455,10 +463,14 @@ function createToolCallbacks(
     /**
      * Add a PR comment
      */
-    onAddPRComment: async (repoKey: string, prNumber: number, comment: string): Promise<void> => {
+    onAddPRComment: async (
+      repoKey: string,
+      prNumber: number,
+      comment: string
+    ): Promise<void> => {
       const client = getGitHubClient();
       if (!client) {
-        throw new Error('GitHub client not configured');
+        throw new Error("GitHub client not configured");
       }
 
       const config = getRepoConfig(`${repoKey}-agent`);
@@ -481,7 +493,7 @@ function createToolCallbacks(
     ): Promise<void> => {
       const client = getGitHubClient();
       if (!client) {
-        throw new Error('GitHub client not configured');
+        throw new Error("GitHub client not configured");
       }
 
       const config = getRepoConfig(`${repoKey}-agent`);
@@ -489,7 +501,13 @@ function createToolCallbacks(
         throw new Error(`No config found for repo key: ${repoKey}`);
       }
 
-      await client.addReviewComment(config.githubRepo, prNumber, path, line, comment);
+      await client.addReviewComment(
+        config.githubRepo,
+        prNumber,
+        path,
+        line,
+        comment
+      );
     },
 
     /**
@@ -502,7 +520,7 @@ function createToolCallbacks(
     ): Promise<void> => {
       const client = getGitHubClient();
       if (!client) {
-        throw new Error('GitHub client not configured');
+        throw new Error("GitHub client not configured");
       }
 
       const config = getRepoConfig(`${repoKey}-agent`);
@@ -516,10 +534,13 @@ function createToolCallbacks(
     /**
      * Request re-review
      */
-    onRequestReReview: async (repoKey: string, prNumber: number): Promise<void> => {
+    onRequestReReview: async (
+      repoKey: string,
+      prNumber: number
+    ): Promise<void> => {
       const client = getGitHubClient();
       if (!client) {
-        throw new Error('GitHub client not configured');
+        throw new Error("GitHub client not configured");
       }
 
       const config = getRepoConfig(`${repoKey}-agent`);
@@ -535,7 +556,10 @@ function createToolCallbacks(
 /**
  * Ensure an agent is spawned and running
  */
-async function ensureAgentSpawned(runtime: TaskRuntimeState, agentName: AgentName): Promise<void> {
+async function ensureAgentSpawned(
+  runtime: TaskRuntimeState,
+  agentName: AgentName
+): Promise<void> {
   // Already spawned
   if (runtime.spawned.has(agentName)) {
     return;
@@ -551,7 +575,7 @@ async function ensureAgentSpawned(runtime: TaskRuntimeState, agentName: AgentNam
   const onSessionId = (sessionId: string) => {
     runtime.sessions.set(agentName, sessionId);
     storeAgentSession(runtime.taskId, agentName, sessionId).catch((err) =>
-      logger.error('task-runtime', 'Failed to store agent session', err)
+      logger.error("task-runtime", "Failed to store agent session", err)
     );
   };
 
@@ -570,16 +594,29 @@ async function ensureAgentSpawned(runtime: TaskRuntimeState, agentName: AgentNam
     if (!queue) {
       throw new Error(`${agentName} queue not initialized`);
     }
-    handle = await spawnRepoAgent(repoConfig, metadata, queue, callbacks, onSessionId, existingSessionId);
+    handle = await spawnRepoAgent(
+      repoConfig,
+      metadata,
+      queue,
+      callbacks,
+      onSessionId,
+      existingSessionId
+    );
     runtime.handles.set(agentName, handle);
-  } else if (agentName === 'pm-agent') {
+  } else if (agentName === "pm-agent") {
     // PM agent
-    const pmQueue = runtime.queues.get('pm-agent');
+    const pmQueue = runtime.queues.get("pm-agent");
     if (!pmQueue) {
-      throw new Error('PM queue not initialized');
+      throw new Error("PM queue not initialized");
     }
-    handle = await spawnPMAgent(metadata, pmQueue, callbacks, onSessionId, existingSessionId);
-    runtime.handles.set('pm-agent', handle);
+    handle = await spawnPMAgent(
+      metadata,
+      pmQueue,
+      callbacks,
+      onSessionId,
+      existingSessionId
+    );
+    runtime.handles.set("pm-agent", handle);
   } else {
     throw new Error(`Unknown agent: ${agentName}`);
   }
@@ -588,45 +625,22 @@ async function ensureAgentSpawned(runtime: TaskRuntimeState, agentName: AgentNam
 
   // Log spawning (single consolidated message)
   if (existingSessionId) {
-    logger.system(`Resumed ${agentName} for task ${runtime.taskId} (session: ${existingSessionId})`);
+    logger.system(
+      `Resumed ${agentName} for task ${runtime.taskId} (session: ${existingSessionId})`
+    );
   } else {
     logger.system(`Spawned ${agentName} for task ${runtime.taskId}`);
   }
 }
 
-/**
- * Reactivate a completed/stopped task
- * Used both for Slack-triggered reactivation and internal safety checks
- */
-export async function reactivateTask(taskId: string): Promise<void> {
-  logger.system(`Reactivating completed task ${taskId}`);
-
-  // Check if task is actually inactive
-  if (isTaskActive(taskId)) {
-    logger.system(`Task ${taskId} is already active, skipping reactivation`);
-    return;
-  }
-
-  // Ensure Slack callbacks are set
-  if (!slackPostCallback) {
-    logger.error('System', `Cannot reactivate task ${taskId} - Slack callbacks not set`);
-    return;
-  }
-
-  // Remove old runtime if it exists
-  activeTasks.delete(taskId);
-
-  // Reinitialize with fresh queues and state
-  await initializeTaskRuntime(taskId);
-
-  // Restart the PM agent
-  await startTask(taskId);
-}
+// reactivateTask removed - all reactivation now goes through spawn queue via routeToSpawnOrNotify
 
 /**
  * Initialize a new TaskRuntime for a task
  */
-export async function initializeTaskRuntime(taskId: string): Promise<TaskRuntimeState> {
+export async function initializeTaskRuntime(
+  taskId: string
+): Promise<TaskRuntimeState> {
   const metadata = await loadMetadata(taskId);
   if (!metadata) {
     throw new Error(`Task ${taskId} not found`);
@@ -634,7 +648,7 @@ export async function initializeTaskRuntime(taskId: string): Promise<TaskRuntime
 
   // Initialize queues for PM and all repo agents
   const queues = new Map<AgentName, MessageQueue>();
-  queues.set('pm-agent', new MessageQueue());
+  queues.set("pm-agent", new MessageQueue());
   for (const config of getAllRepoConfigs()) {
     queues.set(config.agentId as AgentName, new MessageQueue());
   }
@@ -645,6 +659,12 @@ export async function initializeTaskRuntime(taskId: string): Promise<TaskRuntime
     sessions.set(agentId as AgentName, sessionId);
   }
 
+  // Create completion promise for spawn worker to await
+  let resolveCompletion: () => void;
+  const completionPromise = new Promise<void>((resolve) => {
+    resolveCompletion = resolve;
+  });
+
   const runtime: TaskRuntimeState = {
     taskId,
     metadata,
@@ -653,8 +673,9 @@ export async function initializeTaskRuntime(taskId: string): Promise<TaskRuntime
     sessions,
     spawned: new Set<AgentName>(),
     lastActivity: new Date(),
-    completionDetected: false,
     isActive: true,
+    completionPromise,
+    resolveCompletion: resolveCompletion!,
   };
 
   activeTasks.set(taskId, runtime);
@@ -663,23 +684,32 @@ export async function initializeTaskRuntime(taskId: string): Promise<TaskRuntime
 }
 
 /**
- * Start a new task by spawning the PM agent and sending initial message
+ * Start a task by spawning the PM agent and sending initial message
+ *
+ * @param taskId - The task ID
+ * @param reason - Why we're starting: 'new_task' or 'existing_task' (continuation)
  */
-export async function startTask(taskId: string): Promise<void> {
+export async function startTask(
+  taskId: string,
+  reason: "new_task" | "existing_task" = "new_task"
+): Promise<void> {
   const runtime = activeTasks.get(taskId);
   if (!runtime) {
     throw new Error(`TaskRuntime for ${taskId} not initialized`);
   }
 
-  // Add initial message to PM queue
-  const pmQueue = runtime.queues.get('pm-agent');
+  // Add initial message to PM queue based on reason
+  const pmQueue = runtime.queues.get("pm-agent");
   if (!pmQueue) {
-    throw new Error('PM queue not initialized');
+    throw new Error("PM queue not initialized");
   }
-  pmQueue.addMessage(PM_PROMPTS.newTask);
+
+  const prompt =
+    reason === "new_task" ? PM_PROMPTS.newTask : PM_PROMPTS.existingTask;
+  pmQueue.addMessage(prompt);
 
   // Spawn PM agent - it will process the message from its queue
-  await ensureAgentSpawned(runtime, 'pm-agent');
+  await ensureAgentSpawned(runtime, "pm-agent");
 }
 
 /**
@@ -688,14 +718,17 @@ export async function startTask(taskId: string): Promise<void> {
 export async function notifyNewInput(taskId: string): Promise<void> {
   const runtime = activeTasks.get(taskId);
   if (!runtime) {
-    logger.warn('task-runtime', `TaskRuntime for ${taskId} not found, cannot notify`);
+    logger.warn(
+      "task-runtime",
+      `TaskRuntime for ${taskId} not found, cannot notify`
+    );
     return;
   }
 
   runtime.lastActivity = new Date();
-  const pmQueue = runtime.queues.get('pm-agent');
+  const pmQueue = runtime.queues.get("pm-agent");
   if (pmQueue) {
-    pmQueue.addMessage(PM_PROMPTS.newUserInput);
+    pmQueue.addMessage(PM_PROMPTS.existingTask);
   }
 }
 
@@ -722,7 +755,10 @@ export async function stopTask(taskId: string): Promise<void> {
   }
 
   // Update status
-  await updateTaskStatus(taskId, 'stopped');
+  await updateTaskStatus(taskId, "stopped");
+
+  // Signal completion to spawn worker
+  runtime.resolveCompletion();
 
   // Remove from active tasks
   activeTasks.delete(taskId);
@@ -753,7 +789,10 @@ export async function completeTask(taskId: string): Promise<void> {
   }
 
   // Update status
-  await updateTaskStatus(taskId, 'completed');
+  await updateTaskStatus(taskId, "completed");
+
+  // Signal completion to spawn worker
+  runtime.resolveCompletion();
 
   // Remove from active tasks
   activeTasks.delete(taskId);
@@ -763,13 +802,13 @@ export async function completeTask(taskId: string): Promise<void> {
 
 /**
  * Handle edit mode approval from Slack button
- * Sets edit_allowed, logs approval, reactivates task with PM message
+ * Sets edit_allowed, logs approval, routes through spawn queue
  */
 export async function handleEditModeApproval(taskId: string): Promise<void> {
   // Load metadata and set edit_allowed
   const metadata = await loadMetadata(taskId);
   if (!metadata) {
-    logger.error('System', `Task ${taskId} not found for edit approval`);
+    logger.error("System", `Task ${taskId} not found for edit approval`);
     return;
   }
 
@@ -777,98 +816,31 @@ export async function handleEditModeApproval(taskId: string): Promise<void> {
   metadata.edit_allowed = true;
   await saveMetadata(taskId, metadata);
 
-  // Log approval to shared knowledge
-  await appendAgentFinding(taskId, 'system', 'Edit mode approved by user', 'decision');
+  // Log approval to shared knowledge (PM will read this)
+  await appendAgentFinding(
+    taskId,
+    "system",
+    "Edit mode approved by user",
+    "decision"
+  );
 
-  // Reactivate task (this will reinitialize runtime and spawn PM)
-  await reactivateTaskWithMessage(taskId, 'Edit mode has been approved.');
+  // Route through spawn queue
+  await routeToSpawnOrNotify(taskId);
 }
 
 /**
  * Handle edit mode denial from Slack button
- * Logs denial, reactivates task with PM message
+ * Logs denial, routes through spawn queue
  */
 export async function handleEditModeDenial(taskId: string): Promise<void> {
-  // Log denial to shared knowledge
-  await appendAgentFinding(taskId, 'system', 'Edit mode denied by user', 'decision');
+  // Log denial to shared knowledge (PM will read this)
+  await appendAgentFinding(
+    taskId,
+    "system",
+    "Edit mode denied by user",
+    "decision"
+  );
 
-  // Reactivate task with denial message
-  await reactivateTaskWithMessage(taskId, 'Edit mode was denied.');
-}
-
-/**
- * Reactivate a task with a specific message for PM
- */
-async function reactivateTaskWithMessage(taskId: string, message: string): Promise<void> {
-  // Ensure Slack callbacks are set
-  if (!slackPostCallback) {
-    logger.error('System', `Cannot reactivate task ${taskId} - Slack callbacks not set`);
-    return;
-  }
-
-  // Remove old runtime if it exists
-  activeTasks.delete(taskId);
-
-  // Reinitialize with fresh queues and state
-  const runtime = await initializeTaskRuntime(taskId);
-
-  // Add the message to PM queue BEFORE spawning
-  const pmQueue = runtime.queues.get('pm-agent');
-  if (pmQueue) {
-    pmQueue.addMessage(message);
-  }
-
-  // Spawn PM agent - it will process the message from its queue
-  await ensureAgentSpawned(runtime, 'pm-agent');
-}
-
-/**
- * Get the runtime for a task
- */
-export function getTaskRuntime(taskId: string): TaskRuntimeState | undefined {
-  return activeTasks.get(taskId);
-}
-
-/**
- * Check if a task is active
- */
-export function isTaskActive(taskId: string): boolean {
-  return activeTasks.has(taskId);
-}
-
-/**
- * Get all active task IDs
- */
-export function getActiveTaskIds(): string[] {
-  return Array.from(activeTasks.keys());
-}
-
-/**
- * Check if a specific agent is still running for a task
- */
-export function isAgentRunning(taskId: string, agentName: AgentName): boolean {
-  const runtime = activeTasks.get(taskId);
-  if (!runtime) {
-    return false;
-  }
-
-  const handle = runtime.handles.get(agentName);
-
-  return handle?.isRunning ?? false;
-}
-
-/**
- * Get agent status for a task
- */
-export function getAgentStatus(taskId: string): Record<string, boolean> {
-  const runtime = activeTasks.get(taskId);
-  if (!runtime) {
-    return { pm: false, backend: false, mobile: false };
-  }
-
-  return {
-    pm: runtime.handles.get('pm-agent')?.isRunning ?? false,
-    backend: runtime.handles.get('backend-agent')?.isRunning ?? false,
-    mobile: runtime.handles.get('mobile-agent')?.isRunning ?? false,
-  };
+  // Route through spawn queue
+  await routeToSpawnOrNotify(taskId);
 }

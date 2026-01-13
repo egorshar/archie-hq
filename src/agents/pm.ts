@@ -192,8 +192,5 @@ Files available to read (in your working directory):
  */
 export const PM_PROMPTS = {
   newTask: 'New task created, assign owner',
-  newUserInput: 'New Slack message received. Check knowledge.log for the update.',
-  newGitHubEvent: 'New GitHub PR event received. Check knowledge.log for the update.',
-  taskCompleted:
-    'Task owner completed investigation. Read knowledge.log and post a summary to Slack.',
+  existingTask: 'New input received. Check knowledge.log for the update.',
 };
