@@ -6,11 +6,14 @@
  */
 
 import fs from 'fs';
+import { exec } from 'child_process';
+import { promisify } from 'util';
 import { App } from '@octokit/app';
 import { Octokit } from '@octokit/core';
-import { createAppAuth } from '@octokit/auth-app';
 import type { PRStatus, PRReview, PRReviewComment, MergeableState } from '../mcp/tools.js';
 import { logger } from '../system/logger.js';
+
+const execAsync = promisify(exec);
 
 export interface GitHubClientConfig {
   appId: string;
@@ -453,4 +456,52 @@ export function createGitHubClient(): GitHubClient | null {
     privateKey,
     installationId: parseInt(installationId, 10),
   });
+}
+
+/**
+ * Get GitHub App bot identity for git commits
+ */
+function getGitHubAppIdentity(): { name: string; email: string } | null {
+  const appId = process.env.GITHUB_APP_ID;
+  const appSlug = process.env.GITHUB_APP_SLUG;
+
+  if (!appId || !appSlug) {
+    return null;
+  }
+
+  return {
+    name: `${appSlug}[bot]`,
+    email: `${appId}+${appSlug}[bot]@users.noreply.github.com`,
+  };
+}
+
+/**
+ * Configure git identity for a repository using GitHub App bot credentials.
+ * Should be called once on server startup for each base repo.
+ * Worktrees inherit this config from the base repo.
+ */
+export async function configureGitIdentity(repoPath: string): Promise<void> {
+  const identity = getGitHubAppIdentity();
+  if (identity) {
+    await execAsync(`git config user.name "${identity.name}"`, { cwd: repoPath });
+    await execAsync(`git config user.email "${identity.email}"`, { cwd: repoPath });
+    logger.system(`Configured git identity for ${repoPath}: ${identity.name}`);
+  }
+}
+
+/**
+ * Fetch latest commits from origin for a specific branch.
+ * Authentication is handled by GIT_ASKPASS environment variable.
+ *
+ * @param repoPath - Path to the repository (base repo or worktree)
+ * @param branch - Branch to fetch (e.g., 'main')
+ */
+export async function fetchOrigin(repoPath: string, branch: string): Promise<void> {
+  try {
+    await execAsync(`git fetch origin ${branch}`, { cwd: repoPath });
+    logger.system(`Fetched origin/${branch}`);
+  } catch (error) {
+    // Non-fatal - log and continue with existing refs
+    logger.system(`Fetch failed, using existing origin/${branch}`);
+  }
 }

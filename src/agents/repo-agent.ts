@@ -8,8 +8,6 @@
  */
 
 import { query } from "@anthropic-ai/claude-agent-sdk";
-import { exec } from "child_process";
-import { promisify } from "util";
 import type { TaskMetadata } from "../types/index.js";
 import type { AgentHandle } from "../types/agent.js";
 import type { RepoAgentConfig } from "../types/repo-agent.js";
@@ -28,10 +26,8 @@ import {
 } from "../mcp/tools.js";
 import { processAgentEventForLogging, logger } from "../system/logger.js";
 import { getAllRepoConfigs } from "./repo-configs.js";
-import { setupWorktree, worktreeExists } from "../system/worktree-manager.js";
+import { setupWorktree, worktreeExists, fetchOrigin } from "../system/worktree-manager.js";
 import { loadPrompt } from "../utils/prompt-loader.js";
-
-const execAsync = promisify(exec);
 
 /**
  * Generate the system prompt for a repo agent
@@ -102,23 +98,15 @@ export async function spawnRepoAgent(
       });
 
       // Fetch origin to ensure origin/main is up-to-date for conflict resolution
-      try {
-        logger.agent(config.agentId, "Fetching origin to update remote refs");
-        await execAsync("git fetch origin", { cwd: repoPath });
-      } catch (error) {
-        logger.warn(
-          config.agentId,
-          "Failed to fetch origin (non-fatal)",
-          error
-        );
-      }
+      const baseBranch = repoInfo.base_branch || config.baseBranch || "main";
+      await fetchOrigin(repoPath, baseBranch);
     } else {
       // Create new worktree (includes fetch)
       // This means we're switching from readonly to edit mode - need to fork session
       startFreshSession = true; // cwd is changing to non-child path, need fresh session
 
       const reposPath = getReposPath(metadata.task_id);
-      const { worktree_path, feature_branch } = await setupWorktree(
+      const { worktree_path, feature_branch, base_branch } = await setupWorktree(
         metadata.task_id,
         config.repoKey,
         reposPath,
@@ -132,7 +120,7 @@ export async function spawnRepoAgent(
         path: baseRepoPath,
         worktree_path,
         feature_branch,
-        base_branch: config.baseBranch,
+        base_branch,
       };
 
       // Save metadata and notify caller

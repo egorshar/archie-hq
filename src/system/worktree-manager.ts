@@ -10,30 +10,17 @@ import { promisify } from 'util';
 import * as path from 'path';
 import * as fs from 'fs/promises';
 import { logger } from './logger.js';
+import { fetchOrigin } from '../github/client.js';
 
 const execAsync = promisify(exec);
 
-/**
- * Get GitHub App bot identity for git commits
- * Returns null if not configured
- */
-function getGitHubAppIdentity(): { name: string; email: string } | null {
-  const appId = process.env.GITHUB_APP_ID;
-  const appSlug = process.env.GITHUB_APP_SLUG;
-
-  if (!appId || !appSlug) {
-    return null;
-  }
-
-  return {
-    name: `${appSlug}[bot]`,
-    email: `${appId}+${appSlug}[bot]@users.noreply.github.com`,
-  };
-}
+// Re-export for backwards compatibility
+export { fetchOrigin };
 
 export interface WorktreeResult {
   worktree_path: string;
   feature_branch: string;
+  base_branch: string;
 }
 
 /**
@@ -107,13 +94,7 @@ export async function setupWorktree(
   const defaultBranch = baseBranch || await getDefaultBranch(baseRepoPath);
 
   // 2. Fetch latest commits from origin
-  try {
-    await gitExec(baseRepoPath, `fetch origin ${defaultBranch}`);
-  } catch (error) {
-    // If fetch fails (e.g., no network), log but continue
-    // The worktree will be created from whatever origin/<branch> exists
-    logger.worktree(`Fetch failed for ${repoKey}, using existing origin/${defaultBranch}`);
-  }
+  await fetchOrigin(baseRepoPath, defaultBranch);
 
   // 3. Create branch name
   // taskId already includes "task-" prefix (e.g., "task-01012026-1823-abc123")
@@ -148,6 +129,7 @@ export async function setupWorktree(
             return {
               worktree_path: existingPath,
               feature_branch: featureBranch,
+              base_branch: defaultBranch,
             };
           }
         }
@@ -159,17 +141,12 @@ export async function setupWorktree(
     }
   }
 
-  // 6. Configure git identity for the worktree (GitHub App bot)
-  const identity = getGitHubAppIdentity();
-  if (identity) {
-    await gitExec(worktreePath, `config --local user.name "${identity.name}"`);
-    await gitExec(worktreePath, `config --local user.email "${identity.email}"`);
-    logger.worktree(`Configured git identity: ${identity.name}`);
-  }
+  // Identity is inherited from base repo (configured at server startup)
 
   return {
     worktree_path: worktreePath,
     feature_branch: featureBranch,
+    base_branch: defaultBranch,
   };
 }
 
