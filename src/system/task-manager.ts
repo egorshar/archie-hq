@@ -8,7 +8,7 @@
 import { mkdir, readFile, writeFile, appendFile, readdir } from 'fs/promises';
 import { existsSync } from 'fs';
 import { join } from 'path';
-import type { TaskMetadata, LogEntry, FindingType, SlackThread, AgentName } from '../types/index.js';
+import type { TaskMetadata, LogEntry, FindingType, SlackThread, AgentName, SlackFile } from '../types/index.js';
 
 const SESSIONS_DIR = join(process.cwd(), 'sessions');
 
@@ -77,6 +77,55 @@ export function getKnowledgeLogPath(taskId: string): string {
  */
 export function getMemoryPath(taskId: string): string {
   return join(getSharedPath(taskId), 'memory');
+}
+
+/**
+ * Get the path to a task's attachments directory (for Slack files)
+ */
+export function getAttachmentsPath(taskId: string): string {
+  return join(getSharedPath(taskId), 'attachments');
+}
+
+/**
+ * Download Slack files to task's attachments folder
+ * Returns files with localPath populated
+ */
+export async function downloadMessageFiles(
+  taskId: string,
+  files: SlackFile[]
+): Promise<SlackFile[]> {
+  if (!files || files.length === 0) {
+    return [];
+  }
+
+  const { downloadSlackFile } = await import('../slack/client.js');
+  const attachmentsDir = getAttachmentsPath(taskId);
+
+  // Ensure attachments directory exists
+  await mkdir(attachmentsDir, { recursive: true });
+
+  const downloadedFiles: SlackFile[] = [];
+
+  for (const file of files) {
+    try {
+      // Use file ID + original name for uniqueness
+      const localPath = join(attachmentsDir, `${file.id}-${file.name}`);
+      // Prefer url_private_download (works with Bearer token) over url_private (requires browser session)
+      const downloadUrl = file.url_private_download || file.url_private;
+      await downloadSlackFile(downloadUrl, localPath);
+
+      downloadedFiles.push({
+        ...file,
+        localPath,
+      });
+    } catch (error) {
+      // Log error but continue with other files
+      const { logger } = await import('./logger.js');
+      logger.warn('task-manager', `Failed to download file ${file.name}: ${error}`);
+    }
+  }
+
+  return downloadedFiles;
 }
 
 /**
@@ -161,18 +210,31 @@ function formatLogEntry(entry: LogEntry): string {
 
 /**
  * Append a Slack message to the knowledge log
+ * @param files - Optional array of downloaded files with localPath set
  */
 export async function appendSlackMessage(
   taskId: string,
   channelInfo: { id: string; name: string },
   threadId: string,
   userInfo: { id: string; username: string; realName: string },
-  message: string
+  message: string,
+  files?: SlackFile[]
 ): Promise<void> {
+  // Build message with optional file attachments
+  let fullMessage = `[@<${userInfo.id}:${userInfo.realName}>] ${message}`;
+
+  if (files && files.length > 0) {
+    const fileInfo = files.map(f => {
+      const pathInfo = f.localPath ? ` (${f.localPath})` : '';
+      return `${f.name}${pathInfo}`;
+    }).join(', ');
+    fullMessage += `\n  [Attachments: ${fileInfo}]`;
+  }
+
   const entry: LogEntry = {
     timestamp: new Date().toISOString(),
     source: `slack:#<${channelInfo.id}:${channelInfo.name}>:${threadId}`,
-    message: `[@<${userInfo.id}:${userInfo.realName}>] ${message}`,
+    message: fullMessage,
   };
 
   await appendFile(getKnowledgeLogPath(taskId), formatLogEntry(entry));

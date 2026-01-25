@@ -6,7 +6,7 @@
  */
 
 import { WebClient } from '@slack/web-api';
-import type { SlackMessage, SlackThread } from '../types/index.js';
+import type { SlackMessage, SlackThread, SlackFile } from '../types/index.js';
 import slackifyMarkdown from 'slackify-markdown';
 import { logger } from '../system/logger.js';
 
@@ -282,20 +282,283 @@ export async function fetchThreadHistory(
     return [];
   }
 
+  // Extract text from message, handling all Slack message formats
+  const extractMessageText = (msg: typeof result.messages[0]): string => {
+    const parts: string[] = [];
+
+    // 1. Primary: use main text field
+    if (msg.text) {
+      parts.push(msg.text);
+    }
+
+    // 2. Extract from blocks (Block Kit / rich_text)
+    const blocks = msg.blocks as Array<{
+      type: string;
+      text?: { text?: string };
+      elements?: Array<unknown>;
+    }> | undefined;
+
+    if (blocks && Array.isArray(blocks)) {
+      for (const block of blocks) {
+        const blockText = extractBlockText(block);
+        if (blockText && !parts.includes(blockText)) {
+          parts.push(blockText);
+        }
+      }
+    }
+
+    // 3. Extract from attachments (forwarded messages, shared content, unfurls)
+    const attachments = msg.attachments as Array<{
+      text?: string;
+      fallback?: string;
+      pretext?: string;
+      title?: string;
+      message_blocks?: Array<{ message?: { blocks?: Array<unknown> } }>;
+    }> | undefined;
+
+    if (attachments && Array.isArray(attachments)) {
+      for (const att of attachments) {
+        // Try structured message_blocks first (forwarded messages)
+        if (att.message_blocks) {
+          for (const mb of att.message_blocks) {
+            if (mb.message?.blocks) {
+              for (const block of mb.message.blocks) {
+                const blockText = extractBlockText(block as { type: string; elements?: Array<unknown> });
+                if (blockText && !parts.includes(blockText)) {
+                  parts.push(`[Forwarded] ${blockText}`);
+                }
+              }
+            }
+          }
+        }
+
+        // Fall back to text/fallback fields
+        const attText = att.text || att.fallback;
+        if (attText && !parts.includes(attText)) {
+          // Check if this looks like a forwarded message (has is_share or from_url)
+          const isForwarded = (att as { is_share?: boolean }).is_share;
+          parts.push(isForwarded ? `[Forwarded] ${attText}` : attText);
+        }
+      }
+    }
+
+    // 4. Extract from files (file shares)
+    const files = msg.files as Array<{ name?: string; title?: string }> | undefined;
+    if (files && Array.isArray(files)) {
+      const fileDescriptions = files
+        .map(f => f.title || f.name)
+        .filter(Boolean);
+      if (fileDescriptions.length > 0) {
+        parts.push(`[Files: ${fileDescriptions.join(', ')}]`);
+      }
+    }
+
+    return parts.join('\n');
+  };
+
+  /**
+   * Extract text from a Block Kit block (handles rich_text, section, etc.)
+   */
+  const extractBlockText = (block: { type: string; text?: { text?: string }; elements?: Array<unknown> }): string => {
+    if (!block) return '';
+
+    switch (block.type) {
+      case 'rich_text':
+        // rich_text blocks have nested elements (sections, lists, quotes, etc.)
+        return extractRichTextElements(block.elements || []);
+
+      case 'section':
+        // Section blocks have a text field
+        return block.text?.text || '';
+
+      case 'header':
+        // Header blocks have a text field
+        return block.text?.text || '';
+
+      case 'context':
+        // Context blocks have elements array with text/image objects
+        if (block.elements) {
+          return block.elements
+            .map((el: unknown) => {
+              const element = el as { type?: string; text?: string };
+              return element.type === 'mrkdwn' || element.type === 'plain_text' ? element.text : '';
+            })
+            .filter(Boolean)
+            .join(' ');
+        }
+        return '';
+
+      default:
+        return '';
+    }
+  };
+
+  /**
+   * Extract text from rich_text elements recursively
+   */
+  const extractRichTextElements = (elements: Array<unknown>): string => {
+    const parts: string[] = [];
+
+    for (const element of elements) {
+      const el = element as {
+        type: string;
+        elements?: Array<unknown>;
+        text?: string;
+        user_id?: string;
+        channel_id?: string;
+        name?: string;
+        url?: string;
+        style?: { bold?: boolean; italic?: boolean; strike?: boolean; code?: boolean };
+      };
+
+      switch (el.type) {
+        case 'rich_text_section':
+        case 'rich_text_preformatted':
+        case 'rich_text_quote':
+          // These contain nested elements
+          if (el.elements) {
+            const sectionText = extractRichTextElements(el.elements);
+            if (el.type === 'rich_text_quote') {
+              parts.push(`> ${sectionText}`);
+            } else if (el.type === 'rich_text_preformatted') {
+              parts.push(`\`\`\`${sectionText}\`\`\``);
+            } else {
+              parts.push(sectionText);
+            }
+          }
+          break;
+
+        case 'rich_text_list':
+          // Lists have elements that are list items
+          if (el.elements) {
+            const listStyle = (el as { style?: string }).style;
+            const items = el.elements.map((item, idx) => {
+              const itemText = extractRichTextElements([item]);
+              const bullet = listStyle === 'ordered' ? `${idx + 1}.` : '•';
+              return `${bullet} ${itemText}`;
+            });
+            parts.push(items.join('\n'));
+          }
+          break;
+
+        case 'text':
+          // Plain text element
+          parts.push(el.text || '');
+          break;
+
+        case 'user':
+          // User mention
+          parts.push(`<@${el.user_id}>`);
+          break;
+
+        case 'channel':
+          // Channel mention
+          parts.push(`<#${el.channel_id}>`);
+          break;
+
+        case 'emoji':
+          // Emoji
+          parts.push(`:${el.name}:`);
+          break;
+
+        case 'link':
+          // URL link
+          parts.push(el.url || '');
+          break;
+
+        case 'usergroup':
+          // User group mention
+          parts.push(`<!subteam^${(el as { usergroup_id?: string }).usergroup_id}>`);
+          break;
+
+        case 'broadcast':
+          // @here, @channel, @everyone
+          parts.push(`<!${(el as { range?: string }).range}>`);
+          break;
+      }
+    }
+
+    return parts.join('');
+  };
+
   // Batch fetch user/group/channel info for all messages
-  const messages = result.messages.map(m => ({ text: m.text || '' }));
+  const messages = result.messages.map(m => ({ text: extractMessageText(m) }));
   const channelIds = new Set([channel]); // Include the thread's channel
   const { userInfoMap, groupInfoMap, channelInfoMap } = await fetchMentionInfo(messages, channelIds);
 
+  // Extract files from a message (including from attachments/forwarded messages)
+  const extractFiles = (msg: typeof result.messages[0]): SlackFile[] | undefined => {
+    const allFiles: SlackFile[] = [];
+
+    // Helper to process a files array
+    const processFiles = (files: Array<{
+      id?: string;
+      name?: string;
+      mimetype?: string;
+      url_private?: string;
+      url_private_download?: string;
+    }> | undefined) => {
+      if (!files || !Array.isArray(files)) return;
+      for (const f of files) {
+        // Prefer url_private_download for API downloads (works with Bearer token)
+        // Fall back to url_private if download URL not available
+        if (f.id && (f.url_private_download || f.url_private)) {
+          allFiles.push({
+            id: f.id,
+            name: f.name || 'unnamed',
+            mimetype: f.mimetype || 'application/octet-stream',
+            url_private: f.url_private || f.url_private_download!,
+            url_private_download: f.url_private_download,
+          });
+        }
+      }
+    };
+
+    // 1. Top-level files (direct file shares)
+    processFiles(msg.files as Array<{ id?: string; name?: string; mimetype?: string; url_private?: string; url_private_download?: string }> | undefined);
+
+    // 2. Files inside attachments (forwarded messages)
+    const attachments = msg.attachments as Array<{
+      files?: Array<{ id?: string; name?: string; mimetype?: string; url_private?: string; url_private_download?: string }>;
+      image_url?: string;
+      thumb_url?: string;
+      fallback?: string;
+      id?: number;
+    }> | undefined;
+
+    if (attachments && Array.isArray(attachments)) {
+      for (const att of attachments) {
+        // Files nested in attachment
+        processFiles(att.files);
+
+        // Some attachments have image_url directly (e.g., unfurled links, image shares)
+        if (att.image_url) {
+          allFiles.push({
+            id: `att-${att.id || Date.now()}`,
+            name: att.fallback || 'image',
+            mimetype: 'image/unknown',
+            url_private: att.image_url,
+          });
+        }
+      }
+    }
+
+    return allFiles.length > 0 ? allFiles : undefined;
+  };
+
   // Apply replacements to all messages
-  return result.messages.map((msg) => ({
-    type: msg.type || 'message',
-    channel,
-    user: msg.user || 'unknown',
-    text: applyMentionReplacements(msg.text || '', userInfoMap, groupInfoMap, channelInfoMap),
-    ts: msg.ts || '',
-    thread_ts: msg.thread_ts,
-  }));
+  return result.messages.map((msg) => {
+    const files = extractFiles(msg);
+    return {
+      type: msg.type || 'message',
+      channel,
+      user: msg.user || 'unknown',
+      text: applyMentionReplacements(extractMessageText(msg), userInfoMap, groupInfoMap, channelInfoMap),
+      ts: msg.ts || '',
+      thread_ts: msg.thread_ts,
+      ...(files && files.length > 0 ? { files } : {}),
+    };
+  });
 }
 
 /**
@@ -385,4 +648,57 @@ export async function cleanSlackText(text: string, channelId?: string): Promise<
   const channelIds = channelId ? new Set<string>([channelId]) : new Set<string>();
   const { userInfoMap, groupInfoMap, channelInfoMap } = await fetchMentionInfo([{ text }], channelIds);
   return applyMentionReplacements(text, userInfoMap, groupInfoMap, channelInfoMap);
+}
+
+/**
+ * Download a Slack file to a local path
+ * Requires files:read scope in the bot token
+ */
+export async function downloadSlackFile(
+  fileUrl: string,
+  destPath: string
+): Promise<void> {
+  const client = getSlackClient();
+  const token = (client as unknown as { token: string }).token;
+
+  logger.slack(`Downloading file from: ${fileUrl}`);
+
+  const response = await fetch(fileUrl, {
+    headers: {
+      'Authorization': `Bearer ${token}`,
+    },
+    redirect: 'follow',
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to download file: ${response.status} ${response.statusText}`);
+  }
+
+  const { writeFile, mkdir } = await import('fs/promises');
+  const { dirname } = await import('path');
+
+  // Get content as buffer first
+  const buffer = Buffer.from(await response.arrayBuffer());
+  const contentType = response.headers.get('content-type') || '';
+
+  // Check content-type to detect HTML error pages
+  if (contentType.includes('text/html')) {
+    // Slack returned HTML instead of file - likely auth issue or wrong URL
+    const body = buffer.toString('utf-8');
+    const isSlackPage = body.includes('slack.com') || body.includes('slack-edge.com');
+    if (isSlackPage) {
+      throw new Error(
+        `Slack returned HTML instead of file content. ` +
+        `This usually means the token lacks files:read scope or the URL requires browser authentication. ` +
+        `URL: ${fileUrl}`
+      );
+    }
+  }
+
+  // Ensure directory exists
+  await mkdir(dirname(destPath), { recursive: true });
+
+  await writeFile(destPath, buffer);
+
+  logger.slack(`Downloaded file to ${destPath} (${buffer.length} bytes, type: ${contentType})`);
 }

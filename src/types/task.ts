@@ -56,6 +56,18 @@ export interface TriageResult {
   similar_tasks?: string[];
 }
 
+/** File metadata from Slack */
+export interface SlackFile {
+  id: string;
+  name: string;
+  mimetype: string;
+  url_private: string;
+  /** URL for downloading with Bearer token (preferred for API downloads) */
+  url_private_download?: string;
+  /** Local path after download (set by task processing) */
+  localPath?: string;
+}
+
 export interface SlackMessage {
   type: string;
   channel: string;
@@ -63,4 +75,6 @@ export interface SlackMessage {
   text: string;
   ts: string;
   thread_ts?: string;
+  /** Files attached to this message */
+  files?: SlackFile[];
 }

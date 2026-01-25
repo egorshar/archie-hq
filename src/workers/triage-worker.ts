@@ -23,6 +23,7 @@ import {
   loadMetadata,
   updateThreadTimestamp,
   updatePRCommentTimestamp,
+  downloadMessageFiles,
 } from '../system/task-manager.js';
 import { notifyNewInput, stopTask } from '../system/task-runtime.js';
 import { isTaskActive } from '../system/active-tasks.js';
@@ -250,14 +251,16 @@ async function handleNewTask(
 
   logger.system(`Created task ${taskId}`);
 
-  // Append all thread history to shared knowledge log
+  // Append all thread history to shared knowledge log (with file downloads)
   for (const msg of threadHistory) {
     const msgUserInfo = await getUserInfo(msg.user);
+    // Download any attached files to task folder
+    const downloadedFiles = msg.files ? await downloadMessageFiles(taskId, msg.files) : undefined;
     await appendSlackMessage(taskId, channelInfo, threadId, {
       id: msg.user,
       username: msgUserInfo.name,
       realName: msgUserInfo.realName,
-    }, msg.text);
+    }, msg.text, downloadedFiles);
   }
 
   // Queue spawn job for new task
@@ -297,11 +300,12 @@ async function handleExistingTask(
     for (const msg of threadHistory) {
       if (!msg.user || msg.user === 'unknown' || msg.user === getBotUserId()) continue;
       const userInfo = await getUserInfo(msg.user);
+      const downloadedFiles = msg.files ? await downloadMessageFiles(taskId, msg.files) : undefined;
       await appendSlackMessage(taskId, channelInfo, threadId, {
         id: msg.user,
         username: userInfo.name,
         realName: userInfo.realName,
-      }, msg.text);
+      }, msg.text, downloadedFiles);
     }
 
     // Acknowledge the link
@@ -314,11 +318,12 @@ async function handleExistingTask(
       if (!msg.ts || msg.ts <= lastProcessedTs) continue;
       if (!msg.user || msg.user === 'unknown' || msg.user === getBotUserId()) continue;
       const userInfo = await getUserInfo(msg.user);
+      const downloadedFiles = msg.files ? await downloadMessageFiles(taskId, msg.files) : undefined;
       await appendSlackMessage(taskId, channelInfo, threadId, {
         id: msg.user,
         username: userInfo.name,
         realName: userInfo.realName,
-      }, msg.text);
+      }, msg.text, downloadedFiles);
     }
 
     await updateThreadTimestamp(taskId, threadId, message.ts);
