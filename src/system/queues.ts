@@ -41,7 +41,7 @@ export function getTriageQueue(): Queue<TriageJobData> {
   if (!triageQueue) {
     triageQueue = new Queue<TriageJobData>({
       redis: getRedisConnection(),
-      namespace: 'archie:triage-events',
+      namespace: '{archie}:triage-events', // Hash tag ensures all keys hash to same slot in Redis Cluster
       jobTimeoutMs: 60000, // 1 minute timeout for triage (includes LLM call)
       maxAttempts: 3,
       keepCompleted: 100,
@@ -67,7 +67,7 @@ export function getSpawnQueue(): Queue<SpawnJobData> {
   if (!spawnQueue) {
     spawnQueue = new Queue<SpawnJobData>({
       redis: getRedisConnection(),
-      namespace: 'archie:spawn-tasks',
+      namespace: '{archie}:spawn-tasks', // Hash tag ensures all keys hash to same slot in Redis Cluster
       jobTimeoutMs: 60 * 60 * 1000, // 1 hour timeout for PM agents
       maxAttempts: 1, // No retry - PM will read full log on restart
       keepCompleted: 100,
