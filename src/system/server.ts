@@ -4,10 +4,7 @@
  * Entry point for the Archie system.
  * Uses Slack Bolt in HTTP mode for webhook events.
  *
- * MVP v4: Queue-based architecture with graceful shutdown.
- * - Webhook events are routed to queues for durable processing
- * - Triage worker handles classification
- * - Spawn worker manages PM agent lifecycle
+ * Direct processing: webhook events are handled inline (no queues).
  */
 
 import { createRequire } from "module";
@@ -30,14 +27,11 @@ import {
   handleEditModeApproval,
   handleEditModeDenial,
 } from "./task-runtime.js";
-import { loadMetadata, findTaskByPRNumber } from "./task-manager.js";
+import { loadMetadata, appendGitHubEvent } from "./task-manager.js";
 import { logger } from "./logger.js";
+import { getActiveTaskIds } from "./active-tasks.js";
 import type { Request, Response } from "express";
 
-// Queue-based architecture imports
-import { getTriageQueue } from "./queues.js";
-import { closeQueues } from "./queues.js";
-import { closeRedisConnection, isRedisReady } from "./redis.js";
 import {
   routeSlackEvent,
   routeGitHubEvent,
@@ -46,17 +40,11 @@ import {
   formatGitHubEventMessage,
 } from "./webhook-router.js";
 import {
-  startTriageWorker,
-  stopTriageWorker,
-  setRepoPaths as setTriageRepoPaths,
-  routeToSpawnOrNotify,
-} from "../workers/triage-worker.js";
-import {
-  startSpawnWorker,
-  stopSpawnWorker,
-  getActiveSpawnJobCount,
-} from "../workers/spawn-worker.js";
-import { appendGitHubEvent } from "./task-manager.js";
+  processSlackTriage,
+  processGitHubTriage,
+  setRepoPaths,
+  reactivateTask,
+} from "./event-handler.js";
 import { getRepoConfigByGithubRepo } from "../agents/repo-configs.js";
 import { verifyWebhookSignature } from "../github/webhook-utils.js";
 import { configureGitIdentity } from "../github/client.js";
@@ -83,8 +71,8 @@ export async function startServer(config: ServerConfig): Promise<void> {
   // Initialize Slack client for outgoing messages
   await initSlackClient(config.slackBotToken);
 
-  // Set repository paths for triage worker
-  setTriageRepoPaths(config.backendRepoPath, config.mobileRepoPath);
+  // Set repository paths for event handler
+  setRepoPaths(config.backendRepoPath, config.mobileRepoPath);
 
   // Configure git identity for base repos (worktrees inherit this)
   await configureGitIdentity(config.backendRepoPath);
@@ -112,10 +100,6 @@ export async function startServer(config: ServerConfig): Promise<void> {
     }
   );
 
-  // Start queue workers
-  startTriageWorker();
-  startSpawnWorker();
-
   // Create Express receiver for HTTP mode
   const receiver: ExpressReceiverType = new ExpressReceiver({
     signingSecret: config.slackSigningSecret,
@@ -126,8 +110,7 @@ export async function startServer(config: ServerConfig): Promise<void> {
   receiver.router.get("/health", (_req: Request, res: Response) => {
     const status = {
       status: isShuttingDown ? "shutting_down" : "ok",
-      redis: isRedisReady() ? "connected" : "disconnected",
-      activeSpawnJobs: getActiveSpawnJobCount(),
+      activeTasks: getActiveTaskIds().length,
     };
     res.status(isShuttingDown ? 503 : 200).json(status);
   });
@@ -170,17 +153,17 @@ export async function startServer(config: ServerConfig): Promise<void> {
         // Acknowledge receipt immediately
         res.status(200).json({ received: true });
 
-        // Route the webhook
+        // Process inline (fire-and-forget)
         try {
           const parsedPayload = JSON.parse(payload);
-          await handleGitHubWebhookQueued(eventType, parsedPayload);
+          await handleGitHubWebhook(eventType, parsedPayload);
         } catch (error) {
           logger.error("Server", "Error processing GitHub webhook", error);
         }
       }
     );
 
-    logger.system("GitHub webhooks enabled (queue-based)");
+    logger.system("GitHub webhooks enabled");
   } else {
     logger.system("GitHub webhooks disabled (GITHUB_WEBHOOK_SECRET not set)");
   }
@@ -191,7 +174,7 @@ export async function startServer(config: ServerConfig): Promise<void> {
     receiver,
   });
 
-  // Handle app mentions - route to triage queue
+  // Handle app mentions - process inline
   app!.event("app_mention", async ({ event }) => {
     // Check if shutting down
     if (isShuttingDown) {
@@ -205,29 +188,15 @@ export async function startServer(config: ServerConfig): Promise<void> {
       return;
     }
 
-    // Queue for triage
-    const threadId = event.thread_ts || event.ts;
-    try {
-      const triageQueue = getTriageQueue();
-      await triageQueue.add({
-        groupId: threadId, // FIFO within same thread
-        data: {
-          source: "slack",
-          payload: {
-            type: event.type,
-            channel: event.channel,
-            user: event.user ?? "",
-            text: event.text,
-            ts: event.ts,
-            thread_ts: event.thread_ts,
-          },
-        },
-      });
-      logger.triageQueue(`Queued Slack event (thread: ${threadId})`);
-
-    } catch (error) {
-      logger.error("Server", "Error queuing Slack event", error);
-    }
+    // Process inline (fire-and-forget)
+    processSlackTriage({
+      type: event.type,
+      channel: event.channel,
+      user: event.user ?? "",
+      text: event.text,
+      ts: event.ts,
+      thread_ts: event.thread_ts,
+    }).catch((err) => logger.error("Server", "Error processing Slack event", err));
   });
 
   // Handle thread messages (replies without @mention)
@@ -258,28 +227,15 @@ export async function startServer(config: ServerConfig): Promise<void> {
         return;
       }
 
-      // Queue for triage
-      const threadId = event.thread_ts;
-      try {
-        const triageQueue = getTriageQueue();
-        await triageQueue.add({
-          groupId: threadId, // FIFO within same thread
-          data: {
-            source: "slack",
-            payload: {
-              type: event.type,
-              channel: event.channel,
-              user: event.user || "",
-              text: event.text || "",
-              ts: event.ts,
-              thread_ts: event.thread_ts,
-            },
-          },
-        });
-        logger.triageQueue(`Queued Slack thread reply (thread: ${threadId})`);
-      } catch (error) {
-        logger.error("Server", "Error queuing Slack event", error);
-      }
+      // Process inline (fire-and-forget)
+      processSlackTriage({
+        type: event.type,
+        channel: event.channel,
+        user: event.user || "",
+        text: event.text || "",
+        ts: event.ts,
+        thread_ts: event.thread_ts,
+      }).catch((err) => logger.error("Server", "Error processing Slack event", err));
     }
   });
 
@@ -304,7 +260,6 @@ export async function startServer(config: ServerConfig): Promise<void> {
         );
       }
 
-      // Handle the approval (routes through spawn queue)
       await handleEditModeApproval(taskId);
     } catch (error) {
       logger.error("Server", "Error handling edit mode approval", error);
@@ -332,7 +287,6 @@ export async function startServer(config: ServerConfig): Promise<void> {
         );
       }
 
-      // Handle the denial (routes through spawn queue)
       await handleEditModeDenial(taskId);
     } catch (error) {
       logger.error("Server", "Error handling edit mode denial", error);
@@ -349,9 +303,9 @@ export async function startServer(config: ServerConfig): Promise<void> {
 }
 
 /**
- * Handle GitHub webhook with queue-based routing
+ * Handle GitHub webhook with inline routing
  */
-async function handleGitHubWebhookQueued(
+async function handleGitHubWebhook(
   eventType: string,
   payload: Record<string, unknown>
 ): Promise<void> {
@@ -376,88 +330,49 @@ async function handleGitHubWebhookQueued(
   }
 
   if (route.action === "triage") {
-    // Queue issue_comment for triage (to filter conversational noise)
-    const triageQueue = getTriageQueue();
-    await triageQueue.add({
-      groupId: route.taskId, // FIFO within same task
-      data: {
-        source: "github",
-        payload,
-        taskId: route.taskId,
-      },
-    });
-    logger.triageQueue(`Queued GitHub issue_comment (task: ${route.taskId})`);
+    // Process GitHub issue_comment inline (was queued before)
+    processGitHubTriage(route.taskId, payload).catch((err) =>
+      logger.error("Server", "Error processing GitHub triage", err)
+    );
   } else if (route.action === "direct") {
     // Handle directly (fast, non-blocking)
     if (route.handler === "merge_check") {
       handleMergeCheckDirect(route.taskId);
     } else if (route.handler === "existing_task") {
-      await handleExistingTaskDirect(route.taskId, context, payload);
+      await handleExistingTaskDirect(route.taskId, context);
     }
   }
 }
 
 /**
  * Handle existing task event directly (for deterministic events)
- * Logs the event and routes through spawn queue logic
+ * Logs the event and reactivates the task
  */
 async function handleExistingTaskDirect(
   taskId: string,
-  context: ReturnType<typeof formatGitHubContext>,
-  _payload: Record<string, unknown>
+  context: ReturnType<typeof formatGitHubContext>
 ): Promise<void> {
-  // Format and log the event
   const eventMessage = formatGitHubEventMessage(context);
   const repoConfig = getRepoConfigByGithubRepo(context.githubRepo);
   const repoKey = repoConfig?.repoKey || "unknown";
 
   await appendGitHubEvent(taskId, repoKey, eventMessage);
 
-  // Route through spawn queue logic (same as triage worker)
-  await routeToSpawnOrNotify(taskId);
+  await reactivateTask(taskId);
 }
 
 /**
  * Graceful shutdown
  *
- * Shutdown sequence:
- * 1. Stop accepting new webhooks (isShuttingDown = true)
- * 2. Stop triage worker (waits for current job to complete)
- * 3. Wait for spawn worker to finish (waits for all PMs to complete)
- * 4. Close queues and Redis connections
- * 5. Stop HTTP server
+ * Stop accepting webhooks and stop HTTP server.
+ * Active PMs are dropped (recovery on restart is future work).
  */
 export async function stopServer(): Promise<void> {
   logger.plain("Shutting down Archie server...");
 
-  // 1. Stop accepting new webhooks
   isShuttingDown = true;
   logger.system("Stopped accepting new webhooks");
 
-  // 2. Stop triage worker (waits for current job)
-  await stopTriageWorker();
-  logger.system("Triage worker stopped");
-
-  // 3. Wait for spawn worker (waits for all PMs to complete)
-  // Use a generous timeout for graceful shutdown (1 hour)
-  const gracefulTimeout = parseInt(
-    process.env.GRACEFUL_SHUTDOWN_TIMEOUT_MS || "3600000",
-    10
-  );
-  logger.system(
-    `Waiting for spawn worker to finish (timeout: ${
-      gracefulTimeout / 1000
-    }s)...`
-  );
-  await stopSpawnWorker(gracefulTimeout);
-  logger.system("Spawn worker stopped, all PM agents completed");
-
-  // 4. Close queues and Redis
-  await closeQueues();
-  await closeRedisConnection();
-  logger.system("Queue connections closed");
-
-  // 5. Stop HTTP server
   if (app) {
     await app.stop();
     logger.plain("Server closed");
