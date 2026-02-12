@@ -118,20 +118,6 @@ export class Logger {
   }
 
   /**
-   * Log a triage queue event
-   */
-  triageQueue(message: string): void {
-    console.log(`${c.blue('[triage-queue]')} ${message}`);
-  }
-
-  /**
-   * Log a spawn queue event
-   */
-  spawnQueue(message: string): void {
-    console.log(`${c.magenta('[spawn-queue]')} ${message}`);
-  }
-
-  /**
    * Log a server event
    */
   server(message: string): void {

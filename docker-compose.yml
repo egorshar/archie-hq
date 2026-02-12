@@ -1,8 +1,8 @@
 # Archie HQ - Docker Compose (base)
 #
 # Usage:
-#   Development: npm run docker:dev   (with local Redis)
-#   Production:  npm run docker:prod  (uses external Redis from .env)
+#   Development: npm run docker:dev
+#   Production:  npm run docker:prod
 #
 # Setup:
 #   1. Copy .env.example to .env and fill in your values
