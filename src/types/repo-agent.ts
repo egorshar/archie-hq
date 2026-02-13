@@ -27,4 +27,7 @@ export interface RepoAgentConfig {
 
   /** Base branch for PRs and merges, e.g., 'main', 'master', 'develop'. Defaults to 'main' if not specified. */
   baseBranch?: string;
+
+  /** Layer 3 agent prompt body from plugins/<name>/agents/<key>.md (domain-specific instructions) */
+  agentPrompt?: string;
 }

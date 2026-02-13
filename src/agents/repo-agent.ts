@@ -43,14 +43,27 @@ async function generateRepoAgentPrompt(
     .map((c) => `- ${c.agentId}: ${c.role} (${c.repoKey} repository)`)
     .join("\n");
 
-  return loadPrompt("repo-agent", {
+  // Layer 1: Universal multi-agent protocol
+  const corePrompt = await loadPrompt("agent-core", {
     AGENT_ID: config.agentId,
     AGENT_ROLE: config.role,
-    REPO_KEY: config.repoKey,
     EXPERTISE: config.expertise,
     PEER_LIST: peerList,
+  });
+
+  // Layer 2: Repo-agent track extension
+  const repoPrompt = await loadPrompt("repo-agent", {
+    REPO_KEY: config.repoKey,
     BASE_BRANCH: config.baseBranch || "main",
   });
+
+  // Layer 3: Plugin agent override (domain-specific instructions from agents/<key>.md)
+  const layers = [corePrompt, repoPrompt];
+  if (config.agentPrompt) {
+    layers.push(config.agentPrompt);
+  }
+
+  return layers.join("\n\n");
 }
 
 /**
