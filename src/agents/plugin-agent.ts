@@ -24,6 +24,7 @@ import {
   createRepoAgentMcpServer,
   type BaseToolCallbacks,
 } from "../mcp/tools.js";
+import { createResearchMcpServer, createResearchPostToolHook } from "../mcp/research-tools.js";
 import { processAgentEventForLogging, logger } from "../system/logger.js";
 import { buildPeerList } from "./peer-list.js";
 import { loadPrompt } from "../utils/prompt-loader.js";
@@ -143,12 +144,24 @@ Read it ONCE when you receive a new message, then proceed with your work. Don't 
     resume: sessionId,
     maxTurns: 100,
     permissionMode: "dontAsk" as const,
+    hooks: {
+      PostToolUse: [createResearchPostToolHook({
+        getSharedDir: () => getSharedPath(metadata.task_id),
+        getTaskId: () => metadata.task_id,
+        getAgentId: () => config.agentId,
+      })],
+    },
     mcpServers: {
       "repo-agent-tools": mcpServer,
+      "research-tools": createResearchMcpServer({
+        getResearchesDir: () => join(getTaskPath(metadata.task_id), 'researches'),
+        getCallerAgentId: () => config.agentId,
+      }),
     },
     allowedTools: [
       "mcp__repo-agent-tools__send_message_to_agent",
       "mcp__repo-agent-tools__log_finding",
+      "mcp__research-tools__web_research",
       "Read",
       "Glob",
       "Grep",

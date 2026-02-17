@@ -6,15 +6,17 @@
  * Uses streaming generator for continuous message processing.
  */
 
+import { join } from "path";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { TaskMetadata } from "../types/index.js";
 import type { AgentHandle } from "../types/agent.js";
-import { getSharedPath } from "../system/task-manager.js";
+import { getSharedPath, getTaskPath } from "../system/task-manager.js";
 import {
   MessageQueue,
   createRecoverableInputGenerator,
 } from "../system/message-queue.js";
 import { createPMAgentMcpServer, type PMToolCallbacks } from "../mcp/tools.js";
+import { createResearchMcpServer, createResearchPostToolHook } from "../mcp/research-tools.js";
 import { processAgentEventForLogging, logger } from "../system/logger.js";
 import { getAllRepoConfigs } from "./repo-configs.js";
 import { getAllPluginAgentConfigs } from "./plugin-configs.js";
@@ -101,11 +103,23 @@ Files available to read (in your working directory):
     resume: sessionId,
     maxTurns: 100,
     permissionMode: "dontAsk" as const,
+    hooks: {
+      PostToolUse: [createResearchPostToolHook({
+        getSharedDir: () => sharedPath,
+        getTaskId: () => metadata.task_id,
+        getAgentId: () => 'pm-agent',
+      })],
+    },
     mcpServers: {
       "pm-agent-tools": mcpServer,
+      "research-tools": createResearchMcpServer({
+        getResearchesDir: () => join(getTaskPath(metadata.task_id), 'researches'),
+        getCallerAgentId: () => 'pm-agent',
+      }),
     },
     allowedTools: [
       "Skill",
+      "mcp__research-tools__web_research",
       "mcp__pm-agent-tools__send_message_to_agent",
       "mcp__pm-agent-tools__post_to_slack",
       "mcp__pm-agent-tools__assign_task_owner",
