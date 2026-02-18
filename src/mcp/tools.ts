@@ -49,6 +49,11 @@ export interface PRReview {
 export interface BaseToolCallbacks {
   onSendMessage: (target: AgentName, message: string) => Promise<string>;
   onLogFinding: (entry: string, type: FindingType) => Promise<void>;
+
+  // Research budget callbacks (Defense 4) — all agents with research access need these
+  checkResearchBudget: () => { allowed: boolean; used: number; limit: number };
+  incrementResearchCount: () => void;
+  onResearchBudgetExceeded: () => Promise<void>;
 }
 
 /**

@@ -26,7 +26,7 @@ import {
   createRepoAgentMcpServer,
   type RepoAgentToolCallbacks,
 } from "../mcp/tools.js";
-import { createResearchMcpServer, createResearchPostToolHook } from "../mcp/research-tools.js";
+import { createResearchMcpServer, createResearchPostToolHook, createResearchDefenseTagHook } from "../mcp/research-tools.js";
 import { processAgentEventForLogging, logger } from "../system/logger.js";
 import { buildPeerList } from "./peer-list.js";
 import { setupWorktree, worktreeExists, fetchOrigin } from "../system/worktree-manager.js";
@@ -170,7 +170,7 @@ Read it ONCE when you receive a new message, then proceed with your work. Don't 
 
   // Build query options (session ID may change on retry)
   const buildQueryOptions = (sessionId?: string) => ({
-    model: (process.env.SONNET_MODEL || "claude-sonnet-4-5-20250929") as any,
+    model: 'sonnet',
     betas: ["context-1m-2025-08-07"] as any,
     systemPrompt: `${systemPrompt}\n\nCurrent Context:\n${context}`,
     cwd: repoPath,
@@ -187,17 +187,24 @@ Read it ONCE when you receive a new message, then proceed with your work. Don't 
     maxTurns: 100,
     permissionMode: "dontAsk" as const,
     hooks: {
-      PostToolUse: [createResearchPostToolHook({
-        getSharedDir: () => getSharedPath(metadata.task_id),
-        getTaskId: () => metadata.task_id,
-        getAgentId: () => config.agentId,
-      })],
+      PostToolUse: [
+        createResearchPostToolHook({
+          getSharedDir: () => getSharedPath(metadata.task_id),
+          getTaskId: () => metadata.task_id,
+          getAgentId: () => config.agentId,
+        }),
+        createResearchDefenseTagHook(),
+      ],
     },
     mcpServers: {
       "repo-agent-tools": mcpServer,
       "research-tools": createResearchMcpServer({
+        getTaskId: () => metadata.task_id,
         getResearchesDir: () => join(getTaskPath(metadata.task_id), 'researches'),
         getCallerAgentId: () => config.agentId,
+        checkResearchBudget: callbacks.checkResearchBudget,
+        incrementResearchCount: callbacks.incrementResearchCount,
+        onResearchBudgetExceeded: callbacks.onResearchBudgetExceeded,
       }),
     },
     allowedTools: [

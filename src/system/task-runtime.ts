@@ -118,6 +118,22 @@ function createToolCallbacks(
 
       runtime.lastActivity = new Date();
 
+      // Inter-agent message budget tracking (Defense 4)
+      runtime.budgets.interAgentMessageCount++;
+      if (runtime.budgets.interAgentMessageCount > runtime.budgets.interAgentMessageLimit) {
+        logger.warn(
+          "budget",
+          `Inter-agent message limit exceeded for task ${runtime.taskId} (${runtime.budgets.interAgentMessageCount}/${runtime.budgets.interAgentMessageLimit})`
+        );
+        // Advisory: post to Slack but don't block
+        if (slackPostCallback) {
+          slackPostCallback(
+            runtime.taskId,
+            `⚠️ Inter-agent message limit exceeded (${runtime.budgets.interAgentMessageCount}/${runtime.budgets.interAgentMessageLimit}). Task continues but may be consuming excessive resources.`
+          ).catch(err => logger.error("budget", "Failed to post message limit warning", err));
+        }
+      }
+
       // Log agent-to-agent communication to shared knowledge
       await appendAgentFinding(
         runtime.taskId,
@@ -577,6 +593,85 @@ function createToolCallbacks(
 
       await client.requestReReview(config.githubRepo, prNumber);
     },
+
+    // ========================================================================
+    // Research Budget Callbacks (Defense 4)
+    // ========================================================================
+
+    checkResearchBudget: () => ({
+      allowed: runtime.budgets.researchRequestCount < runtime.budgets.researchRequestLimit,
+      used: runtime.budgets.researchRequestCount,
+      limit: runtime.budgets.researchRequestLimit,
+    }),
+
+    incrementResearchCount: () => {
+      runtime.budgets.researchRequestCount++;
+      logger.debug(
+        "budget",
+        `Research request ${runtime.budgets.researchRequestCount}/${runtime.budgets.researchRequestLimit} for task ${runtime.taskId}`
+      );
+
+      // Persist count to metadata (fire-and-forget — don't block research pipeline)
+      loadMetadata(runtime.taskId).then(async (meta) => {
+        if (meta) {
+          meta.research_request_count = runtime.budgets.researchRequestCount;
+          await saveMetadata(runtime.taskId, meta);
+        }
+      }).catch(err => logger.error("budget", "Failed to persist research count", err));
+    },
+
+    onResearchBudgetExceeded: async () => {
+      logger.warn(
+        "budget",
+        `Research budget exceeded for task ${runtime.taskId} (${runtime.budgets.researchRequestCount}/${runtime.budgets.researchRequestLimit})`
+      );
+
+      // Post to Slack with interactive buttons for approval
+      if (slackPostInteractiveCallback) {
+        const blocks = [
+          {
+            type: "section",
+            text: {
+              type: "mrkdwn",
+              text: `*Research budget reached* (${runtime.budgets.researchRequestCount}/${runtime.budgets.researchRequestLimit} requests). Approve additional research?`,
+            },
+          },
+          {
+            type: "actions",
+            elements: [
+              {
+                type: "button",
+                text: { type: "plain_text", text: "Approve (+5)" },
+                action_id: "approve_research_budget",
+                value: runtime.taskId,
+                style: "primary",
+              },
+              {
+                type: "button",
+                text: { type: "plain_text", text: "Deny" },
+                action_id: "deny_research_budget",
+                value: runtime.taskId,
+                style: "danger",
+              },
+            ],
+          },
+        ];
+
+        await slackPostInteractiveCallback(
+          runtime.taskId,
+          `Research budget reached (${runtime.budgets.researchRequestCount}/${runtime.budgets.researchRequestLimit} requests)`,
+          blocks
+        ).catch(err => logger.error("budget", "Failed to post budget approval request", err));
+      } else if (slackPostCallback) {
+        await slackPostCallback(
+          runtime.taskId,
+          `Research budget reached (${runtime.budgets.researchRequestCount}/${runtime.budgets.researchRequestLimit} requests). Stopping task — check knowledge.log for details.`
+        ).catch(err => logger.error("budget", "Failed to post budget message", err));
+      }
+
+      // Stop the task — will be reactivated on approval/denial
+      await stopTask(runtime.taskId);
+    },
   };
 }
 
@@ -715,7 +810,36 @@ export async function initializeTaskRuntime(
     spawned: new Set<AgentName>(),
     lastActivity: new Date(),
     isActive: true,
+    budgets: {
+      researchRequestCount: metadata.research_request_count ?? 0,
+      researchRequestLimit: 5 + (metadata.research_budget_extra ?? 0),
+      interAgentMessageCount: 0,
+      interAgentMessageLimit: 100,
+      taskStartTime: new Date(),
+      taskTimeoutMs: 1_800_000, // 30 minutes
+    },
   };
+
+  // Wall-clock timeout (Defense 4) — check every 60s
+  runtime.timeoutInterval = setInterval(async () => {
+    const elapsed = Date.now() - runtime.budgets.taskStartTime.getTime();
+    if (elapsed >= runtime.budgets.taskTimeoutMs) {
+      logger.warn(
+        "budget",
+        `Task ${taskId} exceeded wall-clock timeout (${Math.round(elapsed / 60_000)}min / ${Math.round(runtime.budgets.taskTimeoutMs / 60_000)}min)`
+      );
+
+      // Post timeout message to Slack
+      if (slackPostCallback) {
+        await slackPostCallback(
+          taskId,
+          `⏱️ Task timed out after ${Math.round(elapsed / 60_000)} minutes. Stopping task.`
+        ).catch(err => logger.error("budget", "Failed to post timeout message", err));
+      }
+
+      await stopTask(taskId);
+    }
+  }, 60_000);
 
   activeTasks.set(taskId, runtime);
 
@@ -788,6 +912,12 @@ export async function stopTask(taskId: string): Promise<void> {
 
   runtime.isActive = false;
 
+  // Clear wall-clock timeout interval
+  if (runtime.timeoutInterval) {
+    clearInterval(runtime.timeoutInterval);
+    runtime.timeoutInterval = undefined;
+  }
+
   // Stop all queues - this will cause agent generators to exit
   for (const queue of runtime.queues.values()) {
     queue.stop();
@@ -818,6 +948,12 @@ export async function completeTask(taskId: string): Promise<void> {
   }
 
   runtime.isActive = false;
+
+  // Clear wall-clock timeout interval
+  if (runtime.timeoutInterval) {
+    clearInterval(runtime.timeoutInterval);
+    runtime.timeoutInterval = undefined;
+  }
 
   // Stop all queues
   for (const queue of runtime.queues.values()) {
@@ -877,3 +1013,43 @@ export async function handleEditModeDenial(taskId: string): Promise<void> {
   // Reactivate task (PM was stopped, needs to restart)
   await reactivateTask(taskId);
 }
+
+/**
+ * Handle research budget approval from Slack button
+ * Persists extra budget to metadata BEFORE reactivation (avoids race condition)
+ */
+export async function handleResearchBudgetApproval(taskId: string): Promise<void> {
+  const metadata = await loadMetadata(taskId);
+  if (!metadata) {
+    logger.error("System", `Task ${taskId} not found for research budget approval`);
+    return;
+  }
+
+  // Persist increased budget BEFORE reactivation so initializeTaskRuntime picks it up
+  metadata.research_budget_extra = (metadata.research_budget_extra ?? 0) + 5;
+  await saveMetadata(taskId, metadata);
+
+  await appendAgentFinding(
+    taskId,
+    "system",
+    `Research budget extended by user (+5 requests, total extra: ${metadata.research_budget_extra})`,
+    "decision"
+  );
+
+  await reactivateTask(taskId);
+}
+
+/**
+ * Handle research budget denial from Slack button
+ */
+export async function handleResearchBudgetDenial(taskId: string): Promise<void> {
+  await appendAgentFinding(
+    taskId,
+    "system",
+    "Additional research denied by user",
+    "decision"
+  );
+
+  await reactivateTask(taskId);
+}
+

@@ -11,6 +11,18 @@ import { MessageQueue } from './message-queue.js';
 import type { TaskMetadata } from '../types/index.js';
 
 /**
+ * Resource budgets for a task (Defense 4 — per-task limits)
+ */
+export interface TaskBudgets {
+  researchRequestCount: number;     // web_research calls made
+  researchRequestLimit: number;     // default: 5
+  interAgentMessageCount: number;   // send_message_to_agent calls
+  interAgentMessageLimit: number;   // default: 100
+  taskStartTime: Date;              // for wall-clock timeout
+  taskTimeoutMs: number;            // default: 1_800_000 (30 minutes)
+}
+
+/**
  * Runtime state for a single task
  */
 export interface TaskRuntimeState {
@@ -32,6 +44,12 @@ export interface TaskRuntimeState {
   // Activity tracking
   lastActivity: Date;
   isActive: boolean;
+
+  // Resource budgets (Defense 4)
+  budgets: TaskBudgets;
+
+  // Wall-clock timeout interval (cleared on stop/complete)
+  timeoutInterval?: ReturnType<typeof setInterval>;
 }
 
 /**

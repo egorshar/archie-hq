@@ -38,6 +38,8 @@ export interface TaskMetadata {
   repositories: Record<string, RepositoryInfo>;
   status: TaskStatus;
   edit_allowed?: boolean;     // Has user approved edit mode for this task?
+  research_budget_extra?: number;    // Additional research budget granted via Slack approval (+5 per approval)
+  research_request_count?: number;   // Persisted research request count (survives stop/reactivate)
   created_at: string;
   updated_at: string;
 }

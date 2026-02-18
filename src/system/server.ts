@@ -26,6 +26,8 @@ import {
   setSlackCallbacks,
   handleEditModeApproval,
   handleEditModeDenial,
+  handleResearchBudgetApproval,
+  handleResearchBudgetDenial,
 } from "./task-runtime.js";
 import { loadMetadata, appendGitHubEvent } from "./task-manager.js";
 import { logger } from "./logger.js";
@@ -276,6 +278,58 @@ export async function startServer(config: ServerConfig): Promise<void> {
       await handleEditModeDenial(taskId);
     } catch (error) {
       logger.error("Server", "Error handling edit mode denial", error);
+    }
+  });
+
+  // Handle research budget approval button (Defense 4)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  app!.action("approve_research_budget", async ({ action, ack, body }: any) => {
+    await ack();
+
+    const taskId = action.value;
+    const userId = body.user?.id || "unknown";
+
+    logger.server(`Research budget approved by ${userId} for task ${taskId}`);
+
+    try {
+      if (body.channel?.id && body.message?.ts) {
+        await updateMessage(
+          body.channel.id,
+          body.message.ts,
+          `✅ *Research budget extended* by <@${userId}> (+5 requests)`,
+          []
+        );
+      }
+
+      await handleResearchBudgetApproval(taskId);
+    } catch (error) {
+      logger.error("Server", "Error handling research budget approval", error);
+    }
+  });
+
+  // Handle research budget denial button (Defense 4)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  app!.action("deny_research_budget", async ({ action, ack, body }: any) => {
+    await ack();
+
+    const taskId = action.value;
+    const userId = body.user?.id || "unknown";
+
+    logger.server(`Research budget denied by ${userId} for task ${taskId}`);
+
+    try {
+      if (body.channel?.id && body.message?.ts) {
+        await updateMessage(
+          body.channel.id,
+          body.message.ts,
+          `❌ *Additional research denied* by <@${userId}>`,
+          []
+        );
+      }
+
+      await handleResearchBudgetDenial(taskId);
+    } catch (error) {
+      logger.error("Server", "Error handling research budget denial", error);
     }
   });
 

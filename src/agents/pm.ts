@@ -16,7 +16,7 @@ import {
   createRecoverableInputGenerator,
 } from "../system/message-queue.js";
 import { createPMAgentMcpServer, type PMToolCallbacks } from "../mcp/tools.js";
-import { createResearchMcpServer, createResearchPostToolHook } from "../mcp/research-tools.js";
+import { createResearchMcpServer, createResearchPostToolHook, createResearchDefenseTagHook } from "../mcp/research-tools.js";
 import { processAgentEventForLogging, logger } from "../system/logger.js";
 import { getAllRepoConfigs } from "./repo-configs.js";
 import { getAllPluginAgentConfigs } from "./plugin-configs.js";
@@ -88,7 +88,7 @@ Files available to read (in your working directory):
 
   // Build query options (session ID may change on retry)
   const buildQueryOptions = (sessionId?: string) => ({
-    model: (process.env.SONNET_MODEL || "claude-sonnet-4-5-20250929") as any,
+    model: 'opus',
     betas: ["context-1m-2025-08-07"] as any,
     systemPrompt: `${PM_SYSTEM_PROMPT}\n\nCurrent Task Context:\n${context}`,
     cwd: sharedPath,
@@ -104,17 +104,24 @@ Files available to read (in your working directory):
     maxTurns: 100,
     permissionMode: "dontAsk" as const,
     hooks: {
-      PostToolUse: [createResearchPostToolHook({
-        getSharedDir: () => sharedPath,
-        getTaskId: () => metadata.task_id,
-        getAgentId: () => 'pm-agent',
-      })],
+      PostToolUse: [
+        createResearchPostToolHook({
+          getSharedDir: () => sharedPath,
+          getTaskId: () => metadata.task_id,
+          getAgentId: () => 'pm-agent',
+        }),
+        createResearchDefenseTagHook(),
+      ],
     },
     mcpServers: {
       "pm-agent-tools": mcpServer,
       "research-tools": createResearchMcpServer({
+        getTaskId: () => metadata.task_id,
         getResearchesDir: () => join(getTaskPath(metadata.task_id), 'researches'),
         getCallerAgentId: () => 'pm-agent',
+        checkResearchBudget: callbacks.checkResearchBudget,
+        incrementResearchCount: callbacks.incrementResearchCount,
+        onResearchBudgetExceeded: callbacks.onResearchBudgetExceeded,
       }),
     },
     allowedTools: [
