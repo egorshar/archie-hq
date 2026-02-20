@@ -29,17 +29,28 @@ export interface RepositoryInfo {
   last_processed_comment_id?: number;  // Last processed PR comment ID (for triage)
 }
 
+/**
+ * Per-agent session state — tracks whether each agent is active
+ * and preserves session IDs for SDK resume.
+ */
+export interface AgentSessionState {
+  session_id?: string;       // undefined = no session yet or cleared (fresh start)
+  active: boolean;           // true = doing work, false = finished turn / crashed
+  last_activity?: string;    // ISO timestamp
+}
+
 export interface TaskMetadata {
   task_id: string;
   task_owner: AgentName | null;
   participants: AgentName[];
   slack_threads: SlackThread[];
-  agent_sessions: Record<string, string>;
+  agent_sessions: Record<string, AgentSessionState | string>; // union handles legacy string values on disk
   repositories: Record<string, RepositoryInfo>;
   status: TaskStatus;
   edit_allowed?: boolean;     // Has user approved edit mode for this task?
   research_budget_extra?: number;    // Additional research budget granted via Slack approval (+5 per approval)
   research_request_count?: number;   // Persisted research request count (survives stop/reactivate)
+  failure_counter?: number;          // Consecutive recovery attempts (Stage 3 idle detection)
   created_at: string;
   updated_at: string;
 }

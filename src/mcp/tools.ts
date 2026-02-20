@@ -54,6 +54,9 @@ export interface BaseToolCallbacks {
   checkResearchBudget: () => { allowed: boolean; used: number; limit: number };
   incrementResearchCount: () => void;
   onResearchBudgetExceeded: () => Promise<void>;
+
+  // Agent lifecycle — called when agent's turn ends (Stop hook fires)
+  onIdle: () => Promise<void>;
 }
 
 /**
@@ -73,6 +76,9 @@ export interface PMToolCallbacks extends BaseToolCallbacks {
   onReportCompletion: () => Promise<void>;
   onAssignTaskOwner: (agent: AgentName) => Promise<void>;
   onRequestEditMode: (reason: string) => Promise<void>;
+
+  // Agent status
+  onGetAgentsStatus: () => { agent: string; active: boolean; last_activity?: string }[];
 
   // GitHub callbacks
   onTriggerMergeCheck: () => Promise<{ merged: string[]; pending: string[]; conflicts: string[] }>;
@@ -288,6 +294,39 @@ export function createReportCompletionTool(callbacks: ToolCallbacks) {
               : 'Stopped task.',
           },
         ],
+      };
+    }
+  );
+}
+
+/**
+ * Create the get_agents_status tool
+ *
+ * Returns which agents are spawned for the current task
+ * and whether each is currently active (processing) or idle.
+ */
+export function createGetAgentsStatusTool(callbacks: PMToolCallbacks) {
+  return tool(
+    'get_agents_status',
+    'Get the status of all agents for the current task. Shows which agents are spawned and whether they are active or idle.',
+    {},
+    async () => {
+      const statuses = callbacks.onGetAgentsStatus();
+
+      if (statuses.length === 0) {
+        return {
+          content: [{ type: 'text' as const, text: 'No agents spawned yet.' }],
+        };
+      }
+
+      const lines = statuses.map((s) => {
+        const state = s.active ? 'active' : 'idle';
+        const activity = s.last_activity ? ` (last activity: ${s.last_activity})` : '';
+        return `- ${s.agent}: ${state}${activity}`;
+      });
+
+      return {
+        content: [{ type: 'text' as const, text: `Agent statuses:\n${lines.join('\n')}` }],
       };
     }
   );
@@ -668,6 +707,8 @@ export function createPMAgentMcpServer(callbacks: PMToolCallbacks) {
       createAssignTaskOwnerTool(callbacks),
       createReportCompletionTool(callbacks),
       createRequestEditModeTool(callbacks),
+      // Agent status
+      createGetAgentsStatusTool(callbacks),
       // GitHub tools
       createPushBranchTool(callbacks),
       createPullRequestTool(callbacks),

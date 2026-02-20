@@ -5,7 +5,7 @@
  * Extracted to avoid circular imports between task-runtime and triage-worker.
  */
 
-import type { AgentName } from '../types/index.js';
+import type { AgentName, AgentSessionState } from '../types/index.js';
 import type { AgentHandle } from '../types/agent.js';
 import { MessageQueue } from './message-queue.js';
 import type { TaskMetadata } from '../types/index.js';
@@ -35,8 +35,8 @@ export interface TaskRuntimeState {
   // Agent handles for tracking running agents (dynamic, keyed by agent name)
   handles: Map<AgentName, AgentHandle>;
 
-  // Session IDs for resume capability (dynamic, keyed by agent name)
-  sessions: Map<AgentName, string>;
+  // Per-agent session state for resume + active tracking (dynamic, keyed by agent name)
+  sessions: Map<AgentName, AgentSessionState>;
 
   // Track which agents have been spawned (dynamic, keyed by agent name)
   spawned: Set<AgentName>;
@@ -50,6 +50,9 @@ export interface TaskRuntimeState {
 
   // Wall-clock timeout interval (cleared on stop/complete)
   timeoutInterval?: ReturnType<typeof setInterval>;
+
+  // Consecutive idle-detection recovery attempts (resets on nuclear restart)
+  recoveryAttempts: number;
 }
 
 /**

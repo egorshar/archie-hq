@@ -63,6 +63,14 @@ let app: AppType | null = null;
 let isShuttingDown = false;
 
 /**
+ * Check if the server is shutting down.
+ * Used by agent state management to skip deactivation writes during shutdown.
+ */
+export function getIsShuttingDown(): boolean {
+  return isShuttingDown;
+}
+
+/**
  * Create and start the server
  */
 export async function startServer(config: ServerConfig): Promise<void> {
@@ -405,7 +413,7 @@ async function handleExistingTaskDirect(
  * Graceful shutdown
  *
  * Stop accepting webhooks and stop HTTP server.
- * Active PMs are dropped (recovery on restart is future work).
+ * Active agents are dropped — recovery happens on restart via recoverActiveTasks().
  */
 export async function stopServer(): Promise<void> {
   logger.plain("Shutting down Archie server...");

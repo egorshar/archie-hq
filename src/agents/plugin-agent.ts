@@ -153,6 +153,12 @@ Read it ONCE when you receive a new message, then proceed with your work. Don't 
         }),
         createResearchDefenseTagHook(),
       ],
+      Stop: [{
+        hooks: [async () => {
+          await callbacks.onIdle();
+          return { continue: true };
+        }],
+      }],
     },
     mcpServers: {
       "repo-agent-tools": mcpServer,
