@@ -28,8 +28,7 @@ build/
 *.pem
 
 # Runtime data
-sessions/
-repos/
+workdir/
 claude-data/
 *.log
 
@@ -45,5 +44,7 @@ coverage/
 tmp/
 temp/
 
-# Plugin configurations (cloned from separate repo)
+# Legacy (kept for transition — can be removed once all environments use workdir/)
+sessions/
+repos/
 plugins

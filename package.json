@@ -10,8 +10,7 @@
     "start": "node dist/index.js",
     "lint": "eslint src/**/*.ts",
     "typecheck": "tsc --noEmit",
-    "docker:dev": "docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build",
-    "docker:prod": "docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build",
+    "docker:dev": "docker compose up --build",
     "docker:stop": "docker compose down"
   },
   "engines": {

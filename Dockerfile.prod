@@ -37,7 +37,7 @@ RUN npm run build && \
 RUN npm prune --production
 
 # Create directories
-RUN mkdir -p /app/sessions /app/repos /app/secrets
+RUN mkdir -p /workdir /app/secrets
 
 # Configure git authentication
 RUN chmod +x /app/scripts/git-askpass.sh

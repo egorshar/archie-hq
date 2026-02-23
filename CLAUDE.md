@@ -29,6 +29,10 @@ Slack messages → Triage Agent → PM Agent → Specialist Agents (Backend, Mob
 - Agents communicate via message queues and shared `shared-knowledge.log`
 - `docs/` contains architecture docs, guides, historical plans, and proposals
 
+## Working Directory
+
+All runtime state (plugins, repos, sessions) lives under `ARCHIE_WORKDIR` (default: `./workdir`). The app auto-clones plugins from `ARCHIE_PLUGINS` git URL and repos declared by plugins on startup. See `src/system/workdir.ts` for the bootstrap logic.
+
 ## Development Setup
 
 ```bash

@@ -10,8 +10,7 @@ import { existsSync } from 'fs';
 import { join } from 'path';
 import type { TaskMetadata, LogEntry, FindingType, SlackFile } from '../types/index.js';
 import { activeTasks } from './active-tasks.js';
-
-const SESSIONS_DIR = join(process.cwd(), 'sessions');
+import { SESSIONS_DIR } from './workdir.js';
 
 /**
  * Generate a unique task ID with human-readable date format

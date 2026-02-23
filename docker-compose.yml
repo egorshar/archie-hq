@@ -1,13 +1,11 @@
-# Archie HQ - Docker Compose (base)
+# Archie HQ - Docker Compose (local development)
 #
-# Usage:
-#   Development: npm run docker:dev
-#   Production:  npm run docker:prod
+# Usage: npm run docker:dev
 #
 # Setup:
 #   1. Copy .env.example to .env and fill in your values
 #   2. Place your GitHub App private key as secrets/github-private-key.pem
-#   3. Clone your repos into ./repos/backend and ./repos/mobile
+#   3. Plugins and repos are auto-cloned on startup via ARCHIE_PLUGINS env var
 #
 # Logs:
 #   docker compose logs -f          # Follow all logs
@@ -33,26 +31,28 @@ services:
 
     # Override paths for containerized environment
     environment:
-      # Paths inside container (override .env values)
       - CLAUDE_PATH=/usr/local/bin/claude
-      - ARCHIE_REPOS_DIR=/app/repos
+      - ARCHIE_WORKDIR=/workdir
+      - ARCHIE_PLUGINS=https://github.com/sweatco/archie-plugins
       - GITHUB_APP_PRIVATE_KEY_PATH=/app/secrets/github-private-key.pem
+      - NODE_ENV=development
 
     volumes:
-      # Plugins - domain-specific agent configs, prompts, and PM skills
-      - ./plugins:/app/plugins
+      # Single workdir mount — contains plugins/, repos/, sessions/
+      - ./workdir:/workdir
 
-      # Sessions - persist task data across container restarts
-      - ./sessions:/app/sessions
-
-      # Repos - mount your cloned repositories (needs write for git fetch/worktree)
-      - ./repos:/app/repos
+      # Mount source code for hot reload
+      - ./src:/app/src
+      - ./prompts:/app/prompts
 
       # Secrets - mount your private key file
       - ./secrets:/app/secrets:ro
 
       # Claude Code config - stores API keys, sessions, settings
       - ./claude-data:/root/.claude
+
+      # Exclude node_modules (use container's version)
+      - /app/node_modules
 
     healthcheck:
       test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:${PORT:-3000}/health || exit 1"]

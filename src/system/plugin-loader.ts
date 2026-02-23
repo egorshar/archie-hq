@@ -14,8 +14,9 @@
 import { readFileSync, existsSync, readdirSync } from 'fs';
 import { join } from 'path';
 import matter from 'gray-matter';
+import { PLUGINS_DIR } from './workdir.js';
 
-export const PLUGINS_DIR = join(process.cwd(), process.env.ARCHIE_PLUGINS_DIR || 'plugins');
+export { PLUGINS_DIR };
 
 export interface PluginRepoConfig {
   githubRepo: string;
@@ -72,7 +73,7 @@ function scanPlugins(): LoadedPlugin[] {
   const entries = readdirSync(PLUGINS_DIR, { withFileTypes: true });
 
   for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
+    if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
 
     const pluginName = entry.name;
     const pluginDir = join(PLUGINS_DIR, pluginName);
@@ -138,8 +139,15 @@ function scanPlugins(): LoadedPlugin[] {
   return plugins;
 }
 
-// Load at module initialization
-const loadedPlugins = scanPlugins();
+// Initialized by initPlugins(), called from main() at startup
+let loadedPlugins: LoadedPlugin[] = [];
+
+/**
+ * Initialize plugin loader. Must be called after bootstrapWorkdir().
+ */
+export function initPlugins(): void {
+  loadedPlugins = scanPlugins();
+}
 
 /**
  * Get all loaded plugins

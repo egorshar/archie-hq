@@ -9,8 +9,6 @@
  */
 
 import { getPlugins } from '../system/plugin-loader.js';
-// Import repo agent IDs for collision cross-checking.
-// This import also ensures repo-configs.ts initializes first (ES module evaluation order).
 import { getAllRepoAgentIds } from './repo-configs.js';
 import type { PluginAgentConfig } from '../types/plugin-agent.js';
 
@@ -67,8 +65,15 @@ function buildPluginAgentConfigs(): PluginAgentConfig[] {
   return configs;
 }
 
-// Load at module initialization (empty is valid — no generic plugins loaded)
-const pluginAgentConfigs = buildPluginAgentConfigs();
+// Initialized by initPluginAgentConfigs(), called from main() at startup
+let pluginAgentConfigs: PluginAgentConfig[] = [];
+
+/**
+ * Initialize plugin agent configs. Must be called after initRepoConfigs().
+ */
+export function initPluginAgentConfigs(): void {
+  pluginAgentConfigs = buildPluginAgentConfigs();
+}
 
 /**
  * Get a plugin agent config by agent ID

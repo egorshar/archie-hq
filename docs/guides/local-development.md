@@ -6,24 +6,21 @@
 # 1. Install dependencies
 npm install
 
-# 2. Clone repos
-git clone git@github.com:sweatco/backend.git repos/backend
-git clone git@github.com:sweatco/mobile.git repos/mobile
-
-# 3. Setup environment
+# 2. Setup environment
 cp .env.example .env
 # Edit .env with your API keys
+# Set ARCHIE_PLUGINS to your plugins repo git URL
 
-# 4. Start server
+# 3. Start server (plugins and repos are auto-cloned on first run)
 npm run dev
 
-# 5. Expose with ngrok (separate terminal)
+# 4. Expose with ngrok (separate terminal)
 ngrok http 3000
 
-# 6. Update Slack Event URL with ngrok URL
+# 5. Update Slack Event URL with ngrok URL
 # https://api.slack.com/apps → Event Subscriptions → https://YOUR-URL.ngrok.io/slack/events
 
-# 7. Test in Slack: @Archie investigate login timeout
+# 6. Test in Slack: @Archie investigate login timeout
 ```
 
 ## Prerequisites
@@ -37,23 +34,23 @@ ngrok http 3000
 - ngrok (required for Slack webhooks to reach localhost)
 - GitHub App credentials (for PR management features)
 
-## Repository Setup
+## Working Directory
 
-Clone repositories as **regular clones** (not bare) so agents can read code files directly.
+All runtime state lives under `ARCHIE_WORKDIR` (default: `./workdir`). On startup, the app:
 
+1. Clones/pulls the plugins repo from `ARCHIE_PLUGINS` into `{WORKDIR}/plugins/`
+2. Reads `repo-config.json` from each plugin to discover required repos
+3. Clones/fetches each required repo into `{WORKDIR}/repos/`
+4. Creates `{WORKDIR}/sessions/` for task data
+
+Everything is automatic — just set `ARCHIE_PLUGINS` in your `.env` and run.
+
+**For plugin development** (editing plugins locally instead of pulling from git):
 ```bash
-mkdir -p repos
-git clone git@github.com:sweatco/backend.git repos/backend
-git clone git@github.com:sweatco/mobile.git repos/mobile
+mkdir -p workdir
+git clone git@github.com:sweatco/archie-plugins.git workdir/plugins
+# Don't set ARCHIE_PLUGINS in .env — the app will use the local directory
 ```
-
-Verify code is accessible:
-```bash
-ls repos/backend/app/models/    # Should show files
-ls repos/mobile/src/screens/    # Should show files
-```
-
-The `ARCHIE_REPOS_DIR` environment variable (default: `/repos`) controls where agents look for repositories. Repo paths are configured per-plugin in `plugins/*/repo-config.json`.
 
 ## Slack Bot Setup
 
@@ -87,8 +84,8 @@ GITHUB_INSTALLATION_ID=...
 GITHUB_WEBHOOK_SECRET=...             # GitHub webhook verification
 
 # Optional - Paths
-ARCHIE_PLUGINS_DIR=./plugins          # Plugin directory (default: ./plugins)
-ARCHIE_REPOS_DIR=/repos               # Base repo directory (default: /repos)
+ARCHIE_WORKDIR=./workdir              # Working directory (default: ./workdir)
+ARCHIE_PLUGINS=https://github.com/... # Plugins repo git URL (auto-cloned)
 PORT=3000                             # Server port (default: 3000)
 
 # Optional - Development
@@ -136,17 +133,12 @@ The server starts on `http://localhost:3000` with:
 ## Docker Development
 
 ```bash
-# Development (with hot reload)
+# Start (with hot reload)
 npm run docker:dev
-
-# Production
-npm run docker:prod
 
 # Stop
 npm run docker:stop
 ```
-
-See [`DOCKER.md`](../../DOCKER.md) for detailed Docker configuration.
 
 ## Testing in Slack
 
@@ -168,9 +160,9 @@ Server console output shows all activity with color-coded, semantic logging:
 
 Inspect task state:
 ```bash
-ls sessions/                                    # All tasks
-cat sessions/task-*/shared/metadata.json        # Task metadata
-cat sessions/task-*/shared/knowledge.log        # Activity log
+ls workdir/sessions/                                    # All tasks
+cat workdir/sessions/task-*/shared/metadata.json        # Task metadata
+cat workdir/sessions/task-*/shared/knowledge.log        # Activity log
 ```
 
 ## Directory Structure
@@ -186,8 +178,9 @@ archie-hq/
 │   ├── types/            # TypeScript types
 │   └── utils/            # Utilities
 ├── prompts/              # Agent system prompts
-├── plugins/              # Domain plugins
-├── sessions/             # Task persistence (gitignored)
-├── repos/                # Git repositories (gitignored)
+├── workdir/              # Runtime state (gitignored)
+│   ├── plugins/          # Auto-cloned from ARCHIE_PLUGINS
+│   ├── repos/            # Auto-cloned from plugin repo-config.json
+│   └── sessions/         # Task persistence
 └── docs/                 # Documentation
 ```

@@ -9,10 +9,10 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
-import { join } from "path";
 import pc from "picocolors";
 import type { TriageResult, SlackMessage } from "../types/index.js";
 import { findTaskByThread } from "../system/task-manager.js";
+import { SESSIONS_DIR } from "../system/workdir.js";
 import { processAgentEventForLogging, logger } from "../system/logger.js";
 import { loadPrompt } from "../utils/prompt-loader.js";
 
@@ -42,7 +42,7 @@ async function runTriage<T extends z.ZodType>(
 ): Promise<z.infer<T>> {
   const systemPrompt = await loadPrompt("triage-agent", {});
   const jsonSchema = zodToJsonSchema(schema, { $refStrategy: "none" });
-  const sessionsDir = join(process.cwd(), "sessions");
+  const sessionsDir = SESSIONS_DIR;
 
   let result: z.infer<T> | null = null;
 

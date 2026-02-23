@@ -10,8 +10,7 @@ GitHub Actions (CI/CD)
 Container Registry (Docker images)
     ↓
 Compute Engine VM (e2-standard-2)
-    ├── /repos/           # Git repositories
-    ├── /sessions/        # Task persistence
+    ├── /workdir/         # Working directory (plugins, repos, sessions)
     └── /app/             # Application container
 
 Secrets: GCP Secret Manager
@@ -57,13 +56,11 @@ See `Jenkinsfile.build` for the build pipeline configuration.
 
 ## Docker Configuration
 
-Production uses multi-stage Docker builds:
+Docker configuration:
 
 - `Dockerfile.prod` — Production image (optimized, minimal)
 - `Dockerfile.dev` — Development image (with hot reload)
-- `docker-compose.yml` — Base compose configuration
-- `docker-compose.prod.yml` — Production overrides
-- `docker-compose.dev.yml` — Development overrides
+- `docker-compose.yml` — Local development compose
 
 ## Systemd Service
 
@@ -74,8 +71,7 @@ The application runs as a systemd service on the VM:
 Type=simple
 ExecStart=/usr/bin/docker run --name archie-app \
   -p 3000:3000 \
-  -v /repos:/repos \
-  -v /sessions:/sessions \
+  -v /workdir:/workdir \
   europe-west2-docker.pkg.dev/PROJECT/archie/app:latest
 Restart=always
 RestartSec=10
@@ -116,14 +112,14 @@ Application logs flow to Cloud Logging for querying and alerting.
 
 Automated daily backup to Cloud Storage:
 ```bash
-gsutil -m rsync -r /sessions gs://PROJECT-backups/sessions/$(date +%Y-%m-%d)/
+gsutil -m rsync -r /workdir/sessions gs://PROJECT-backups/sessions/$(date +%Y-%m-%d)/
 ```
 
 ### Recovery Procedures
 
 **App crash:** Systemd auto-restarts. In-progress tasks resume from disk state via session recovery (~10 seconds).
 
-**VM failure:** Create new VM, install Docker, restore sessions from Cloud Storage, clone repos from GitHub, deploy latest image (~30 minutes).
+**VM failure:** Create new VM, install Docker, restore sessions from Cloud Storage, deploy latest image. Repos and plugins auto-clone on startup (~30 minutes).
 
 ## Scaling
 
@@ -150,8 +146,8 @@ sudo systemctl restart archie
 curl http://localhost:3000/health
 
 # Inspect task state
-ls /sessions/
-cat /sessions/task-*/shared/metadata.json | jq .status
+ls /workdir/sessions/
+cat /workdir/sessions/task-*/shared/metadata.json | jq .status
 ```
 
 ### Incident Response

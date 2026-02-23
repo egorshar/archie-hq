@@ -11,9 +11,8 @@ import { readFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import matter from 'gray-matter';
 import type { RepoAgentConfig } from '../types/repo-agent.js';
-import { getPluginsWithRepoConfigs, PLUGINS_DIR } from '../system/plugin-loader.js';
-
-const REPOS_DIR = process.env.ARCHIE_REPOS_DIR || '/repos';
+import { getPluginsWithRepoConfigs } from '../system/plugin-loader.js';
+import { REPOS_DIR, PLUGINS_DIR } from '../system/workdir.js';
 
 /**
  * Build repo agent configs from loaded plugins that have repo-config.json.
@@ -72,16 +71,22 @@ function buildRepoConfigs(): RepoAgentConfig[] {
   return configs;
 }
 
-// Load at module initialization
-const repoConfigs = buildRepoConfigs();
+// Initialized by initRepoConfigs(), called from main() at startup
+let repoConfigs: RepoAgentConfig[] = [];
 
-// Fail-fast: empty array causes z.enum() crash in mcp/tools.ts
-if (repoConfigs.length === 0) {
-  throw new Error(
-    'No repo configs loaded. Ensure at least one plugin has repo-config.json. ' +
-    `Scanned: ${PLUGINS_DIR}. ` +
-    'Set ARCHIE_PLUGINS_DIR if plugins are in a non-default location.'
-  );
+/**
+ * Initialize repo configs. Must be called after initPlugins().
+ */
+export function initRepoConfigs(): void {
+  repoConfigs = buildRepoConfigs();
+
+  // Fail-fast: empty array causes z.enum() crash in mcp/tools.ts
+  if (repoConfigs.length === 0) {
+    throw new Error(
+      'No repo configs loaded. Ensure at least one plugin has repo-config.json. ' +
+      `Scanned: ${PLUGINS_DIR}.`
+    );
+  }
 }
 
 /**

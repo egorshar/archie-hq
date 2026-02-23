@@ -7,9 +7,10 @@
 import 'dotenv/config';
 import { startServer, stopServer, type ServerConfig } from './system/server.js';
 import { logger } from './system/logger.js';
-import { getPlugins } from './system/plugin-loader.js';
-import { getAllRepoConfigs } from './agents/repo-configs.js';
-import { getAllPluginAgentConfigs } from './agents/plugin-configs.js';
+import { bootstrapWorkdir, cloneRepos } from './system/workdir.js';
+import { initPlugins, getPlugins } from './system/plugin-loader.js';
+import { initRepoConfigs, getAllRepoConfigs } from './agents/repo-configs.js';
+import { initPluginAgentConfigs, getAllPluginAgentConfigs } from './agents/plugin-configs.js';
 import { configureGitIdentity } from './github/client.js';
 import { recoverActiveTasks } from './system/task-recovery.js';
 
@@ -57,9 +58,23 @@ async function main(): Promise<void> {
   try {
     const config = loadConfig();
 
+    // Bootstrap: create workdir structure, clone/pull plugins
+    await bootstrapWorkdir();
+
+    // Initialize modules (previously module-level, now explicit)
+    initPlugins();
+    initRepoConfigs();
+    initPluginAgentConfigs();
+
+    // Clone repos declared by plugins
+    const repoConfigs = getAllRepoConfigs();
+    await cloneRepos(repoConfigs.map((rc) => ({
+      key: rc.repoKey,
+      githubRepo: rc.githubRepo,
+    })));
+
     // Log loaded plugins and agents
     const plugins = getPlugins();
-    const repoConfigs = getAllRepoConfigs();
 
     logger.plain(`Plugins loaded: ${plugins.map((p) => p.name).join(', ') || 'none'}`);
     logger.plain('');

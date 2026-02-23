@@ -29,7 +29,7 @@ Plugin agents are lightweight, read-only agents for domains that do not need git
 
 ## Plugin Directory Structure
 
-Each plugin is a subdirectory under the `plugins/` directory (configurable via `ARCHIE_PLUGINS_DIR` env var). The structure follows standard Claude Code conventions with Archie-specific extensions:
+Each plugin is a subdirectory under the `plugins/` directory (at `$ARCHIE_WORKDIR/plugins/`, auto-cloned from `ARCHIE_PLUGINS` git URL). The structure follows standard Claude Code conventions with Archie-specific extensions:
 
 ```
 plugins/
@@ -65,7 +65,7 @@ The plugin loader (`src/system/plugin-loader.ts`) runs once at startup using syn
 
 ### Startup Scanning Process
 
-1. Read all entries in `PLUGINS_DIR` (default: `./plugins/`)
+1. Read all entries in `PLUGINS_DIR` (at `$ARCHIE_WORKDIR/plugins/`)
 2. For each subdirectory:
    - Check for `repo-config.json` and parse it if present
    - Scan `pm-skills/` for subdirectories, building namespaced skill entries (`{pluginName}-{skillDirName}`)
@@ -131,14 +131,14 @@ The `repo-config.json` file maps agent keys to their infrastructure configuratio
 Fields per agent key:
 - **`githubRepo`** (string, required): GitHub repository identifier (e.g., `"org/repo"`)
 - **`baseBranch`** (string, optional): Base branch for PRs and merges (defaults to `"main"`)
-- **`repoPath`** (string, optional): Absolute path to the repository on disk (defaults to `$ARCHIE_REPOS_DIR/{key}`)
+- **`repoPath`** (string, optional): Absolute path to the repository on disk (defaults to `$ARCHIE_WORKDIR/repos/{key}`)
 - **`prompt`** (string, required): Relative path to the agent's markdown prompt file
 
 ### Agent Derivation
 
 Each key in `repo-config.json` produces a `RepoAgentConfig`:
 - Agent ID: `{key}-agent` (e.g., `"backend"` becomes `"backend-agent"`)
-- Repository path: `repoPath` from config, or `$ARCHIE_REPOS_DIR/{key}` (default `/repos/{key}`)
+- Repository path: `repoPath` from config, or `$ARCHIE_WORKDIR/repos/{key}`
 - Identity (role, expertise): parsed from the referenced `agents/{key}.md` frontmatter
 - Domain prompt (Layer 3): parsed from the referenced `agents/{key}.md` body
 
