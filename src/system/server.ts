@@ -22,19 +22,11 @@ import {
   updateMessage,
   getBotUserId,
 } from "../slack/client.js";
-import {
-  setSlackCallbacks,
-  loadTask,
-  sendMessage,
-  handleEditModeApproval,
-  handleEditModeDenial,
-  handleResearchBudgetApproval,
-  handleResearchBudgetDenial,
-} from "./task-runtime.js";
+import { setSlackCallbacks } from '../slack/callbacks.js';
+import { Task, getActiveTaskIds } from '../tasks/task.js';
 import { appendGitHubEvent } from "./task-manager.js";
 import { AGENT_PROMPTS } from "../agents/prompts.js";
 import { logger } from "./logger.js";
-import { getActiveTaskIds } from "./active-tasks.js";
 import type { Request, Response } from "express";
 
 import {
@@ -82,12 +74,12 @@ export async function startServer(config: ServerConfig): Promise<void> {
   // Set up Slack callbacks once globally (works for all tasks since it uses taskId parameter)
   setSlackCallbacks(
     async (taskId: string, slackMessage: string) => {
-      const runtime = await loadTask(taskId);
-      await postToThreads(runtime.metadata.slack_threads, slackMessage);
+      const task = await Task.get(taskId);
+      await postToThreads(task.metadata.slack_threads, slackMessage);
     },
     async (taskId: string, text: string, blocks: unknown[]) => {
-      const runtime = await loadTask(taskId);
-      await postInteractiveToThreads(runtime.metadata.slack_threads, text, blocks);
+      const task = await Task.get(taskId);
+      await postInteractiveToThreads(task.metadata.slack_threads, text, blocks);
     }
   );
 
@@ -248,7 +240,8 @@ export async function startServer(config: ServerConfig): Promise<void> {
         );
       }
 
-      await handleEditModeApproval(taskId);
+      const task = await Task.get(taskId);
+      await task.handleEditModeApproval();
     } catch (error) {
       logger.error("Server", "Error handling edit mode approval", error);
     }
@@ -275,7 +268,8 @@ export async function startServer(config: ServerConfig): Promise<void> {
         );
       }
 
-      await handleEditModeDenial(taskId);
+      const task = await Task.get(taskId);
+      await task.handleEditModeDenial();
     } catch (error) {
       logger.error("Server", "Error handling edit mode denial", error);
     }
@@ -301,7 +295,8 @@ export async function startServer(config: ServerConfig): Promise<void> {
         );
       }
 
-      await handleResearchBudgetApproval(taskId);
+      const task = await Task.get(taskId);
+      await task.handleResearchBudgetApproval();
     } catch (error) {
       logger.error("Server", "Error handling research budget approval", error);
     }
@@ -327,7 +322,8 @@ export async function startServer(config: ServerConfig): Promise<void> {
         );
       }
 
-      await handleResearchBudgetDenial(taskId);
+      const task = await Task.get(taskId);
+      await task.handleResearchBudgetDenial();
     } catch (error) {
       logger.error("Server", "Error handling research budget denial", error);
     }
@@ -396,9 +392,9 @@ async function handleExistingTaskDirect(
   const repoConfig = getRepoConfigByGithubRepo(context.githubRepo);
   const repoKey = repoConfig?.repoKey || "unknown";
 
-  const runtime = await loadTask(taskId);
+  const task = await Task.get(taskId);
   await appendGitHubEvent(taskId, repoKey, eventMessage);
-  await sendMessage(runtime, 'pm-agent', AGENT_PROMPTS.existingTask);
+  await task.sendMessage(AGENT_PROMPTS.existingTask, 'pm-agent');
 }
 
 /**

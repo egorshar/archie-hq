@@ -18,12 +18,12 @@ export interface MergeCheckResult {
 }
 
 import { appendAgentFinding } from '../system/task-manager.js';
-import { loadTask, sendMessage } from '../system/task-runtime.js';
+import { Task } from '../tasks/task.js';
 import { AGENT_PROMPTS } from '../agents/prompts.js';
 import { createGitHubClient, type GitHubClient } from './client.js';
 import { getRepoConfig } from '../agents/repo-configs.js';
 import { logger } from '../system/logger.js';
-import type { PRStatus } from '../mcp/tools.js';
+import type { PRStatus } from '../agents/tools.js';
 
 interface LinkedPRStatus {
   repoKey: string;
@@ -61,7 +61,7 @@ export async function checkAndMergeLinkedPRs(taskId: string): Promise<void> {
 export async function triggerMergeCheck(taskId: string): Promise<MergeCheckResult> {
   const result: MergeCheckResult = { merged: [], pending: [], conflicts: [] };
 
-  const runtime = await loadTask(taskId);
+  const task = await Task.get(taskId);
 
   const githubClient = createGitHubClient();
   if (!githubClient) {
@@ -71,7 +71,7 @@ export async function triggerMergeCheck(taskId: string): Promise<MergeCheckResul
 
   // Collect all PRs linked to this task
   const linkedPRs: Array<{ repoKey: string; prNumber: number }> = [];
-  for (const [repoKey, repoInfo] of Object.entries(runtime.metadata.repositories)) {
+  for (const [repoKey, repoInfo] of Object.entries(task.metadata.repositories)) {
     if (repoInfo.pr_number) {
       linkedPRs.push({ repoKey, prNumber: repoInfo.pr_number });
     }
@@ -245,8 +245,8 @@ async function notifyPMAboutConflicts(
 
   await appendAgentFinding(taskId, 'system', message, 'blocker');
 
-  const runtime = await loadTask(taskId);
-  await sendMessage(runtime, 'pm-agent', AGENT_PROMPTS.existingTask);
+  const task = await Task.get(taskId);
+  await task.sendMessage(AGENT_PROMPTS.existingTask, 'pm-agent');
 }
 
 /**
@@ -278,6 +278,6 @@ async function notifyPMAboutMerge(
   const findingType = failedPRs.length > 0 ? 'blocker' : 'completion';
   await appendAgentFinding(taskId, 'system', message, findingType);
 
-  const runtime = await loadTask(taskId);
-  await sendMessage(runtime, 'pm-agent', AGENT_PROMPTS.existingTask);
+  const task = await Task.get(taskId);
+  await task.sendMessage(AGENT_PROMPTS.existingTask, 'pm-agent');
 }

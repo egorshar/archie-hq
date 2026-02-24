@@ -12,8 +12,7 @@ import {
   appendGitHubEvent,
   downloadMessageFiles,
 } from './task-manager.js';
-import { createTask, loadTask, sendMessage, stopTask } from './task-runtime.js';
-import { saveTask } from './task-persistence.js';
+import { Task } from '../tasks/task.js';
 import { AGENT_PROMPTS } from '../agents/prompts.js';
 import {
   fetchThreadHistory,
@@ -110,13 +109,13 @@ async function handleNewTask(
     last_processed_ts: message.ts,
   };
 
-  const runtime = await createTask(slackThread);
+  const task = await Task.createFromSlackThread(slackThread);
 
   // Append all thread history to shared knowledge log
   for (const msg of threadHistory) {
     const msgUserInfo = await getUserInfo(msg.user);
-    const downloadedFiles = msg.files ? await downloadMessageFiles(runtime.taskId, msg.files) : undefined;
-    await appendSlackMessage(runtime.taskId, channelInfo, threadId, {
+    const downloadedFiles = msg.files ? await downloadMessageFiles(task.taskId, msg.files) : undefined;
+    await appendSlackMessage(task.taskId, channelInfo, threadId, {
       id: msg.user,
       username: msgUserInfo.name,
       realName: msgUserInfo.realName,
@@ -124,7 +123,7 @@ async function handleNewTask(
   }
 
   // Start PM
-  await sendMessage(runtime, 'pm-agent', AGENT_PROMPTS.newTask);
+  await task.sendMessage(AGENT_PROMPTS.newTask, 'pm-agent');
 }
 
 /**
@@ -137,9 +136,9 @@ async function handleExistingTask(
   threadHistory: SlackMessage[],
   channelInfo: { id: string; name: string }
 ): Promise<void> {
-  const runtime = await loadTask(taskId);
+  const task = await Task.get(taskId);
 
-  const existingThread = runtime.metadata.slack_threads.find((t) => t.thread_id === threadId);
+  const existingThread = task.metadata.slack_threads.find((t: SlackThread) => t.thread_id === threadId);
 
   if (!existingThread) {
     // New thread for this task
@@ -148,7 +147,7 @@ async function handleExistingTask(
       channel_id: message.channel,
       last_processed_ts: message.ts,
     };
-    runtime.metadata.slack_threads.push(newThread);
+    task.metadata.slack_threads.push(newThread);
 
     for (const msg of threadHistory) {
       if (!msg.user || msg.user === 'unknown' || msg.user === getBotUserId()) continue;
@@ -181,18 +180,18 @@ async function handleExistingTask(
     existingThread.last_processed_ts = message.ts;
   }
 
-  saveTask(runtime);
-  await sendMessage(runtime, 'pm-agent', AGENT_PROMPTS.existingTask);
+  task.debouncedSave();
+  await task.sendMessage(AGENT_PROMPTS.existingTask, 'pm-agent');
 }
 
 /**
  * Handle task cancellation
  */
 async function handleCancelTask(taskId: string): Promise<void> {
-  const runtime = await loadTask(taskId);
-  const threads = [...runtime.metadata.slack_threads];
+  const task = await Task.get(taskId);
+  const threads = [...task.metadata.slack_threads];
 
-  await stopTask(taskId);
+  await task.stop();
 
   await postToThreads(
     threads,
@@ -264,8 +263,8 @@ export async function processGitHubTriage(taskId: string, payload: Record<string
   const triageResult = await triageGitHubComment(currentComment, commentHistory, prNumber, githubRepo);
 
   if (triageResult.action === 'existing_task') {
-    const runtime = await loadTask(taskId);
-    const repoInfo = runtime.metadata.repositories[repoConfig.repoKey];
+    const task = await Task.get(taskId);
+    const repoInfo = task.metadata.repositories[repoConfig.repoKey];
     const lastProcessedId = repoInfo?.last_processed_comment_id || 0;
 
     const newComments = commentHistory.filter((c) => c.id > lastProcessedId);
@@ -279,8 +278,8 @@ export async function processGitHubTriage(taskId: string, payload: Record<string
       repoInfo.last_processed_comment_id = commentId;
     }
 
-    saveTask(runtime);
-    await sendMessage(runtime, 'pm-agent', AGENT_PROMPTS.existingTask);
+    task.debouncedSave();
+    await task.sendMessage(AGENT_PROMPTS.existingTask, 'pm-agent');
   } else {
     logger.system(`GitHub: Ignoring conversational comment on PR #${prNumber}`);
   }
@@ -301,7 +300,7 @@ async function handleGitHubCommentDirect(
   const user = (comment.user as Record<string, unknown>)?.login as string || 'unknown';
   const body = comment.body as string || '';
 
-  const runtime = await loadTask(taskId);
+  const task = await Task.get(taskId);
   await appendGitHubEvent(taskId, repoKey, `PR #${prNumber}: ${user} commented: ${body}`);
-  await sendMessage(runtime, 'pm-agent', AGENT_PROMPTS.existingTask);
+  await task.sendMessage(AGENT_PROMPTS.existingTask, 'pm-agent');
 }
