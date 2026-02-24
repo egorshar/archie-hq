@@ -37,10 +37,10 @@ import {
   getKnowledgeLogPath,
 } from './persistence.js';
 import { getPluginsWithPmSkills } from '../system/plugin-loader.js';
-import { getIsShuttingDown } from '../system/server.js';
+import { getIsShuttingDown } from '../system/shutdown.js';
 import { scheduleIdleCheck } from './recovery.js';
 import { scanAgentDefs } from '../agents/registry.js';
-import { postToSlack, postInteractiveToSlack, hasInteractiveCallback } from '../slack/callbacks.js';
+import { postToSlack, postInteractiveToSlack, hasInteractiveCallback } from '../connectors/slack/callbacks.js';
 import { AGENT_PROMPTS } from '../agents/prompts.js';
 import { logger } from '../system/logger.js';
 
@@ -306,16 +306,12 @@ export class Task {
       return 'Task is inactive, message logged to knowledge.log.';
     }
 
-    const alreadyRunning = this.agents.get(target)?.isRunning ?? false;
     await this.ensureAgentSpawned(target);
     const targetAgent = this.agents.get(target);
     if (!targetAgent) {
       throw new Error(`No agent ${target} after spawn`);
     }
     targetAgent.queue.addMessage(message, fromAgent);
-    if (alreadyRunning) {
-      logger.system(`Message from ${fromAgent} queued to running ${target}: "${message.slice(0, 100)}"`);
-    }
 
     return `Message sent to ${target}. They will process it and log findings.`;
   }
