@@ -35,10 +35,10 @@ import {
   getSharedPath,
   getMemoryPath,
   getKnowledgeLogPath,
-} from '../system/task-manager.js';
+} from './persistence.js';
 import { getPluginsWithPmSkills } from '../system/plugin-loader.js';
 import { getIsShuttingDown } from '../system/server.js';
-import { scheduleIdleCheck } from '../system/task-recovery.js';
+import { scheduleIdleCheck } from './recovery.js';
 import { scanAgentDefs } from '../agents/registry.js';
 import { postToSlack, postInteractiveToSlack, hasInteractiveCallback } from '../slack/callbacks.js';
 import { AGENT_PROMPTS } from '../agents/prompts.js';

@@ -9,8 +9,8 @@ import { mkdir, readFile, writeFile, appendFile } from 'fs/promises';
 import { existsSync } from 'fs';
 import { join } from 'path';
 import type { TaskMetadata, LogEntry, FindingType, SlackFile } from '../types/index.js';
-import { activeTasks } from '../tasks/task.js';
-import { SESSIONS_DIR } from './workdir.js';
+import { activeTasks } from './task.js';
+import { SESSIONS_DIR } from '../system/workdir.js';
 
 /**
  * Generate a unique task ID with human-readable date format
@@ -120,7 +120,7 @@ export async function downloadMessageFiles(
       });
     } catch (error) {
       // Log error but continue with other files
-      const { logger } = await import('./logger.js');
+      const { logger } = await import('../system/logger.js');
       logger.warn('task-manager', `Failed to download file ${file.name}: ${error}`);
     }
   }

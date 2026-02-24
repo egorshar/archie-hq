@@ -8,7 +8,7 @@
  * are in src/github/webhook-utils.ts
  */
 
-import { findTaskByPRNumber, loadMetadata } from './task-manager.js';
+import { findTaskByPRNumber, loadMetadata } from '../tasks/persistence.js';
 import {
   formatGitHubContext,
   extractBranchFromPayload,

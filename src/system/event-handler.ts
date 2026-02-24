@@ -6,12 +6,12 @@
  * Flow: webhook → processSlackTriage / processGitHubTriage → loadTask → sendMessage
  */
 
-import { triageSlackMessage, triageGitHubComment, type GitHubComment } from '../agents/triage.js';
+import { triageSlackMessage, triageGitHubComment, type GitHubComment } from './triage.js';
 import {
   appendSlackMessage,
   appendGitHubEvent,
   downloadMessageFiles,
-} from './task-manager.js';
+} from '../tasks/persistence.js';
 import { Task } from '../tasks/task.js';
 import { AGENT_PROMPTS } from '../agents/prompts.js';
 import {

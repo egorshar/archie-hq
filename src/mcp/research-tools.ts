@@ -22,7 +22,7 @@ import { z } from 'zod';
 import { zodToJsonSchema } from 'zod-to-json-schema';
 import { loadPrompt } from '../utils/prompt-loader.js';
 import { processAgentEventForLogging, logger } from '../system/logger.js';
-import { appendAgentFinding } from '../system/task-manager.js';
+import { appendAgentFinding } from '../tasks/persistence.js';
 
 // ============================================================================
 // Structured JSON Schema (Defense 1 — lossy compression boundary)

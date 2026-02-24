@@ -19,7 +19,7 @@ import type { Agent } from './agent.js';
 import { getRepoAgentIds, getAgentIds, getAgentDef } from './registry.js';
 import { getGitHubClient } from '../github/singleton.js';
 import { postToSlack, postInteractiveToSlack, hasInteractiveCallback } from '../slack/callbacks.js';
-import { appendAgentFinding } from '../system/task-manager.js';
+import { appendAgentFinding } from '../tasks/persistence.js';
 import { triggerMergeCheck } from '../github/merge-orchestrator.js';
 import { logger } from '../system/logger.js';
 

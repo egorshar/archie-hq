@@ -7,11 +7,11 @@
  * - Progressive recovery: reinforcement nudge → nuclear restart
  */
 
-import { findTasksByStatus } from './task-manager.js';
-import { logger } from './logger.js';
-import { getIsShuttingDown } from './server.js';
+import { findTasksByStatus } from './persistence.js';
+import { logger } from '../system/logger.js';
+import { getIsShuttingDown } from '../system/server.js';
 import { AGENT_PROMPTS } from '../agents/prompts.js';
-import type { Task } from '../tasks/task.js';
+import type { Task } from './task.js';
 import type { AgentName } from '../types/index.js';
 
 // ============================================================================
@@ -33,7 +33,7 @@ export async function recoverActiveTasks(): Promise<void> {
   logger.system(`Recovery: Found ${tasks.length} in_progress task(s), re-activating...`);
 
   // Lazy import to avoid circular dependency (task-recovery ↔ tasks/task)
-  const { Task: TaskClass } = await import('../tasks/task.js');
+  const { Task: TaskClass } = await import('./task.js');
 
   for (const taskMeta of tasks) {
     try {
@@ -115,7 +115,7 @@ async function triggerRecovery(task: Task): Promise<void> {
     task.recoveryAttempts = 0;
 
     // Lazy import to avoid circular dependency
-    const { Task: TaskClass } = await import('../tasks/task.js');
+    const { Task: TaskClass } = await import('./task.js');
 
     await task.stop();
 

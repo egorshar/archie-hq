@@ -24,7 +24,7 @@ import {
 } from "../slack/client.js";
 import { setSlackCallbacks } from '../slack/callbacks.js';
 import { Task, getActiveTaskIds } from '../tasks/task.js';
-import { appendGitHubEvent } from "./task-manager.js";
+import { appendGitHubEvent } from "../tasks/persistence.js";
 import { AGENT_PROMPTS } from "../agents/prompts.js";
 import { logger } from "./logger.js";
 import type { Request, Response } from "express";

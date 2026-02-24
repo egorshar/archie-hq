@@ -11,7 +11,7 @@ import { bootstrapWorkdir, cloneRepos } from './system/workdir.js';
 import { initPlugins, getPlugins } from './system/plugin-loader.js';
 import { initRegistry, getAllAgentDefs } from './agents/registry.js';
 import { configureGitIdentity } from './github/client.js';
-import { recoverActiveTasks } from './system/task-recovery.js';
+import { recoverActiveTasks } from './tasks/recovery.js';
 
 /**
  * Load configuration from environment

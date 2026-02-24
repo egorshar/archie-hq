@@ -21,11 +21,11 @@ import {
   getSharedPath,
   getTaskPath,
   getReposPath,
-} from '../system/task-manager.js';
+} from '../tasks/persistence.js';
 import {
   createRecoverableInputGenerator,
 } from './message-queue.js';
-import { setupWorktree, worktreeExists, fetchOrigin } from '../system/worktree-manager.js';
+import { setupWorktree, worktreeExists, fetchOrigin } from '../github/worktree.js';
 import { loadPrompt } from '../utils/prompt-loader.js';
 import { processAgentEventForLogging, logger } from '../system/logger.js';
 

@@ -11,9 +11,9 @@ import { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import pc from "picocolors";
 import type { TriageResult, SlackMessage } from "../types/index.js";
-import { findTaskByThread } from "../system/task-manager.js";
-import { SESSIONS_DIR } from "../system/workdir.js";
-import { processAgentEventForLogging, logger } from "../system/logger.js";
+import { findTaskByThread } from "../tasks/persistence.js";
+import { SESSIONS_DIR } from "./workdir.js";
+import { processAgentEventForLogging, logger } from "./logger.js";
 import { loadPrompt } from "../utils/prompt-loader.js";
 
 /**
