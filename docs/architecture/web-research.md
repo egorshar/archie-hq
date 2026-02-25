@@ -7,7 +7,7 @@ Web research is available to all agents (PM, repo, and plugin) as an MCP tool ca
 The `web_research` tool is registered as an MCP server on every agent's `query()` call:
 
 ```typescript
-// From src/agents/repo-agent.ts (same pattern in plugin-agent.ts and pm.ts)
+// From src/agents/spawn.ts (same pattern for all agent types)
 mcpServers: {
   "repo-agent-tools": mcpServer,
   "research-tools": createResearchMcpServer({
@@ -206,7 +206,7 @@ additionalContext:
 Both hooks are wired into every agent's PostToolUse array:
 
 ```typescript
-// From src/agents/repo-agent.ts (same in plugin-agent.ts, pm.ts)
+// From src/agents/spawn.ts (same for all agent types)
 hooks: {
   PostToolUse: [
     createResearchPostToolHook({ getSharedDir, getTaskId, getAgentId }),
@@ -225,7 +225,7 @@ Each task has a research budget that limits how many `web_research` calls can be
 - **Extra budget:** Granted in increments of +5 via Slack approval buttons
 
 ```typescript
-// From src/system/task-runtime.ts
+// From src/tasks/task.ts
 budgets: {
   researchRequestCount: metadata.research_request_count ?? 0,
   researchRequestLimit: 5 + (metadata.research_budget_extra ?? 0),
@@ -253,7 +253,7 @@ When budget is exceeded, Slack interactive buttons are posted:
 
 The budget count persists across task stop/reactivate cycles via `research_request_count` in `TaskMetadata`.
 
-**Source:** `src/system/task-runtime.ts` (`handleResearchBudgetApproval`)
+**Source:** `src/tasks/task.ts` (`handleResearchBudgetApproval`)
 
 ## Fallback Behavior
 

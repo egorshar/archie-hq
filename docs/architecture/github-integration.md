@@ -4,7 +4,7 @@ Archie integrates with GitHub as a GitHub App using `@octokit/app` for API opera
 
 ## GitHub App Authentication
 
-The `GitHubClient` class in `src/github/client.ts` wraps `@octokit/app`. It authenticates using three environment variables:
+The `GitHubClient` class in `src/connectors/github/client.ts` wraps `@octokit/app`. It authenticates using three environment variables:
 
 - `GITHUB_APP_ID` -- The GitHub App's numeric ID
 - `GITHUB_APP_PRIVATE_KEY_PATH` -- Path to the PEM private key file
@@ -20,14 +20,14 @@ The system configures git identity using the GitHub App's bot credentials:
 - Name: `{appSlug}[bot]` (e.g., `archie-hq[bot]`)
 - Email: `{appId}+{appSlug}[bot]@users.noreply.github.com`
 
-This is set once per base repository at server startup via `configureGitIdentity()` in `src/github/client.ts`. Worktrees inherit this configuration from the base repo.
+This is set once per base repository at server startup via `configureGitIdentity()` in `src/connectors/github/client.ts`. Worktrees inherit this configuration from the base repo.
 
 ## Webhook Handling
 
-GitHub webhooks arrive at `POST /webhooks/github`, registered on the Express receiver in `src/system/server.ts`. The handler:
+GitHub webhooks arrive at `POST /webhooks/github`, registered in `src/index.ts` via `mountGitHubWebhook()` from `src/connectors/github/events.ts`. The handler:
 
 1. Validates required headers (`x-hub-signature-256`, `x-github-event`).
-2. Verifies the webhook signature using HMAC-SHA256 (`src/github/webhook-utils.ts: verifyWebhookSignature()`). Uses `crypto.timingSafeEqual` to prevent timing attacks.
+2. Verifies the webhook signature using HMAC-SHA256 (`src/connectors/github/webhooks.ts: verifyWebhookSignature()`). Uses `crypto.timingSafeEqual` to prevent timing attacks.
 3. Responds with `200 OK` immediately (acknowledging receipt).
 4. Processes the event asynchronously (fire-and-forget).
 
@@ -39,7 +39,7 @@ Before routing, the system checks if the event was triggered by its own bot user
 
 ## Webhook Router
 
-The webhook router (`src/system/webhook-router.ts`) uses a two-tier routing strategy: deterministic routing for structured events and triage-based routing for ambiguous ones.
+The webhook router (`src/connectors/github/webhooks.ts`) uses a two-tier routing strategy: deterministic routing for structured events and triage-based routing for ambiguous ones.
 
 ### Task Identification
 
@@ -78,11 +78,11 @@ Route actions map to handler types:
 
 PR comments (`issue_comment` events) are the only GitHub events that go through triage. This is because PR comment threads may contain conversational noise (e.g., "thanks!", "LGTM") that does not require agent action.
 
-The GitHub triage flow (`src/system/event-handler.ts: processGitHubTriage()`) fetches the full PR comment history via the GitHub API, then runs the triage agent to determine if the comment warrants reactivating the task. If classified as `existing_task`, new comments since the last processed ID are appended to the knowledge log and the PM is reactivated. Otherwise, the comment is silently ignored.
+The GitHub triage flow (`src/connectors/github/events.ts: processGitHubTriage()`) fetches the full PR comment history via the GitHub API, then runs the triage agent to determine if the comment warrants reactivating the task. If classified as `existing_task`, new comments since the last processed ID are appended to the knowledge log and the PM is reactivated. Otherwise, the comment is silently ignored.
 
 ### Event Message Formatting
 
-`formatGitHubEventMessage()` in `src/github/webhook-utils.ts` converts GitHub event context into human-readable log entries:
+`formatGitHubEventMessage()` in `src/connectors/github/webhooks.ts` converts GitHub event context into human-readable log entries:
 
 - `PR #42 approved by alice`
 - `PR #42: bob requested changes: needs more tests`
@@ -93,7 +93,7 @@ These messages are written to the task's knowledge log so the PM agent can under
 
 ## GitHub MCP Tools
 
-The PM agent has access to a suite of GitHub tools defined in `src/mcp/tools.ts`. These tools are callback-based -- the tool definitions call into `PMToolCallbacks`, and the actual implementations live in `src/system/task-runtime.ts`.
+The PM agent has access to a suite of GitHub tools defined in `src/agents/tools.ts`. These tools are callback-based -- the tool definitions call into `PMToolCallbacks`, and the actual implementations live in `src/tasks/task.ts`.
 
 ### Available Tools
 
@@ -114,7 +114,7 @@ All tools that take a `repo_key` parameter dynamically build the allowed values 
 
 ## Merge Orchestrator
 
-The merge orchestrator (`src/github/merge-orchestrator.ts`) is a system-level component (not part of any agent) that handles automatic PR merging.
+The merge orchestrator (`src/connectors/github/merge.ts`) is a system-level component (not part of any agent) that handles automatic PR merging.
 
 ### Trigger Points
 
@@ -125,7 +125,7 @@ The merge orchestrator is triggered by:
 
 ### Debouncing
 
-Webhook-triggered merge checks are debounced per task with a 5-second delay (`MERGE_CHECK_DEBOUNCE_MS = 5000` in `src/github/webhook-utils.ts`). This prevents redundant API calls when multiple webhooks arrive in bursts (e.g., push + CI start + CI complete in rapid succession). Each new trigger cancels the previous pending timer.
+Webhook-triggered merge checks are debounced per task with a 5-second delay (`MERGE_CHECK_DEBOUNCE_MS = 5000` in `src/connectors/github/webhooks.ts`). This prevents redundant API calls when multiple webhooks arrive in bursts (e.g., push + CI start + CI complete in rapid succession). Each new trigger cancels the previous pending timer.
 
 ### Merge Logic
 
@@ -167,26 +167,26 @@ When a GitHub event arrives for an existing task:
 
 ```
 GitHub webhook
-  -> server.ts: verifyWebhookSignature()
-  -> webhook-router.ts: routeGitHubEvent()
+  -> connectors/github/events.ts: verifyWebhookSignature()
+  -> connectors/github/webhooks.ts: routeGitHubEvent()
     -> Extract branch -> extract task ID -> verify task exists
     -> Determine route action (merge_check / existing_task / triage_comment)
 
   merge_check:
-    -> webhook-utils.ts: handleMergeCheckDirect() [debounced]
-    -> merge-orchestrator.ts: checkAndMergeLinkedPRs()
-    -> If conflicts/merges: appendAgentFinding() + sendMessage(PM)
+    -> webhooks.ts: handleMergeCheckDirect() [debounced]
+    -> merge.ts: checkAndMergeLinkedPRs()
+    -> If conflicts/merges: appendAgentFinding() + task.sendMessage(PM)
 
   existing_task:
-    -> server.ts: handleExistingTaskDirect()
+    -> events.ts: handleExistingTaskDirect()
     -> Format event message, append to knowledge.log
-    -> sendMessage(PM, "New input received...")
+    -> task.sendMessage(PM, "New input received...")
 
   triage_comment:
-    -> event-handler.ts: processGitHubTriage()
+    -> events.ts: processGitHubTriage()
     -> Fetch PR comment history
     -> Run triage agent
-    -> If actionable: append new comments, sendMessage(PM)
+    -> If actionable: append new comments, task.sendMessage(PM)
 ```
 
 ## Agent Involvement for Blockers
@@ -200,12 +200,11 @@ The system is designed so that the PM agent is only reactivated for GitHub event
 
 ## Relevant Source Files
 
-- `src/github/client.ts` -- GitHubClient class, Octokit wrapper, git identity configuration
-- `src/github/merge-orchestrator.ts` -- Auto-merge logic, linked PR checking, PM notification
-- `src/github/webhook-utils.ts` -- Signature verification, context extraction, event formatting, merge check debouncing
-- `src/system/webhook-router.ts` -- Deterministic routing and triage-based routing for GitHub events
-- `src/system/event-handler.ts` -- GitHub triage processing (`processGitHubTriage`)
-- `src/system/server.ts` -- Webhook endpoint, signature verification call, event dispatch
-- `src/mcp/tools.ts` -- GitHub MCP tool definitions (PM agent tools)
-- `src/system/task-runtime.ts` -- GitHub tool callback implementations (`onPushBranch`, `onCreatePullRequest`, etc.)
+- `src/connectors/github/client.ts` -- GitHubClient class, Octokit wrapper, git identity configuration, GIT_ASKPASS
+- `src/connectors/github/events.ts` -- GitHub webhook dispatch, triage processing (`processGitHubTriage`)
+- `src/connectors/github/webhooks.ts` -- Signature verification, deterministic routing, context extraction, event formatting, merge check debouncing
+- `src/connectors/github/merge.ts` -- Auto-merge logic, linked PR checking, PM notification
+- `src/connectors/github/worktree.ts` -- Git worktree lifecycle
+- `src/agents/tools.ts` -- GitHub MCP tool definitions (PM agent tools)
+- `src/tasks/task.ts` -- GitHub tool callback implementations (`onPushBranch`, `onCreatePullRequest`, etc.)
 - `src/types/task.ts` -- `RepositoryInfo` type with PR tracking fields

@@ -27,7 +27,7 @@ const agentQuery = query({
 });
 ```
 
-This is how Archie detects agent idle state in `src/agents/repo-agent.ts` and `src/agents/plugin-agent.ts`. The Stop hook calls an `onIdle` callback that feeds into the recovery system.
+This is how Archie detects agent idle state in `src/agents/spawn.ts`. The Stop hook calls an `onIdle` callback that feeds into the recovery system.
 
 ### Alternative Methods
 
@@ -117,7 +117,7 @@ const handle = query({
 });
 ```
 
-The `MessageQueue` class (`src/system/message-queue.ts`) supports:
+The `MessageQueue` class (`src/agents/message-queue.ts`) supports:
 - `addMessage()` — enqueue (resolves any waiting `nextMessage()`)
 - `nextMessage()` — dequeue (returns promise, resolves when available)
 - `prependMessage()` — for message replay on session retry
@@ -187,7 +187,7 @@ const result = query({
 });
 ```
 
-Archie uses this for triage classification (`src/agents/triage.ts`) and research output validation (`src/mcp/research-tools.ts`).
+Archie uses this for triage classification (`src/system/triage.ts`) and research output validation (`src/mcp/research-tools.ts`).
 
 ## Best Practices
 
@@ -201,4 +201,4 @@ Archie uses this for triage classification (`src/agents/triage.ts`) and research
 
 - [Claude Agent SDK Documentation](https://docs.anthropic.com/en/docs/agents/overview)
 - Agent implementations: `src/agents/`
-- Hook usage: `src/mcp/research-tools.ts` (sandwich defense), `src/agents/repo-agent.ts` (stop hooks)
+- Hook usage: `src/mcp/research-tools.ts` (sandwich defense), `src/agents/spawn.ts` (stop hooks)

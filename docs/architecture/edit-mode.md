@@ -20,11 +20,11 @@ The transition from readonly to edit mode follows this sequence:
 
 ### 1. PM Requests Edit Mode
 
-The PM agent calls the `request_edit_mode` MCP tool (defined in `src/mcp/tools.ts`) with a reason string explaining what changes are needed. Before calling this tool, the PM is expected to have already explained the situation to the user via `post_to_slack`.
+The PM agent calls the `request_edit_mode` MCP tool (defined in `src/agents/tools.ts`) with a reason string explaining what changes are needed. Before calling this tool, the PM is expected to have already explained the situation to the user via `post_to_slack`.
 
 ### 2. Interactive Buttons Posted to Slack
 
-The `onRequestEditMode` callback in `src/system/task-runtime.ts` posts a Block Kit message to all tracked Slack threads with two buttons:
+The `onRequestEditMode` callback in `src/tasks/task.ts` posts a Block Kit message to all tracked Slack threads with two buttons:
 
 ```
 *Edit mode request:* <reason>
@@ -35,20 +35,20 @@ The buttons use action IDs `approve_edit_mode` and `deny_edit_mode`, with the ta
 
 ### 3. Task Pauses
 
-Immediately after posting the approval request, the system calls `stopTask()`. This stops all agent queues and deactivates all agents. The task is fully paused until the user responds.
+Immediately after posting the approval request, the system calls `task.stop()`. This stops all agent queues and deactivates all agents. The task is fully paused until the user responds.
 
 ### 4. User Clicks a Button
 
-**Approve** (handled in `src/system/server.ts: app.action("approve_edit_mode")`):
+**Approve** (handled in `src/connectors/slack/events.ts: app.action("approve_edit_mode")`):
 - The original message is updated to remove the buttons and show "Edit mode approved by \<user\>".
-- `handleEditModeApproval()` in `src/system/task-runtime.ts` is called.
+- `handleEditModeApproval()` in `src/tasks/task.ts` is called.
 - Sets `metadata.edit_allowed = true` on the task.
 - Logs "Edit mode approved by user" to the knowledge log.
 - Reactivates the PM agent with "New input received. Check knowledge.log for the update."
 
-**Deny** (handled in `src/system/server.ts: app.action("deny_edit_mode")`):
+**Deny** (handled in `src/connectors/slack/events.ts: app.action("deny_edit_mode")`):
 - The original message is updated to remove the buttons and show "Edit mode denied by \<user\>".
-- `handleEditModeDenial()` in `src/system/task-runtime.ts` is called.
+- `handleEditModeDenial()` in `src/tasks/task.ts` is called.
 - Logs "Edit mode denied by user" to the knowledge log.
 - Reactivates the PM agent to handle the denial (e.g., provide readonly findings instead).
 
@@ -71,7 +71,7 @@ Key properties of this transition:
 
 ## Git Worktree Management
 
-When a repo agent spawns in edit mode, it operates in an isolated git worktree rather than the shared base repository. This is managed by `src/system/worktree-manager.ts`.
+When a repo agent spawns in edit mode, it operates in an isolated git worktree rather than the shared base repository. This is managed by `src/connectors/github/worktree.ts`.
 
 ### `setupWorktree()`
 
@@ -87,7 +87,7 @@ The worktree is placed at `sessions/{taskId}/repos/{repoKey}` (e.g., `sessions/t
 
 ### Lazy Worktree Creation
 
-Worktrees are **not** created when edit mode is approved. They are created lazily when a repo agent is actually spawned in edit mode. This happens inside `spawnRepoAgent()` in `src/agents/repo-agent.ts`:
+Worktrees are **not** created when edit mode is approved. They are created lazily when a repo agent is actually spawned in edit mode. This happens inside `spawnRepoAgent()` in `src/agents/spawn.ts`:
 
 ```
 spawnRepoAgent() called
@@ -104,7 +104,7 @@ This means the worktree is created on-demand the first time an agent needs it af
 
 ### Worktree Metadata
 
-After worktree creation, the following fields are stored in `metadata.repositories[repoKey]` (`src/types/task.ts: RepositoryInfo`):
+After worktree creation, the following fields are stored in `metadata.repositories[repoKey]` (`src/types/task.ts`):
 
 ```typescript
 interface RepositoryInfo {
@@ -118,7 +118,7 @@ interface RepositoryInfo {
 
 ## Tool Restrictions
 
-The allowed tools for a repo agent are determined at spawn time based on the `edit_allowed` flag. In `src/agents/repo-agent.ts`, the `allowedTools` array is constructed conditionally:
+The allowed tools for a repo agent are determined at spawn time based on the `edit_allowed` flag. In `src/agents/spawn.ts` (via `src/agents/agent.ts`), the `allowedTools` array is constructed conditionally:
 
 ### Readonly Mode Tools
 - `Read` -- Read file contents
@@ -146,7 +146,7 @@ Note that `git push` and `git fetch` are not available to repo agents. Remote op
 All feature branches follow the pattern `feature/task-{taskId}`, where `taskId` is the full task identifier (e.g., `task-01012026-1823-abc123`). This naming convention serves double duty:
 
 1. **Isolation**: Each task gets its own branch, preventing cross-task interference.
-2. **Webhook routing**: The webhook router uses `extractTaskIdFromBranch()` in `src/github/webhook-utils.ts` to match incoming GitHub events (pushes, CI results, reviews) back to the correct task. The regex pattern `^feature\/(task-[a-z0-9-]+)$` extracts the task ID from the branch name.
+2. **Webhook routing**: The webhook router uses `extractTaskIdFromBranch()` in `src/connectors/github/webhooks.ts` to match incoming GitHub events (pushes, CI results, reviews) back to the correct task. The regex pattern `^feature\/(task-[a-z0-9-]+)$` extracts the task ID from the branch name.
 
 ## Cross-Agent Isolation
 
@@ -172,17 +172,17 @@ Key isolation properties:
 
 ## Session Handling on Mode Transition
 
-When a repo agent transitions from readonly to edit mode (worktree created for the first time), the agent's working directory changes from the base repo to the worktree. Since the `cwd` change is not a child path of the original, `spawnRepoAgent()` sets `startFreshSession = true`, which causes the agent to start a fresh Claude Agent SDK session instead of resuming the previous one. This ensures the agent's filesystem context is correct for the new working directory.
+When a repo agent transitions from readonly to edit mode (worktree created for the first time), the agent's working directory changes from the base repo to the worktree. Since the `cwd` change is not a child path of the original, `spawnAgent()` sets `startFreshSession = true`, which causes the agent to start a fresh Claude Agent SDK session instead of resuming the previous one. This ensures the agent's filesystem context is correct for the new working directory.
 
 If the worktree already exists (e.g., task was stopped and reactivated), the existing session ID is reused and the agent fetches the latest origin to ensure `origin/main` is up-to-date for potential conflict resolution.
 
 ## Relevant Source Files
 
-- `src/system/worktree-manager.ts` -- `setupWorktree()`, `worktreeExists()`, `getWorktreeBranch()`, base branch detection
-- `src/agents/repo-agent.ts` -- `spawnRepoAgent()` with edit mode logic, tool restriction, worktree creation trigger
-- `src/system/task-runtime.ts` -- `onRequestEditMode` callback, `handleEditModeApproval()`, `handleEditModeDenial()`
-- `src/system/server.ts` -- `approve_edit_mode` and `deny_edit_mode` Bolt action handlers
-- `src/mcp/tools.ts` -- `request_edit_mode` tool definition
+- `src/connectors/github/worktree.ts` -- `setupWorktree()`, `worktreeExists()`, `getWorktreeBranch()`, base branch detection
+- `src/agents/spawn.ts` -- `spawnRepoAgent()` with edit mode logic, tool restriction, worktree creation trigger
+- `src/tasks/task.ts` -- `onRequestEditMode` callback, `handleEditModeApproval()`, `handleEditModeDenial()`
+- `src/connectors/slack/events.ts` -- `approve_edit_mode` and `deny_edit_mode` Bolt action handlers
+- `src/agents/tools.ts` -- `request_edit_mode` tool definition
 - `src/types/task.ts` -- `TaskMetadata.edit_allowed`, `RepositoryInfo` with worktree fields
-- `src/github/client.ts` -- `configureGitIdentity()`, `fetchOrigin()`
-- `src/github/webhook-utils.ts` -- `extractTaskIdFromBranch()` for branch-to-task mapping
+- `src/connectors/github/client.ts` -- `configureGitIdentity()`, `fetchOrigin()`
+- `src/connectors/github/webhooks.ts` -- `extractTaskIdFromBranch()` for branch-to-task mapping

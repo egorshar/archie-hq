@@ -2,8 +2,8 @@
 
 How Archie routes messages, manages tasks, spawns agents, and recovers from failures.
 
-> Source of truth: the code in `src/system/` and `src/mcp/`. This document describes
-> only what is implemented, not aspirational features.
+> Source of truth: the code in `src/tasks/`, `src/agents/`, `src/connectors/`, and `src/system/`.
+> This document describes only what is implemented, not aspirational features.
 
 ---
 
@@ -11,38 +11,28 @@ How Archie routes messages, manages tasks, spawns agents, and recovers from fail
 
 | Layer | Source | Purpose |
 |---|---|---|
-| **HTTP Server** | `src/system/server.ts` | Slack Bolt receiver (HTTP mode) + Express endpoints for GitHub webhooks and health checks |
-| **Webhook Router** | `src/system/webhook-router.ts` | Fast, code-only routing: discard / triage / direct-handle for both Slack and GitHub events |
-| **Event Handler** | `src/system/event-handler.ts` | Inline processing of Slack and GitHub triage results (no intermediate queues) |
-| **Task Runtime** | `src/system/task-runtime.ts` | In-memory state management, agent spawning, tool callback wiring, task lifecycle (create/stop/complete) |
-| **Active Tasks Registry** | `src/system/active-tasks.ts` | Global `Map<string, TaskRuntimeState>` shared across modules to avoid circular imports |
-| **Task Manager** | `src/system/task-manager.ts` | Disk I/O: directory layout helpers, metadata read, knowledge-log append, task lookup by thread/PR |
-| **Task Persistence** | `src/system/task-persistence.ts` | Debounced metadata writes (500 ms coalescing) |
-| **Task Recovery** | `src/system/task-recovery.ts` | Startup recovery + idle detection + progressive recovery (reinforcement then nuclear restart) |
-| **Message Queue** | `src/system/message-queue.ts` | Per-agent async producer-consumer queues with replay support |
-| **MCP Tools** | `src/mcp/tools.ts` | Custom MCP tool definitions exposed to agents via the Claude Agent SDK |
+| **HTTP Server** | `src/index.ts` | Express app, health check, GitHub webhook mount, Slack Bolt mount |
+| **Slack Events** | `src/connectors/slack/events.ts` | Slack Bolt receiver, event handlers, triage routing, interactive button actions |
+| **GitHub Events** | `src/connectors/github/events.ts` | GitHub webhook dispatch, triage processing for PR comments |
+| **GitHub Webhooks** | `src/connectors/github/webhooks.ts` | Signature verification, deterministic routing, event formatting, merge check debouncing |
+| **Task** | `src/tasks/task.ts` | Task class: in-memory state, agent spawning, tool callbacks, lifecycle (create/stop/complete) |
+| **Task Persistence** | `src/tasks/persistence.ts` | Disk I/O: metadata, knowledge log, debounced writes, task lookup by thread/PR |
+| **Task Recovery** | `src/tasks/recovery.ts` | Startup recovery + idle detection + progressive recovery (reinforcement then nuclear restart) |
+| **Message Queue** | `src/agents/message-queue.ts` | Per-agent async producer-consumer queues with replay support |
+| **MCP Tools** | `src/agents/tools.ts` | Custom MCP tool definitions exposed to agents via the Claude Agent SDK |
 | **Logger** | `src/system/logger.ts` | Unified, color-coded, semantic logging for all system and agent events |
 
 ---
 
-## In-Memory State: TaskRuntimeState
+## In-Memory State: Task Class
 
-Every active task is represented by a `TaskRuntimeState` instance stored in the global
-`activeTasks` map (`src/system/active-tasks.ts`).
+Every active task is represented by a `Task` instance stored in a global `activeTasks` map
+within `src/tasks/task.ts`.
 
 ```typescript
-// src/system/active-tasks.ts
+// src/tasks/task.ts
 
-interface TaskBudgets {
-  researchRequestCount: number;     // web_research calls made
-  researchRequestLimit: number;     // default: 5 (extended +5 per Slack approval)
-  interAgentMessageCount: number;   // send_message_to_agent calls
-  interAgentMessageLimit: number;   // default: 100
-  taskStartTime: Date;              // wall-clock timeout anchor
-  taskTimeoutMs: number;            // default: 1_800_000 (30 minutes)
-}
-
-interface TaskRuntimeState {
+class Task {
   taskId: string;
   metadata: TaskMetadata;                       // persisted to disk (debounced)
 
@@ -74,15 +64,15 @@ Key design choices:
 ```
 Slack webhook (POST /webhooks/slack)
   --> Slack Bolt event handler (app_mention or message)
-    --> routeSlackEvent()          [webhook-router.ts]
+    --> routeSlackEvent()          [connectors/slack/events.ts]
         - discard own bot messages
         - everything else -> triage
-    --> processSlackTriage()       [event-handler.ts]
+    --> processSlackTriage()       [connectors/slack/events.ts]
         - fetch channel info, clean text, fetch thread history
-        - triageSlackMessage()     [agents/triage.ts] classifies action:
-            new_task     -> handleNewTask()     -> createTask() + sendMessage(pm-agent)
-            existing_task-> handleExistingTask()-> loadTask() + append to knowledge.log + sendMessage(pm-agent)
-            cancel_task  -> handleCancelTask()  -> stopTask()
+        - triageSlackMessage()     [system/triage.ts] classifies action:
+            new_task     -> handleNewTask()     -> Task.createFromSlackThread() + sendMessage(pm-agent)
+            existing_task-> handleExistingTask()-> Task.get() + append to knowledge.log + sendMessage(pm-agent)
+            cancel_task  -> handleCancelTask()  -> task.stop()
             noop         -> log and discard
 ```
 
@@ -95,7 +85,7 @@ follow the same pipeline. Messages that contain a bot mention are skipped by the
 ```
 GitHub webhook (POST /webhooks/github)
   --> signature verification
-  --> routeGitHubEvent()           [webhook-router.ts]
+  --> routeGitHubEvent()           [connectors/github/webhooks.ts]
       - discard own bot events (GITHUB_APP_SLUG[bot])
       - extract branch name, derive task ID from branch pattern
       - for issue_comment without branch: findTaskByPRNumber()
@@ -111,14 +101,15 @@ GitHub webhook (POST /webhooks/github)
 ```
 
 Direct-route events skip triage entirely and are handled by `handleExistingTaskDirect()`
-or `handleMergeCheckDirect()` in `server.ts`. Only `issue_comment` events go through
-`processGitHubTriage()` (which calls `triageGitHubComment()` to filter conversational noise).
+in `connectors/github/events.ts` or `handleMergeCheckDirect()` in `connectors/github/webhooks.ts`.
+Only `issue_comment` events go through `processGitHubTriage()` (which calls
+`triageGitHubComment()` to filter conversational noise).
 
 ---
 
 ## Message Queue System
 
-**Source**: `src/system/message-queue.ts`
+**Source**: `src/agents/message-queue.ts`
 
 Each agent has a dedicated `MessageQueue` instance -- a simple in-memory async
 producer-consumer queue. An earlier iteration used an external message broker
@@ -170,8 +161,8 @@ content: `[From pm-agent]: <message>`.
 
 ### Queue lifecycle
 
-- Queues are created for all known agents when a task is built (`buildRuntime()`).
-- `queue.stop()` is called during `stopTask()` / `completeTask()`, causing agent
+- Queues are created for all known agents when a `Task` is constructed.
+- `queue.stop()` is called during `task.stop()` / `task.complete()`, causing agent
   generators to exit gracefully.
 - `queue.reset()` is not currently called at the system level (used internally
   by `RecoverableInputGenerator`).
@@ -182,25 +173,22 @@ content: `[From pm-agent]: <message>`.
 
 ### Spawning
 
-`ensureAgentSpawned()` in `task-runtime.ts` is the single entry point for starting agents.
-It is idempotent: if `runtime.spawned` already contains the agent, it returns immediately.
+`task.ensureAgentSpawned()` in `src/tasks/task.ts` is the single entry point for starting agents.
+It is idempotent: if the agent is already in `task.spawned`, it returns immediately.
 
 ```
-ensureAgentSpawned(runtime, agentName)
+task.ensureAgentSpawned(agentName)
   --> create tool callbacks
   --> check for existing session ID (for SDK resume)
-  --> classify agent type:
-      - repo agent   -> spawnRepoAgent()
-      - pm-agent     -> spawnPMAgent()
-      - plugin agent -> spawnPluginAgent()
-  --> register handle in runtime.handles
-  --> add to runtime.spawned
+  --> spawnAgent() in src/agents/spawn.ts handles all agent types
+  --> register handle in task.handles
+  --> add to task.spawned
   --> attach crash handler: handle.running.then(() => updateAgentState(inactive))
 ```
 
 ### Resuming
 
-If `runtime.sessions` already contains a `session_id` for the agent, that ID is passed
+If `task.sessions` already contains a `session_id` for the agent, that ID is passed
 to the spawn function so the Claude Agent SDK resumes the existing conversation instead
 of starting fresh.
 
@@ -213,7 +201,7 @@ Agents are interrupted by stopping their queues. When `queue.stop()` is called, 
 
 ### State tracking
 
-`updateAgentState()` updates the in-memory session, triggers a debounced persist, and
+`task.updateAgentState()` updates the in-memory session, triggers a debounced persist, and
 (on deactivation) schedules an idle check. During server shutdown, deactivation writes
 are skipped so that recovery sees the correct pre-shutdown state.
 
@@ -221,7 +209,7 @@ are skipped so that recovery sees the correct pre-shutdown state.
 
 ## MCP Tool Implementation
 
-Tools are defined in `src/mcp/tools.ts` and exposed via MCP servers created per agent type.
+Tools are defined in `src/agents/tools.ts` and exposed via MCP servers created per agent type.
 
 ### PM Agent Tools (via `createPMAgentMcpServer`)
 
@@ -254,7 +242,7 @@ Tools are defined in `src/mcp/tools.ts` and exposed via MCP servers created per 
 ### Callback architecture
 
 All tools delegate to callback functions (`PMToolCallbacks` / `RepoAgentToolCallbacks`)
-created per agent per task by `createToolCallbacks()` in `task-runtime.ts`. This
+created per agent per task by `task.createToolCallbacks()` in `src/tasks/task.ts`. This
 decouples tool definitions from runtime state, enabling testing and isolation.
 
 ### Research budget (Defense 4)
@@ -274,16 +262,16 @@ message is not blocked (advisory limit).
 
 ## Agent Idle Detection and Recovery
 
-**Source**: `src/system/task-recovery.ts`
+**Source**: `src/tasks/recovery.ts`
 
 ### Agent deactivation trigger
 
 When an agent finishes its turn, the SDK fires a Stop hook. The agent's `onIdle`
-callback calls `updateAgentState(runtime, agentName, false)`, which in turn calls
-`scheduleIdleCheck(runtime)`.
+callback calls `task.updateAgentState(agentName, false)`, which in turn calls
+`scheduleIdleCheck(task)`.
 
 Additionally, when an agent's background process exits (the `handle.running` promise
-resolves), the crash handler calls `updateAgentState(runtime, agentName, false)`.
+resolves), the crash handler calls `task.updateAgentState(agentName, false)`.
 
 ### scheduleIdleCheck
 
@@ -291,12 +279,12 @@ A 3-second delay is applied before checking, to avoid racing with message delive
 (another agent may be about to send a message that wakes this one).
 
 ```typescript
-function scheduleIdleCheck(runtime: TaskRuntimeState): void {
+function scheduleIdleCheck(task: Task): void {
   setTimeout(async () => {
-    if (!runtime.isActive || getIsShuttingDown()) return;
-    const allInactive = checkAllAgentsInactive(runtime);
+    if (!task.isActive || getIsShuttingDown()) return;
+    const allInactive = checkAllAgentsInactive(task);
     if (allInactive) {
-      await triggerRecovery(runtime);
+      await triggerRecovery(task);
     }
   }, 3000);
 }
@@ -323,7 +311,7 @@ agent's queue and marks the agent active. If the process is dead, it sets
 
 ## Task Recovery on Server Restart
 
-**Source**: `src/system/task-recovery.ts` -- `recoverActiveTasks()`
+**Source**: `src/tasks/recovery.ts` -- `recoverActiveTasks()`
 
 Called once during server startup after the HTTP server is ready.
 
@@ -331,25 +319,25 @@ Called once during server startup after the HTTP server is ready.
 recoverActiveTasks()
   --> findTasksByStatus('in_progress')   // grep across sessions/task-*/shared/metadata.json
   --> for each task:
-      --> loadTask(task_id)              // build runtime from disk metadata
-      --> recoverTaskAgents(runtime)
+      --> Task.get(task_id)              // build Task from disk metadata
+      --> recoverTaskAgents(task)
           --> for each session where active === true:
-              sendMessage(runtime, agentName, AGENT_PROMPTS.recovery)
+              task.sendMessage(AGENT_PROMPTS.recovery, agentName)
           --> if no agents were active (stale metadata):
-              sendMessage(runtime, 'pm-agent', AGENT_PROMPTS.recovery)
+              task.sendMessage(AGENT_PROMPTS.recovery, 'pm-agent')
 ```
 
-During graceful shutdown (`stopServer()`), `isShuttingDown` is set to `true`. This
-causes `updateAgentState()` to skip deactivation writes, preserving the `active: true`
-state in metadata so that recovery on restart correctly re-spawns those agents.
+During graceful shutdown, `isShuttingDown` is set to `true` via `src/system/shutdown.ts`.
+This causes `task.updateAgentState()` to skip deactivation writes, preserving the
+`active: true` state in metadata so that recovery on restart correctly re-spawns those agents.
 
 ---
 
 ## Webhook Routing
 
-**Source**: `src/system/webhook-router.ts`
-
 ### Slack routing
+
+**Source**: `src/connectors/slack/events.ts` (inline `routeSlackEvent()`)
 
 ```typescript
 type SlackRouteResult =
@@ -360,6 +348,8 @@ type SlackRouteResult =
 All Slack messages go to triage unless they are from the bot itself (matched by `bot_id`).
 
 ### GitHub routing
+
+**Source**: `src/connectors/github/webhooks.ts`
 
 ```typescript
 type GitHubRouteResult =
@@ -406,20 +396,20 @@ type TaskStatus = 'in_progress' | 'stopped' | 'completed';
                     +--> completed
 ```
 
-| Transition | Trigger | Function |
+| Transition | Trigger | Method |
 |---|---|---|
-| `-> in_progress` | New task created | `createTask()` |
-| `-> in_progress` | Stopped task reactivated | `loadTask()` (sets `metadata.status = 'in_progress'` in `buildRuntime()`) |
-| `-> stopped` | User cancels, edit mode request, budget exceeded, wall-clock timeout | `stopTask()` |
-| `-> completed` | PM calls `report_completion` | `completeTask()` |
+| `-> in_progress` | New task created | `Task.createFromSlackThread()` |
+| `-> in_progress` | Stopped task reactivated | `Task.get()` (sets `metadata.status = 'in_progress'`) |
+| `-> stopped` | User cancels, edit mode request, budget exceeded, wall-clock timeout | `task.stop()` |
+| `-> completed` | PM calls `report_completion` | `task.complete()` |
 
-Both `stopTask()` and `completeTask()`:
-1. Set `runtime.isActive = false`
+Both `task.stop()` and `task.complete()`:
+1. Set `task.isActive = false`
 2. Clear the wall-clock timeout interval
 3. Deactivate all agents in-memory
 4. Stop all queues (agents exit gracefully)
 5. Flush metadata to disk with the new status
-6. Remove the task from `activeTasks`
+6. Remove the task from the active tasks map
 
 ### Wall-clock timeout
 

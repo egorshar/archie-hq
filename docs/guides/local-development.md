@@ -125,7 +125,7 @@ npm run typecheck
 ```
 
 The server starts on `http://localhost:3000` with:
-- `POST /slack/events` — Slack webhooks
+- `POST /webhooks/slack` — Slack webhooks
 - `POST /webhooks/github` — GitHub webhooks
 - `GET /health` — Health check (returns active task count)
 - Interactive message handlers for edit mode approval buttons
@@ -170,11 +170,13 @@ cat workdir/sessions/task-*/shared/knowledge.log        # Activity log
 ```
 archie-hq/
 ├── src/                  # Application source
-│   ├── agents/           # Agent spawn logic
-│   ├── system/           # Core infrastructure
-│   ├── mcp/              # MCP tools
-│   ├── slack/            # Slack client
-│   ├── github/           # GitHub client
+│   ├── connectors/       # External integrations
+│   │   ├── slack/        # Slack Bolt app, client, events
+│   │   └── github/       # GitHub App, webhooks, merge
+│   ├── agents/           # Agent spawn logic, tools, registry
+│   ├── tasks/            # Task class, persistence, recovery
+│   ├── system/           # Logger, plugin loader, triage, workdir
+│   ├── mcp/              # Research tools pipeline
 │   ├── types/            # TypeScript types
 │   └── utils/            # Utilities
 ├── prompts/              # Agent system prompts

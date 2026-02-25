@@ -20,7 +20,7 @@ settings:
   socket_mode_enabled: false
 ```
 
-The server is created in `src/system/server.ts`, where `ExpressReceiver` is instantiated with the Slack signing secret and the `/webhooks/slack` endpoint. The Bolt `App` is then attached to this receiver.
+The Bolt app is created in `src/connectors/slack/events.ts`, where `ExpressReceiver` is instantiated with the Slack signing secret and the `/webhooks/slack` endpoint. The Bolt `App` is then attached to this receiver.
 
 ### Bot Scopes
 
@@ -28,10 +28,10 @@ The manifest declares these bot scopes: `app_mentions:read`, `chat:write`, `chan
 
 ## Bot Identity Detection
 
-On startup, `initSlackClient()` in `src/slack/client.ts` calls `auth.test()` to retrieve both the bot's `user_id` and `bot_id`. These two identifiers serve different purposes:
+On startup, `initSlackClient()` in `src/connectors/slack/client.ts` calls `auth.test()` to retrieve both the bot's `user_id` and `bot_id`. These two identifiers serve different purposes:
 
 - **`botUserId`** is used to detect `@Archie` mentions in message text (the `<@U...>` pattern).
-- **`botId`** is used by the webhook router (`src/system/webhook-router.ts`) to discard the bot's own messages, preventing infinite feedback loops. The router compares `event.bot_id` against the stored `botId` and returns a `discard` action on match.
+- **`botId`** is used by the event router in `src/connectors/slack/events.ts` to discard the bot's own messages, preventing infinite feedback loops. The router compares `event.bot_id` against the stored `botId` and returns a `discard` action on match.
 
 ## Event Handling
 
@@ -49,11 +49,11 @@ Slack webhook
   -> processSlackTriage() [inline, fire-and-forget]
 ```
 
-Events are processed inline with no queue -- the webhook is acknowledged immediately and processing happens asynchronously. See `src/system/server.ts` lines 166-228.
+Events are processed inline with no queue -- the webhook is acknowledged immediately and processing happens asynchronously. See `src/connectors/slack/events.ts`.
 
 ## Triage and Message Classification
 
-Every Slack event that passes the bot-identity filter goes through triage (`src/system/event-handler.ts`). The triage agent (Haiku model, defined in `src/agents/triage.ts`) classifies each message into one of four actions:
+Every Slack event that passes the bot-identity filter goes through triage (processed inline in `src/connectors/slack/events.ts`). The triage agent (Haiku model, defined in `src/system/triage.ts`) classifies each message into one of four actions:
 
 | Action | Description |
 |---|---|
@@ -68,15 +68,15 @@ The triage agent receives the current message plus full thread history (fetched 
 
 ```
 User @mentions Archie in Slack thread
-  -> server.ts: app_mention handler
-  -> webhook-router.ts: routeSlackEvent() - filters bot messages
-  -> event-handler.ts: processSlackTriage()
+  -> connectors/slack/events.ts: app_mention handler
+  -> routeSlackEvent() - filters bot messages
+  -> processSlackTriage()
     -> Fetches thread history via fetchThreadHistory()
     -> Runs triage agent (Haiku) to classify the message
     -> Routes based on classification:
-       new_task:      createTask() -> sendMessage(PM, "New task created, assign owner")
-       existing_task: loadTask()   -> sendMessage(PM, "New input received...")
-       cancel_task:   stopTask()   -> posts confirmation to threads
+       new_task:      Task.createFromSlackThread() -> task.sendMessage(PM)
+       existing_task: Task.get()   -> task.sendMessage(PM, "New input received...")
+       cancel_task:   task.stop()  -> posts confirmation to threads
        noop:          no action
 ```
 
@@ -98,14 +98,14 @@ When triage classifies a message as `existing_task` and the thread is not yet tr
 
 Each `SlackThread` stores a `last_processed_ts` field. When processing an existing thread, the event handler only appends messages with a timestamp greater than `last_processed_ts`, then updates the field to the current message's timestamp. This prevents duplicate processing when multiple events arrive for the same thread.
 
-See `src/system/event-handler.ts`, `handleExistingTask()` -- specifically the comparison `msg.ts <= lastProcessedTs` used to skip already-processed messages.
+See `src/connectors/slack/events.ts`, `handleExistingTask()` -- specifically the comparison `msg.ts <= lastProcessedTs` used to skip already-processed messages.
 
 ## The `post_to_slack` MCP Tool
 
-The PM agent communicates with users via the `post_to_slack` MCP tool, defined in `src/mcp/tools.ts`. When the PM calls this tool:
+The PM agent communicates with users via the `post_to_slack` MCP tool, defined in `src/agents/tools.ts`. When the PM calls this tool:
 
-1. The tool callback (`onPostToSlack` in `src/system/task-runtime.ts`) invokes the Slack post callback.
-2. The callback loads the task's metadata and calls `postToThreads()` from `src/slack/client.ts`.
+1. The tool callback (`onPostToSlack` in `src/tasks/task.ts`) invokes the Slack post callback.
+2. The callback loads the task's metadata and calls `postToThreads()` from `src/connectors/slack/client.ts`.
 3. `postToThreads()` iterates over all `SlackThread` entries in the task metadata and posts the message to each one.
 4. Before posting, the message text is converted from standard Markdown to Slack's `mrkdwn` format using the `slackify-markdown` library.
 5. The message is also logged to the task's `knowledge.log` as a decision entry.
@@ -119,7 +119,7 @@ Some system events require user decisions via Slack buttons. These use `postInte
 - **Edit mode approval**: "Approve" / "Deny" buttons (action IDs: `approve_edit_mode`, `deny_edit_mode`). See [Edit Mode](./edit-mode.md).
 - **Research budget approval**: "Approve (+5)" / "Deny" buttons (action IDs: `approve_research_budget`, `deny_research_budget`).
 
-Button clicks are handled by Bolt action handlers in `src/system/server.ts`. When clicked, the handler acknowledges the interaction, updates the original message (removing buttons and showing the outcome), and calls the corresponding handler function (e.g., `handleEditModeApproval()`) which modifies task metadata and reactivates the PM agent.
+Button clicks are handled by Bolt action handlers in `src/connectors/slack/events.ts`. When clicked, the handler acknowledges the interaction, updates the original message (removing buttons and showing the outcome), and calls the corresponding handler function (e.g., `task.handleEditModeApproval()`) which modifies task metadata and reactivates the PM agent.
 
 ## Natural Language Guidelines for PM Responses
 
@@ -138,7 +138,7 @@ Channel decision logic:
 
 ## Mention Resolution
 
-When fetching thread history, `src/slack/client.ts` resolves Slack's opaque mention formats into human-readable text:
+When fetching thread history, `src/connectors/slack/client.ts` resolves Slack's opaque mention formats into human-readable text:
 
 - User mentions `<@U123>` become `@<U123:Real Name>`
 - Group mentions `<!subteam^S123>` become `@<S123:group-name>`
@@ -152,13 +152,12 @@ The Slack client extracts file metadata from messages, including files shared di
 
 ## Relevant Source Files
 
-- `src/slack/client.ts` -- Slack WebClient wrapper, message posting, thread history, mention resolution, file downloads
-- `src/system/server.ts` -- Bolt app setup, event handlers, interactive action handlers
-- `src/system/webhook-router.ts` -- Slack event routing and bot message filtering
-- `src/system/event-handler.ts` -- Triage orchestration and task routing for Slack events
-- `src/agents/triage.ts` -- Haiku-based message classifier
-- `src/mcp/tools.ts` -- `post_to_slack` tool definition
-- `src/system/task-runtime.ts` -- Slack callback injection and `onPostToSlack` implementation
-- `src/types/task.ts` -- `SlackThread`, `SlackMessage`, `SlackFile` type definitions
+- `src/connectors/slack/client.ts` -- Slack WebClient wrapper, message posting, thread history, mention resolution, file downloads
+- `src/connectors/slack/callbacks.ts` -- Slack callback registry (post_to_slack, interactive messages)
+- `src/connectors/slack/events.ts` -- Bolt app setup, event handlers, triage routing, interactive action handlers
+- `src/system/triage.ts` -- Haiku-based message classifier
+- `src/agents/tools.ts` -- `post_to_slack` tool definition
+- `src/tasks/task.ts` -- Task class with Slack callback implementations
+- `src/types/index.ts` -- `SlackThread`, `SlackMessage`, `SlackFile` type definitions
 - `slack-manifest.yaml` -- Slack app configuration
 - `prompts/pm-agent.md` -- PM agent communication guidelines

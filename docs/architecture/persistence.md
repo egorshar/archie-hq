@@ -3,8 +3,8 @@
 How Archie stores task state on disk, syncs in-memory runtime to files, and recovers
 after restarts.
 
-> Source of truth: the code in `src/system/task-manager.ts`, `src/system/task-persistence.ts`,
-> `src/system/task-recovery.ts`, and `src/types/task.ts`. This document describes only
+> Source of truth: the code in `src/tasks/persistence.ts`, `src/tasks/task.ts`,
+> `src/tasks/recovery.ts`, and `src/types/task.ts`. This document describes only
 > what is implemented.
 
 ---
@@ -38,7 +38,7 @@ sessions/
     repos/                                 # git worktrees for edit mode (created on demand)
 ```
 
-### Path helpers (`src/system/task-manager.ts`)
+### Path helpers (`src/tasks/persistence.ts`)
 
 | Function | Returns |
 |---|---|
@@ -124,7 +124,7 @@ interface AgentSessionState {
 
 The `agent_sessions` field supports a union of `AgentSessionState | string` to handle
 legacy metadata files where sessions were stored as bare session ID strings. The
-`getAgentSession()` helper in `task-runtime.ts` transparently converts legacy entries.
+`getAgentSession()` helper in `src/tasks/task.ts` transparently converts legacy entries.
 
 ### TaskStatus
 
@@ -143,7 +143,7 @@ type FindingType = 'discovery' | 'decision' | 'completion' | 'blocker';
 
 ## Shared Knowledge Log
 
-**Source**: `src/system/task-manager.ts`
+**Source**: `src/tasks/persistence.ts`
 
 The file `shared/knowledge.log` is an append-only text log that serves as the shared
 context between agents. Every agent can read it; the system appends to it on behalf of
@@ -187,7 +187,7 @@ The `url_private_download` URL is preferred over `url_private` for API-based dow
 
 ## Debounced Writes
 
-**Source**: `src/system/task-persistence.ts`
+**Source**: `src/tasks/persistence.ts`
 
 ### Design
 
@@ -215,15 +215,15 @@ is persisted before the runtime is removed from memory.
 ### Session state sync
 
 Before every write (debounced or flushed), `syncAndWrite()` copies the in-memory
-`runtime.sessions` map into `metadata.agent_sessions`:
+`task.sessions` map into `metadata.agent_sessions`:
 
 ```typescript
-async function syncAndWrite(runtime: TaskRuntimeState): Promise<void> {
-  for (const [name, session] of runtime.sessions) {
-    runtime.metadata.agent_sessions[name] = { ...session };
+async function syncAndWrite(task: Task): Promise<void> {
+  for (const [name, session] of task.sessions) {
+    task.metadata.agent_sessions[name] = { ...session };
   }
-  runtime.metadata.updated_at = new Date().toISOString();
-  await writeFile(getMetadataPath(runtime.taskId), JSON.stringify(runtime.metadata, null, 2));
+  task.metadata.updated_at = new Date().toISOString();
+  await writeFile(getMetadataPath(task.taskId), JSON.stringify(task.metadata, null, 2));
 }
 ```
 
@@ -251,7 +251,7 @@ timestamp of the most recently processed message in that thread.
 ### New thread for existing task
 
 When a new Slack thread is linked to an existing task (`handleExistingTask()` in
-`event-handler.ts`), the full thread history is appended to the knowledge log and the
+`connectors/slack/events.ts`), the full thread history is appended to the knowledge log and the
 thread is added to `metadata.slack_threads` with `last_processed_ts` set to the
 current message's timestamp.
 
@@ -263,7 +263,7 @@ thread history and only appends messages with `ts > last_processed_ts`. Bot mess
 `last_processed_ts` is updated to the current message's timestamp.
 
 ```typescript
-// event-handler.ts - existing thread dedup
+// connectors/slack/events.ts - existing thread dedup
 for (const msg of threadHistory) {
   if (!msg.ts || msg.ts <= lastProcessedTs) continue;
   if (!msg.user || msg.user === 'unknown' || msg.user === getBotUserId()) continue;
@@ -282,7 +282,7 @@ processed GitHub PR comment ID. When GitHub triage fires, only comments with
 
 ## State Recovery on Restart
 
-**Source**: `src/system/task-recovery.ts`
+**Source**: `src/tasks/recovery.ts`
 
 ### Startup flow
 
@@ -290,25 +290,25 @@ processed GitHub PR comment ID. When GitHub triage fires, only comments with
 
 1. `findTasksByStatus('in_progress')` scans all `metadata.json` files using `grep` for
    `"status": "in_progress"`.
-2. For each task, `loadTask()` rebuilds the in-memory `TaskRuntimeState` from the
+2. For each task, `Task.get(taskId)` rebuilds the in-memory `Task` from the
    metadata file.
 3. `recoverTaskAgents()` re-spawns agents that were active before shutdown:
-   - Iterates `runtime.sessions` looking for entries with `active === true`.
-   - Sends `AGENT_PROMPTS.recovery` to each active agent via `sendMessage()`.
+   - Iterates `task.sessions` looking for entries with `active === true`.
+   - Sends `AGENT_PROMPTS.recovery` to each active agent via `task.sendMessage()`.
    - If no agents had `active === true` (stale metadata), falls back to spawning
      `pm-agent` with the recovery prompt.
 
 ### Shutdown preservation
 
-During graceful shutdown (`stopServer()`), `isShuttingDown` is set to `true`.
-`updateAgentState()` checks this flag and **skips** deactivation writes, preserving
+During graceful shutdown, `isShuttingDown` is set to `true` via `src/system/shutdown.ts`.
+`task.updateAgentState()` checks this flag and **skips** deactivation writes, preserving
 the `active: true` state in metadata. This ensures recovery correctly identifies which
 agents to re-spawn.
 
 ### Task reactivation
 
-`loadTask()` is idempotent: if the task is already in the `activeTasks` map, it returns
-the existing runtime. Otherwise, it reads metadata from disk and calls `buildRuntime()`,
+`Task.get()` is idempotent: if the task is already in the active tasks map, it returns
+the existing instance. Otherwise, it reads metadata from disk and constructs a new `Task`,
 which sets `metadata.status = 'in_progress'` regardless of the on-disk status. This
 is how stopped tasks are reactivated (e.g., after edit mode approval or research budget
 approval).

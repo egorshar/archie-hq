@@ -15,7 +15,7 @@ Archie uses four agent types, each backed by a specific Claude model and serving
 
 ### Triage Agent
 
-**Source**: `src/agents/triage.ts`
+**Source**: `src/system/triage.ts`
 
 The triage agent is a stateless classifier that runs once per incoming event. It does not maintain sessions or participate in task coordination. It uses the Haiku model for fast, cost-effective classification.
 
@@ -50,13 +50,13 @@ The triage agent is a stateless classifier that runs once per incoming event. It
 
 The triage agent has access to `Glob`, `Grep`, and `Read` tools to search the `sessions/` directory for matching tasks by thread ID, PR number, or keyword. It uses context hints (e.g., "THREAD MATCH: This thread belongs to task X") provided by `buildSlackContext()` for fast lookups.
 
-GitHub events that don't require LLM classification (PR reviews, push events, CI results) are routed deterministically by `webhook-router.ts` without invoking the triage agent.
+GitHub events that don't require LLM classification (PR reviews, push events, CI results) are routed deterministically by `connectors/github/webhooks.ts` without invoking the triage agent.
 
 ### PM Agent
 
-**Source**: `src/agents/pm.ts`
+**Source**: `src/agents/agent.ts`, `src/agents/spawn.ts`
 
-One PM agent instance is spawned per task. It is the orchestrator: it receives all external input (from event-handler), delegates work to specialist agents, communicates with users via Slack, and manages the task lifecycle.
+One PM agent instance is spawned per task. It is the orchestrator: it receives all external input (from connectors), delegates work to specialist agents, communicates with users via Slack, and manages the task lifecycle.
 
 **Model**: Opus (with 1M context beta)
 
@@ -99,9 +99,9 @@ One PM agent instance is spawned per task. It is the orchestrator: it receives a
 
 ### Repo Agents
 
-**Source**: `src/agents/repo-agent.ts`
+**Source**: `src/agents/agent.ts`, `src/agents/spawn.ts`
 
-Repo agents are specialized for a single repository. They investigate code, make changes (in edit mode), and coordinate with other agents. Configuration comes from plugins via `repo-configs.ts`.
+Repo agents are specialized for a single repository. They investigate code, make changes (in edit mode), and coordinate with other agents. Configuration comes from plugins via `src/agents/registry.ts`.
 
 **Model**: Sonnet (with 1M context beta)
 
@@ -130,7 +130,7 @@ Repo agents are specialized for a single repository. They investigate code, make
 
 ### Plugin Agents
 
-**Source**: `src/agents/plugin-agent.ts`
+**Source**: `src/agents/agent.ts`, `src/agents/spawn.ts`
 
 Plugin agents are lightweight, read-only agents for domains that don't need git, worktree, or GitHub infrastructure. They are loaded from plugins that lack a `repo-config.json`.
 
@@ -154,7 +154,7 @@ All agents (except triage) communicate through two distinct channels:
 
 ### Channel 1: `send_message_to_agent`
 
-Direct peer-to-peer messaging. Implemented as an MCP tool in `src/mcp/tools.ts`.
+Direct peer-to-peer messaging. Implemented as an MCP tool in `src/agents/tools.ts`.
 
 **Behavior**:
 1. The sender calls `send_message_to_agent(target, message)`
@@ -167,8 +167,8 @@ Direct peer-to-peer messaging. Implemented as an MCP tool in `src/mcp/tools.ts`.
 **Key property**: The target list is built dynamically at startup from all registered repo and plugin agent IDs, plus `pm-agent`. This ensures agents can only message agents that actually exist.
 
 ```typescript
-// From src/mcp/tools.ts
-const allAgents = ['pm-agent', ...getAllRepoAgentIds(), ...getAllPluginAgentIds()];
+// From src/agents/tools.ts
+const allAgents = ['pm-agent', ...getAllAgentDefs().map(d => d.id)];
 ```
 
 ### Channel 2: `log_finding`
@@ -284,7 +284,7 @@ Agents do not retain knowledge of code between tasks. Each task starts with fres
 Within a single task, agents maintain session history via the Claude Agent SDK's session resume mechanism. If an agent crashes, the runtime attempts to resume the existing session. If resume fails, it retries with a fresh session using the `RecoverableInputGenerator` to replay consumed messages.
 
 ```typescript
-// From src/agents/repo-agent.ts
+// From src/agents/spawn.ts
 const recoverable = createRecoverableInputGenerator(queue);
 // On failure:
 recoverable.reset(); // Put consumed messages back in queue
@@ -294,19 +294,17 @@ hasRetried = true;
 
 ### Peer Awareness
 
-Every repo and plugin agent's prompt includes a dynamically generated peer list. This is built by `buildPeerList()` in `src/agents/peer-list.ts`:
+Every repo and plugin agent's prompt includes a dynamically generated peer list. This is built by `buildPeerList()` in `src/agents/agent.ts`:
 
 ```typescript
 export function buildPeerList(excludeAgentId: string): string {
-  const repoPeers = getAllRepoConfigs()
-    .filter((c) => c.agentId !== excludeAgentId)
-    .map((c) => `- ${c.agentId}: ${c.role} (${c.repoKey} repository)`);
-
-  const pluginPeers = getAllPluginAgentConfigs()
-    .filter((c) => c.agentId !== excludeAgentId)
-    .map((c) => `- ${c.agentId}: ${c.role} [${c.pluginName}]`);
-
-  return [...repoPeers, ...pluginPeers].join('\n');
+  return getAllAgentDefs()
+    .filter((d) => d.id !== excludeAgentId)
+    .map((d) => {
+      if (d.track === 'repo') return `- ${d.id}: ${d.role} (${d.repo!.repoKey} repository)`;
+      return `- ${d.id}: ${d.role} [${d.pluginName}]`;
+    })
+    .join('\n');
 }
 ```
 
@@ -332,7 +330,7 @@ Agents can be interrupted at any time by stopping their message queue. When a qu
 
 ### Idle Detection and Recovery
 
-When an agent's SDK `query()` finishes (Stop hook fires), the runtime marks it as inactive via `updateAgentState()`. This triggers `scheduleIdleCheck()` in `src/system/task-recovery.ts`, which can send recovery prompts to idle agents that haven't reported completion.
+When an agent's SDK `query()` finishes (Stop hook fires), the task marks it as inactive via `updateAgentState()`. This triggers `scheduleIdleCheck()` in `src/tasks/recovery.ts`, which can send recovery prompts to idle agents that haven't reported completion.
 
 Recovery prompts are defined in `src/agents/prompts.ts`:
 
@@ -352,7 +350,7 @@ When the PM receives a new task:
 3. Calls `assign_task_owner(agent)` to designate the lead agent
 4. Calls `send_message_to_agent(agent, message)` with the delegation message starting with "You are the task owner for this request."
 
-The `send_message_to_agent` callback in `task-runtime.ts`:
+The `send_message_to_agent` callback in `src/tasks/task.ts`:
 1. Logs the message to `knowledge.log`
 2. Spawns the target agent if not already running (`ensureAgentSpawned`)
 3. Adds the message to the target's queue

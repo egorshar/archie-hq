@@ -13,7 +13,7 @@ Repo agents are tied to a specific Git repository and have access to git infrast
 - Infrastructure config (GitHub repo, base branch, repo path) comes from `repo-config.json`
 - Agent identity and domain instructions come from the `agents/*.md` file referenced by the `prompt` field
 
-**Source:** `src/agents/repo-agent.ts`, `src/agents/repo-configs.ts`, `src/types/repo-agent.ts`
+**Source:** `src/agents/spawn.ts`, `src/agents/registry.ts`, `src/types/agent.ts`
 
 ### Plugin Agent Track (Generic Domains)
 
@@ -25,7 +25,7 @@ Plugin agents are lightweight, read-only agents for domains that do not need git
 - Domain-specific instructions come from the markdown body
 - Tools: `Read`, `Glob`, `Grep`, `Skill`, `send_message_to_agent`, `log_finding`, `web_research`
 
-**Source:** `src/agents/plugin-agent.ts`, `src/agents/plugin-configs.ts`, `src/types/plugin-agent.ts`
+**Source:** `src/agents/spawn.ts`, `src/agents/registry.ts`, `src/types/agent.ts`
 
 ## Plugin Directory Structure
 
@@ -142,7 +142,7 @@ Each key in `repo-config.json` produces a `RepoAgentConfig`:
 - Identity (role, expertise): parsed from the referenced `agents/{key}.md` frontmatter
 - Domain prompt (Layer 3): parsed from the referenced `agents/{key}.md` body
 
-**Source:** `src/agents/repo-configs.ts`
+**Source:** `src/agents/registry.ts`
 
 ## Generic Plugin: `agents/*.md` Format
 
@@ -152,13 +152,13 @@ For plugins without `repo-config.json`, each `.md` file in `agents/` defines an 
 - **Frontmatter** provides `role`, `expertise`, and optional `model`
 - **Body** provides the Layer 3 domain-specific prompt
 
-Agent ID collision detection runs at startup. `plugin-configs.ts` checks for:
+Agent ID collision detection runs at startup. `registry.ts` checks for:
 - Collisions between plugin agent IDs and repo agent IDs
 - Collisions between plugin agent IDs across different plugins
 
 If a collision is detected, the system throws an error with a message identifying both conflicting sources.
 
-**Source:** `src/agents/plugin-configs.ts`
+**Source:** `src/agents/registry.ts`
 
 ## PM Skills vs Agent Skills
 
@@ -174,7 +174,7 @@ At task creation time, all PM skills from all loaded plugins are symlinked into 
 sessions/{task-id}/shared/.claude/skills/{pluginName}-{skillDirName} -> plugins/{pluginName}/pm-skills/{skillDirName}
 ```
 
-**Source:** `src/system/task-runtime.ts` (task creation), `src/system/plugin-loader.ts` (scanning)
+**Source:** `src/tasks/task.ts` (task creation), `src/system/plugin-loader.ts` (scanning)
 
 ### Agent Skills (`skills/`)
 
@@ -184,7 +184,7 @@ Skills intended for plugin agents. Each subdirectory under `skills/` is a Claude
 sessions/{task-id}/agents/{agentKey}/.claude/skills/{skillName} -> plugins/{pluginName}/skills/{skillName}
 ```
 
-**Source:** `src/agents/plugin-agent.ts` (`setupAgentWorkspace`)
+**Source:** `src/agents/spawn.ts` (`setupAgentWorkspace`)
 
 ## Task Directory Structure
 
@@ -216,18 +216,18 @@ sessions/
         report.json                      # Final synthesized report
 ```
 
-**Source:** `src/system/task-manager.ts` (path helpers), `src/system/task-runtime.ts` (task creation)
+**Source:** `src/tasks/persistence.ts` (path helpers), `src/tasks/task.ts` (task creation)
 
 ## Core vs Plugin Separation
 
 ### What stays in `src/` (core system)
 
-- Agent spawners: `src/agents/repo-agent.ts`, `src/agents/plugin-agent.ts`, `src/agents/pm.ts`
-- Config builders: `src/agents/repo-configs.ts`, `src/agents/plugin-configs.ts`
+- Agent spawning: `src/agents/agent.ts`, `src/agents/spawn.ts`
+- Agent registry: `src/agents/registry.ts`
+- Agent tools: `src/agents/tools.ts`, `src/mcp/research-tools.ts`
 - Plugin loader: `src/system/plugin-loader.ts`
-- MCP tools: `src/mcp/tools.ts`, `src/mcp/research-tools.ts`
-- Task management: `src/system/task-manager.ts`, `src/system/task-runtime.ts`
-- Type definitions: `src/types/repo-agent.ts`, `src/types/plugin-agent.ts`, `src/types/task.ts`
+- Task management: `src/tasks/task.ts`, `src/tasks/persistence.ts`
+- Type definitions: `src/types/agent.ts`, `src/types/task.ts`
 - Prompt templates: `prompts/agent-core.md`, `prompts/repo-agent.md`, `prompts/plugin-agent.md`
 
 ### What goes in `plugins/` (domain-specific)
@@ -265,17 +265,17 @@ Track-specific behavior added on top of Layer 1:
 The markdown body from `agents/{key}.md` is appended as the final layer. This contains domain-specific instructions, coding standards, technology preferences, or any other specialization the agent needs.
 
 ```typescript
-// From src/agents/plugin-agent.ts — generatePluginAgentPrompt()
+// From src/agents/agent.ts — prompt composition
 const corePrompt = await loadPrompt("agent-core", { ... });    // Layer 1
-const pluginPrompt = await loadPrompt("plugin-agent", {});       // Layer 2
-const layers = [corePrompt, pluginPrompt];
-if (config.prompt) {
-  layers.push(config.prompt);                                     // Layer 3
+const trackPrompt = await loadPrompt(trackTemplate, {});         // Layer 2
+const layers = [corePrompt, trackPrompt];
+if (agentDef.prompt) {
+  layers.push(agentDef.prompt);                                   // Layer 3
 }
 return layers.join("\n\n");
 ```
 
-The same pattern applies to repo agents in `src/agents/repo-agent.ts`, using `prompts/repo-agent.md` for Layer 2 and `config.agentPrompt` for Layer 3.
+The same pattern applies to both repo and plugin agents in `src/agents/agent.ts`, using the appropriate track template (`prompts/repo-agent.md` or `prompts/plugin-agent.md`) for Layer 2.
 
 ## Related Documentation
 

@@ -19,29 +19,23 @@ Archie (Autonomous Responsive and Collaborative Hyper Intelligent Employee) is a
                     │  Bolt    │  │  Webhooks │
                     └────┬─────┘  └─────┬─────┘
                          │              │
-─────────────────────────┼──────────────┼──────────── Integration Layer
+─────────────────────────┼──────────────┼──────────── Connector Layer
                          │              │
-                    ┌────▼──────────────▼─────┐
-                    │     Webhook Router      │
-                    │  (server.ts,            │
-                    │   webhook-router.ts)    │
-                    └────────────┬────────────┘
-                                 │
-                    ┌────────────▼────────────┐
+              ┌──────────▼──┐  ┌────────▼────────┐
+              │ Slack Events│  │  GitHub Events  │
+              │ (events.ts) │  │  (events.ts)    │
+              └──────┬──────┘  └────────┬────────┘
+                     │                  │
+                    ┌▼──────────────────▼─────┐
                     │     Triage Agent        │
                     │  (Haiku — classifier)   │
                     └────────────┬────────────┘
                                  │
-─────────────────────────────────┼─────────────────── Orchestration Layer
+─────────────────────────────────┼─────────────────── Task Layer
                                  │
                     ┌────────────▼────────────┐
-                    │     Event Handler       │
-                    │  (event-handler.ts)     │
-                    └────────────┬────────────┘
-                                 │
-                    ┌────────────▼────────────┐
-                    │     Task Runtime        │
-                    │  (task-runtime.ts)      │
+                    │      Task Class         │
+                    │  (tasks/task.ts)        │
                     │  Message queues, agent  │
                     │  spawning, callbacks    │
                     └────────────┬────────────┘
@@ -94,11 +88,11 @@ Every task has a designated **task owner** (a repo or plugin agent) responsible 
 
 ### Streaming Generators
 
-Agents receive input via async generators connected to `MessageQueue` instances (`src/system/message-queue.ts`). This enables continuous streaming: new messages are fed to running agents without restarting them. The `RecoverableInputGenerator` tracks consumed messages and can replay them on session recovery failure.
+Agents receive input via async generators connected to `MessageQueue` instances (`src/agents/message-queue.ts`). This enables continuous streaming: new messages are fed to running agents without restarting them. The `RecoverableInputGenerator` tracks consumed messages and can replay them on session recovery failure.
 
 ### Per-Task Instances
 
-Each task gets its own `TaskRuntimeState` with:
+Each task gets its own `Task` instance (a class that encapsulates runtime state) with:
 
 - Isolated message queues for every agent
 - Independent agent handles and session state
@@ -107,7 +101,7 @@ Each task gets its own `TaskRuntimeState` with:
 
 ### Git Worktrees
 
-In edit mode, repo agents work in isolated git worktrees (`src/system/worktree-manager.ts`). Each worktree gets a feature branch (`feature/task-{taskId}`) based on the repository's default branch. Agents commit locally; the PM agent handles `git push`, PR creation, and remote operations via GitHub API.
+In edit mode, repo agents work in isolated git worktrees (`src/connectors/github/worktree.ts`). Each worktree gets a feature branch (`feature/task-{taskId}`) based on the repository's default branch. Agents commit locally; the PM agent handles `git push`, PR creation, and remote operations via GitHub API.
 
 ### Plugin Architecture
 
@@ -126,18 +120,18 @@ See [plugin-system.md](plugin-system.md) for details.
 
 ```
 1. Slack event (app_mention or thread reply)
-   → server.ts receives via Slack Bolt
+   → connectors/slack/events.ts receives via Slack Bolt
 
-2. Webhook Router filters (bot messages, duplicates)
-   → webhook-router.ts discards or passes through
+2. Route filters (bot messages)
+   → routeSlackEvent() discards own bot messages or passes through
 
 3. Triage Agent classifies (Haiku, structured JSON output)
    → new_task | existing_task | cancel_task | noop
 
-4. Event Handler routes based on triage result:
-   → new_task:      createTask() → sendMessage(pm-agent, "New task created, assign owner")
-   → existing_task: loadTask()   → sendMessage(pm-agent, "New input received...")
-   → cancel_task:   stopTask()   → post cancellation to Slack
+4. Event handler routes based on triage result:
+   → new_task:      Task.createFromSlackThread() → task.sendMessage(pm-agent)
+   → existing_task: Task.get()   → append to knowledge.log → task.sendMessage(pm-agent)
+   → cancel_task:   task.stop()  → post cancellation to Slack
    → noop:          no action
 
 5. PM Agent processes input:
@@ -156,9 +150,9 @@ See [plugin-system.md](plugin-system.md) for details.
 
 ```
 1. GitHub webhook (PR review, comment, push, check_run)
-   → server.ts receives via Express endpoint
+   → index.ts receives via Express endpoint
 
-2. Webhook Router performs deterministic routing:
+2. connectors/github/webhooks.ts performs deterministic routing:
    → Matches task by branch name (feature/task-{id}) or PR number
    → Routes to: triage (comments), direct (reviews, CI), merge_check, or discard
 
@@ -173,53 +167,50 @@ See [slack-integration.md](slack-integration.md) and [github-integration.md](git
 
 ```
 src/
-├── index.ts                  # Entry point, startup, plugin/agent loading
+├── index.ts                     # Entry point, HTTP server, startup, plugin/agent loading
+├── connectors/
+│   ├── slack/
+│   │   ├── client.ts            # Slack Web API wrapper, mention resolution, file downloads
+│   │   ├── callbacks.ts         # Slack callback registry (post_to_slack, interactive messages)
+│   │   └── events.ts            # Slack Bolt app, event handlers, triage routing, button actions
+│   └── github/
+│       ├── client.ts            # GitHub App / Octokit wrapper, git identity, GIT_ASKPASS
+│       ├── events.ts            # GitHub webhook dispatch, triage processing
+│       ├── webhooks.ts          # Signature verification, routing, context extraction, formatting
+│       ├── merge.ts             # PR merge logic, linked PR checking
+│       └── worktree.ts          # Git worktree lifecycle
 ├── agents/
-│   ├── triage.ts             # Triage agent (Haiku classifier)
-│   ├── pm.ts                 # PM agent spawner
-│   ├── repo-agent.ts         # Unified repo agent spawner
-│   ├── plugin-agent.ts       # Plugin agent spawner
-│   ├── repo-configs.ts       # Repo agent config builder (from plugins)
-│   ├── plugin-configs.ts     # Plugin agent config builder (from plugins)
-│   ├── peer-list.ts          # Peer list generator for agent prompts
-│   └── prompts.ts            # Shared prompt constants (new task, recovery, etc.)
+│   ├── agent.ts                 # Agent class: prompt composition, spawning, session management
+│   ├── spawn.ts                 # Agent spawn entrypoint, worktree setup, tool wiring
+│   ├── registry.ts              # Agent definition registry (from plugins)
+│   ├── tools.ts                 # MCP tool definitions (PM + repo agent tools)
+│   ├── message-queue.ts         # Async message queue with recovery
+│   └── prompts.ts               # Shared prompt constants (new task, recovery, etc.)
+├── tasks/
+│   ├── task.ts                  # Task class: lifecycle, budgets, agent management, callbacks
+│   ├── persistence.ts           # Disk I/O: metadata, knowledge log, debounced writes, lookups
+│   └── recovery.ts              # Startup recovery, idle detection, progressive recovery
 ├── system/
-│   ├── server.ts             # Slack Bolt + Express server, webhook handlers
-│   ├── event-handler.ts      # Triage → task routing logic
-│   ├── task-runtime.ts       # In-memory task state, agent spawning, callbacks
-│   ├── task-manager.ts       # Disk operations (metadata, knowledge log)
-│   ├── task-persistence.ts   # Debounced metadata writes
-│   ├── task-recovery.ts      # Idle detection and crash recovery
-│   ├── active-tasks.ts       # Active task registry
-│   ├── message-queue.ts      # Async message queue with recovery
-│   ├── plugin-loader.ts      # Plugin directory scanner
-│   ├── webhook-router.ts     # Slack/GitHub event routing
-│   ├── worktree-manager.ts   # Git worktree lifecycle
-│   └── logger.ts             # Unified color-coded logger
+│   ├── shutdown.ts              # Shutdown state (getIsShuttingDown / setShuttingDown)
+│   ├── logger.ts                # Unified color-coded logger
+│   ├── triage.ts                # Triage agent (Haiku classifier for Slack/GitHub)
+│   ├── plugin-loader.ts         # Plugin directory scanner
+│   └── workdir.ts               # Bootstrap: path constants, clone/pull/fetch helpers
 ├── mcp/
-│   ├── tools.ts              # MCP tool definitions (PM + repo agent tools)
-│   └── research-tools.ts     # Web research pipeline (multi-agent)
-├── slack/
-│   ├── client.ts             # Slack Web API wrapper
-│   └── index.ts              # Slack type exports
-├── github/
-│   ├── client.ts             # GitHub App / Octokit wrapper
-│   ├── merge-orchestrator.ts # PR merge logic
-│   └── webhook-utils.ts      # Webhook signature verification
+│   └── research-tools.ts        # Web research pipeline (multi-agent)
 ├── types/
-│   ├── task.ts               # TaskMetadata, SlackThread, etc.
-│   ├── agent.ts              # AgentHandle, AgentSessionState
-│   ├── repo-agent.ts         # RepoAgentConfig
-│   └── plugin-agent.ts       # PluginAgentConfig
+│   ├── task.ts                  # TaskMetadata, SlackThread, RepositoryInfo, etc.
+│   ├── agent.ts                 # AgentDef, AgentHandle, AgentSessionState
+│   └── index.ts                 # Type re-exports
 ├── utils/
-│   └── prompt-loader.ts      # Markdown prompt file loader with variable substitution
+│   └── prompt-loader.ts         # Markdown prompt file loader with variable substitution
 └── prompts/
-    ├── agent-core.md          # Layer 1: Universal multi-agent protocol
-    ├── pm-agent.md            # PM agent system prompt
-    ├── repo-agent.md          # Layer 2: Repo agent track extension
-    ├── plugin-agent.md        # Layer 2: Plugin agent track extension
-    ├── triage-agent.md        # Triage agent system prompt
-    └── research/              # Research pipeline prompts
+    ├── agent-core.md            # Layer 1: Universal multi-agent protocol
+    ├── pm-agent.md              # PM agent system prompt
+    ├── repo-agent.md            # Layer 2: Repo agent track extension
+    ├── plugin-agent.md          # Layer 2: Plugin agent track extension
+    ├── triage-agent.md          # Triage agent system prompt
+    └── research/                # Research pipeline prompts
         ├── lead-agent.md
         ├── researcher.md
         └── report-writer.md

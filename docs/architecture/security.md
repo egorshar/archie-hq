@@ -104,7 +104,7 @@ Additionally, each agent's core prompt (`prompts/agent-core.md`) includes standi
 Both hooks (persistence + defense tagging) are wired on every agent's PostToolUse array:
 
 ```typescript
-// From src/agents/repo-agent.ts (same in plugin-agent.ts, pm.ts)
+// From src/agents/spawn.ts (same in plugin-agent.ts, pm.ts)
 hooks: {
   PostToolUse: [
     createResearchPostToolHook({ getSharedDir, getTaskId, getAgentId }),
@@ -157,7 +157,7 @@ Repo agents start in **read-only mode** with only `Read`, `Glob`, `Grep` tools. 
 Even in edit mode, repo agents cannot push to remote -- only the PM agent has `push_branch` and `create_pull_request` tools.
 
 ```typescript
-// From src/agents/repo-agent.ts — edit mode tool gating
+// From src/agents/spawn.ts — edit mode tool gating
 allowedTools: [
   "Read", "Glob", "Grep",
   ...(editAllowed ? [
@@ -169,20 +169,20 @@ allowedTools: [
 ],
 ```
 
-**Source:** `src/agents/repo-agent.ts`, `src/mcp/tools.ts` (`createRequestEditModeTool`)
+**Source:** `src/agents/spawn.ts`, `src/agents/tools.ts` (`createRequestEditModeTool`)
 
 ### PR Review Enforcement
 
 All code changes go through GitHub pull requests. The PM agent creates PRs via the `create_pull_request` tool, and merge is gated on external PR review approval. The `trigger_merge_check` tool checks that PRs are approved, CI is passing, and there are no conflicts before merging.
 
-**Source:** `src/mcp/tools.ts` (`createPullRequestTool`, `createTriggerMergeCheckTool`)
+**Source:** `src/agents/tools.ts` (`createPullRequestTool`, `createTriggerMergeCheckTool`)
 
 ### Plugin Agent Isolation
 
 Plugin agents are permanently read-only. They have no `Write`, `Edit`, or `Bash` tools:
 
 ```typescript
-// From src/agents/plugin-agent.ts
+// From src/agents/spawn.ts
 allowedTools: [
   "mcp__repo-agent-tools__send_message_to_agent",
   "mcp__repo-agent-tools__log_finding",
@@ -191,7 +191,7 @@ allowedTools: [
 ],
 ```
 
-**Source:** `src/agents/plugin-agent.ts`
+**Source:** `src/agents/spawn.ts`
 
 ## Defense Layer 4: Per-Task Resource Budgets
 
@@ -213,7 +213,7 @@ When the budget is exhausted:
 2. Slack approval buttons are posted ("Approve (+5)" / "Deny")
 3. The task is stopped pending user decision
 
-**Source:** `src/mcp/research-tools.ts`, `src/system/task-runtime.ts`
+**Source:** `src/mcp/research-tools.ts`, `src/tasks/task.ts`
 
 ### Slack Budget Approval
 
@@ -225,7 +225,7 @@ Users can extend the research budget via Slack interactive buttons:
 The budget count persists across task stop/reactivate cycles via `research_request_count` and `research_budget_extra` fields in `TaskMetadata`.
 
 ```typescript
-// From src/system/task-runtime.ts
+// From src/tasks/task.ts
 export async function handleResearchBudgetApproval(taskId: string): Promise<void> {
   runtime.metadata.research_budget_extra = (runtime.metadata.research_budget_extra ?? 0) + 5;
   runtime.budgets.researchRequestLimit = 5 + (runtime.metadata.research_budget_extra ?? 0);
@@ -233,7 +233,7 @@ export async function handleResearchBudgetApproval(taskId: string): Promise<void
 }
 ```
 
-**Source:** `src/system/task-runtime.ts` (`handleResearchBudgetApproval`)
+**Source:** `src/tasks/task.ts` (`handleResearchBudgetApproval`)
 
 ### Additional Budget Controls
 
@@ -242,7 +242,7 @@ The system also tracks:
 - **Wall-clock timeout:** 30-minute default task timeout
 
 ```typescript
-// From src/system/task-runtime.ts
+// From src/tasks/task.ts
 budgets: {
   researchRequestCount: metadata.research_request_count ?? 0,
   researchRequestLimit: 5 + (metadata.research_budget_extra ?? 0),
@@ -286,7 +286,7 @@ Log format:
 
 This log is readable by all agents and provides a full audit trail of task activity.
 
-**Source:** `src/system/task-manager.ts` (`appendAgentFinding`, `appendSlackMessage`, `appendGitHubEvent`)
+**Source:** `src/tasks/persistence.ts` (`appendAgentFinding`, `appendSlackMessage`, `appendGitHubEvent`)
 
 ## Capability-Based Permissions Summary
 

@@ -77,7 +77,7 @@ Restart=always
 RestartSec=10
 ```
 
-On restart, the application automatically recovers in-progress tasks via `recoverActiveTasks()` in `src/system/task-recovery.ts`.
+On restart, the application automatically recovers in-progress tasks via `recoverActiveTasks()` in `src/tasks/recovery.ts`.
 
 ## Monitoring
 
