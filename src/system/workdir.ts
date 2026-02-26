@@ -9,8 +9,8 @@
  */
 
 import { join } from 'path';
-import { existsSync, lstatSync } from 'fs';
-import { mkdir, rm } from 'fs/promises';
+import { existsSync } from 'fs';
+import { mkdir } from 'fs/promises';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { logger } from './logger.js';
@@ -51,7 +51,12 @@ export async function bootstrapWorkdir(): Promise<void> {
 
   const pluginsUrl = process.env.ARCHIE_PLUGINS;
   if (pluginsUrl) {
-    await cloneOrPull(pluginsUrl, PLUGINS_DIR, 'plugins');
+    if (!existsSync(join(PLUGINS_DIR, '.git'))) {
+      await cloneRepo(pluginsUrl, PLUGINS_DIR, 'plugins');
+      lastPluginsRefresh = Date.now();
+    } else {
+      await refreshPlugins();
+    }
   } else if (!existsSync(PLUGINS_DIR)) {
     throw new Error(
       `Plugins directory not found at ${PLUGINS_DIR}. ` +
@@ -76,8 +81,54 @@ export async function cloneRepos(
 }
 
 // =============================================================================
+// Plugins refresh (cached — pulls at most once per cooldown period)
+// =============================================================================
+
+const PLUGINS_REFRESH_COOLDOWN_MS = 30 * 60_000; // 30 minutes
+let lastPluginsRefresh = 0;
+let pluginsRefreshPromise: Promise<void> | null = null;
+
+/**
+ * Pull latest plugins if cooldown has elapsed.
+ * Safe to call frequently — skips if pulled recently.
+ * Deduplicates concurrent calls (returns same promise).
+ */
+export async function refreshPlugins(): Promise<void> {
+  const now = Date.now();
+  if (now - lastPluginsRefresh < PLUGINS_REFRESH_COOLDOWN_MS) return;
+
+  if (pluginsRefreshPromise) return pluginsRefreshPromise;
+
+  pluginsRefreshPromise = (async () => {
+    try {
+      if (existsSync(join(PLUGINS_DIR, '.git'))) {
+        await execAsync('git pull --ff-only', { cwd: PLUGINS_DIR });
+        logger.system('Plugins refreshed');
+      }
+      lastPluginsRefresh = Date.now();
+    } catch (error) {
+      logger.warn('workdir', `Failed to refresh plugins: ${error}`);
+      // Still update timestamp to avoid hammering on persistent failures
+      lastPluginsRefresh = Date.now();
+    } finally {
+      pluginsRefreshPromise = null;
+    }
+  })();
+
+  return pluginsRefreshPromise;
+}
+
+// =============================================================================
 // Git helpers
 // =============================================================================
+
+/**
+ * Clone a git repo into targetDir.
+ */
+async function cloneRepo(url: string, targetDir: string, label: string): Promise<void> {
+  logger.system(`Cloning ${label} from ${url}...`);
+  await execAsync(`git clone "${url}" "${targetDir}"`);
+}
 
 /**
  * Convert "org/repo" to an HTTPS clone URL.
@@ -85,31 +136,6 @@ export async function cloneRepos(
  */
 function githubRepoToUrl(githubRepo: string): string {
   return `https://github.com/${githubRepo}.git`;
-}
-
-/**
- * Clone if missing, git pull --ff-only if exists.
- * Used for plugins (small repo, need working tree up to date).
- */
-async function cloneOrPull(url: string, targetDir: string, label: string): Promise<void> {
-  if (existsSync(join(targetDir, '.git'))) {
-    logger.system(`Pulling latest ${label}...`);
-    try {
-      await execAsync('git pull --ff-only', { cwd: targetDir });
-    } catch (error) {
-      logger.warn('workdir', `Failed to pull ${label}, using existing version: ${error}`);
-    }
-  } else {
-    logger.system(`Cloning ${label} from ${url}...`);
-    // Remove broken symlinks or non-git directories before cloning
-    try {
-      lstatSync(targetDir); // throws if nothing exists at path
-      await rm(targetDir, { recursive: true, force: true });
-    } catch {
-      // Path doesn't exist — good, clone will create it
-    }
-    await execAsync(`git clone "${url}" "${targetDir}"`);
-  }
 }
 
 /**
