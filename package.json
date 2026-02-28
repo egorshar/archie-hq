@@ -10,6 +10,7 @@
     "start": "node dist/index.js",
     "lint": "eslint src/**/*.ts",
     "typecheck": "tsc --noEmit",
+    "cli": "tsx src/cli/index.tsx",
     "docker:dev": "docker compose up --build",
     "docker:stop": "docker compose down"
   },
@@ -24,13 +25,18 @@
     "@slack/web-api": "^7.0.0",
     "dotenv": "^16.3.0",
     "gray-matter": "^4.0.3",
+    "ink": "^5.2.1",
+    "ink-spinner": "^5.0.0",
+    "ink-text-input": "^6.0.0",
     "picocolors": "^1.1.1",
+    "react": "^18.3.1",
     "slackify-markdown": "^4.5.0",
     "zod": "^3.22.0",
     "zod-to-json-schema": "^3.25.0"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",
+    "@types/react": "^18.3.28",
     "tsx": "^4.7.0",
     "typescript": "^5.3.0"
   }
