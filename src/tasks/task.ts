@@ -305,6 +305,7 @@ export class Task {
     }
 
     this.isActive = false;
+    activeTasks.delete(this.taskId);
     this.clearTaskTimeout();
 
     // Stop all queues — agent:inactive emitted by Stop hook / crash handler
@@ -315,7 +316,6 @@ export class Task {
     this.metadata.status = 'stopped';
     await this.save(true);
 
-    activeTasks.delete(this.taskId);
     logger.system(`Task ${this.taskId} stopped`);
     emitEvent('task:stopped', this.taskId);
   }
@@ -330,6 +330,7 @@ export class Task {
     }
 
     this.isActive = false;
+    activeTasks.delete(this.taskId);
     this.clearTaskTimeout();
 
     // Stop all queues — agent:inactive emitted by Stop hook / crash handler
@@ -340,7 +341,6 @@ export class Task {
     this.metadata.status = 'completed';
     await this.save(true);
 
-    activeTasks.delete(this.taskId);
     logger.system(`Task ${this.taskId} completed`);
     emitEvent('task:completed', this.taskId);
   }
