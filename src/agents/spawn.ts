@@ -173,6 +173,10 @@ Files available to read (in your working directory):
     systemPrompt = `${systemPrompt}\n\nCurrent Task Context:\n${context}`;
 
     const pluginMcpServers = await loadPluginMcpServers();
+    const pluginNames = Object.keys(pluginMcpServers);
+    if (pluginNames.length > 0) {
+      logger.system(`Plugin MCP servers: ${pluginNames.join(', ')}`);
+    }
 
     mcpServers = {
       ...pluginMcpServers,
