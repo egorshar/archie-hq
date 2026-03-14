@@ -261,8 +261,6 @@ export class Task {
     const slackRefs = this.getSlackThreadRefs();
     if (slackRefs.length > 0) {
       await postToThreads(slackRefs, message);
-    } else {
-      logger.slack(`POST: ${message}`);
     }
   }
 
