@@ -37,8 +37,11 @@ services:
       - NODE_ENV=development
 
     volumes:
-      # Single workdir mount — contains plugins/, repos/, sessions/
+      # Workdir mount — contains repos/, sessions/
       - ./workdir:/workdir
+
+      # Plugins — mounted explicitly because workdir/plugins is a symlink
+      - ./workdir/plugins:/workdir/plugins
 
       # Mount source code for hot reload
       - ./src:/app/src
