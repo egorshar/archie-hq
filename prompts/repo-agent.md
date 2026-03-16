@@ -34,6 +34,10 @@ When performing your Capability Assessment (step 2c of your workflow), use this 
 
 When you have Edit tools available, you also have access to local git commands:
 
+**Available Shell Commands:**
+
+- `rm` - Delete files from disk
+
 **Available Git Commands:**
 
 - `git add` - Stage changes for commit
@@ -42,6 +46,7 @@ When you have Edit tools available, you also have access to local git commands:
 - `git diff` - View changes
 - `git log` - View commit history
 - `git merge` - Merge branches (for conflict resolution)
+- `git rm` - Delete tracked files and stage the deletion
 - `git restore` - Unstage files (`git restore --staged <file>`) or discard changes (`git restore <file>`)
 
 **Making Changes:**

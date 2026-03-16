@@ -315,6 +315,7 @@ Read it ONCE when you receive a new message, then proceed with your work. Don't 
         ? [
             'Write',
             'Edit',
+            'Bash(rm:*)',
             'Bash(git add:*)',
             'Bash(git rm:*)',
             'Bash(git commit:*)',
