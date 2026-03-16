@@ -30,8 +30,8 @@ import { initEventPersistence } from './tasks/persistence.js';
  * Application configuration
  */
 interface AppConfig {
-  slackBotToken: string;
-  slackSigningSecret: string;
+  slackBotToken?: string;
+  slackSigningSecret?: string;
   port: number;
   githubWebhookSecret?: string;
 }
@@ -45,12 +45,6 @@ function loadConfig(): AppConfig {
   const port = parseInt(process.env.PORT || '3000', 10);
   const githubWebhookSecret = process.env.GITHUB_WEBHOOK_SECRET;
 
-  if (!slackBotToken) {
-    throw new Error('SLACK_BOT_TOKEN environment variable is required');
-  }
-  if (!slackSigningSecret) {
-    throw new Error('SLACK_SIGNING_SECRET environment variable is required');
-  }
   if (!process.env.ANTHROPIC_API_KEY) {
     throw new Error('ANTHROPIC_API_KEY environment variable is required');
   }
@@ -142,13 +136,19 @@ async function main(): Promise<void> {
     // Mount GitHub webhook (if configured)
     if (config.githubWebhookSecret) {
       mountGitHubWebhook(app, config.githubWebhookSecret);
+    } else {
+      logger.plain('GitHub App not configured — PR tools disabled');
     }
 
-    // Mount Slack Bolt app (creates ExpressReceiver internally)
-    await mountSlackApp(app, {
-      slackBotToken: config.slackBotToken,
-      slackSigningSecret: config.slackSigningSecret,
-    });
+    // Mount Slack Bolt app (if configured)
+    if (config.slackBotToken && config.slackSigningSecret) {
+      await mountSlackApp(app, {
+        slackBotToken: config.slackBotToken,
+        slackSigningSecret: config.slackSigningSecret,
+      });
+    } else {
+      logger.plain('Slack App not configured — running in CLI-only mode');
+    }
 
     // Start the HTTP server
     const server = http.createServer(app);
