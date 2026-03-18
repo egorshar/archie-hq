@@ -127,8 +127,10 @@ export async function spawnAgent(agent: Agent, task: Task): Promise<void> {
 
   if (def.track === 'pm') {
     // ---- PM track ----
+    const pmWorkspace = await setupAgentWorkspace(taskId, agent);
     systemPrompt = await generatePMPrompt(task);
-    cwd = sharedPath;
+    cwd = pmWorkspace;
+    additionalDirectories = [pmWorkspace, sharedPath];
     model = 'opus';
 
     const channelInfo = Object.entries(metadata.channels)
@@ -141,9 +143,9 @@ Channel(s): ${channelInfo}
 Task Owner: ${metadata.task_owner || 'Not assigned'}
 Participants: ${metadata.participants.join(', ') || 'None yet'}
 
-Your working directory: ${sharedPath}
+Shared folder: ${sharedPath}
 
-Files available to read (in your working directory):
+Files available to read (in shared folder):
 - knowledge.log (conversation history and agent findings)
 - metadata.json (task metadata)
 `;

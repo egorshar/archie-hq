@@ -5,9 +5,7 @@
  * Created via Task.create(thread) or Task.get(taskId).
  */
 
-import { mkdir, writeFile, symlink } from 'fs/promises';
-import { existsSync } from 'fs';
-import { join } from 'path';
+import { mkdir, writeFile } from 'fs/promises';
 import type { AgentName, SlackChannel, SlackThread, TaskMetadata } from '../types/task.js';
 import type { AgentDef } from '../types/agent.js';
 
@@ -119,16 +117,6 @@ export class Task {
 
     // Scan fresh agent defs for this task
     const team = scanAgentDefs();
-
-    // Symlink PM skills into task shared folder
-    const pmDef = team.find((d) => d.track === 'pm');
-    if (pmDef?.skillsPath) {
-      const skillsTarget = join(sharedPath, '.claude', 'skills');
-      await mkdir(join(sharedPath, '.claude'), { recursive: true });
-      if (!existsSync(skillsTarget)) {
-        await symlink(pmDef.skillsPath, skillsTarget);
-      }
-    }
 
     // Build repositories map from repo agent defs
     const repositories: Record<string, { path: string }> = {};
