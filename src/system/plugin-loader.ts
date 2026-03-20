@@ -111,6 +111,8 @@ export interface LoadedPlugin {
   agents: PluginAgentDef[];
   /** Absolute path to skills/ directory (null if none) */
   skillsPath: string | null;
+  /** Parsed hooks/hooks.json — Claude Code settings hooks format (null if none) */
+  hooks: Record<string, any> | null;
 }
 
 /**
@@ -204,6 +206,23 @@ function scanPlugins(): LoadedPlugin[] {
     const skillsDir = join(pluginDir, 'skills');
     const hasSkills = existsSync(skillsDir);
 
+    // Load hooks/hooks.json if present
+    let hooks: Record<string, any> | null = null;
+    const hooksPath = join(pluginDir, 'hooks', 'hooks.json');
+    if (existsSync(hooksPath)) {
+      try {
+        const raw = readFileSync(hooksPath, 'utf-8');
+        // Substitute ${CLAUDE_PLUGIN_ROOT} with the actual plugin directory path
+        const substituted = raw.replace(/\$\{CLAUDE_PLUGIN_ROOT\}/g, pluginDir);
+        const parsed = JSON.parse(substituted);
+        hooks = parsed.hooks ?? null;
+        if (hooks) {
+          logger.system(`Plugin ${pluginName}: loaded hooks from hooks/hooks.json`);
+        }
+      } catch {
+        logger.warn('system', `Plugin ${pluginName}: failed to parse hooks/hooks.json, skipping hooks`);
+      }
+    }
 
     plugins.push({
       name: pluginName,
@@ -212,6 +231,7 @@ function scanPlugins(): LoadedPlugin[] {
       repoConfigs,
       agents,
       skillsPath: hasSkills ? skillsDir : null,
+      hooks,
     });
   }
 
