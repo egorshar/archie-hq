@@ -2,11 +2,13 @@
  * Plugin Loader
  *
  * Scans the plugins directory and loads plugin metadata.
- * Each plugin is a directory under plugins/ that may contain:
- *   - repo-config.json  — repo agent infrastructure configs
+ * A valid plugin MUST have .claude-plugin/plugin.json with at least { name, version, description }.
+ * Directories without this manifest are silently skipped.
+ *
+ * A plugin may also contain:
+ *   - repo-config.json  — repo agent infrastructure configs (legacy)
  *   - agents/*.md       — agent prompts with frontmatter (role, expertise)
  *   - skills/           — skill directories (each subdir has SKILL.md)
- *   - .claude-plugin/plugin.json — optional plugin metadata
  *
  * MCP servers are configured in a single root .mcp.json at the plugins directory root.
  * Individual agents reference server names via frontmatter `mcpServers: [...]`.
@@ -92,9 +94,17 @@ export interface PluginAgentDef {
   disallowedTools?: string[];
 }
 
+export interface PluginManifest {
+  name: string;
+  version: string;
+  description: string;
+}
+
 export interface LoadedPlugin {
   name: string;
   dir: string;
+  /** Parsed .claude-plugin/plugin.json */
+  manifest: PluginManifest;
   /** Parsed repo-config.json if present (legacy, kept for reference) */
   repoConfigs: Record<string, PluginRepoConfig> | null;
   /** Agent definitions from agents/*.md — repo or plugin track based on frontmatter */
@@ -105,7 +115,7 @@ export interface LoadedPlugin {
 
 /**
  * Scan plugins directory and load all plugins.
- * A plugin is any subdirectory of PLUGINS_DIR.
+ * Only directories with a valid .claude-plugin/plugin.json are loaded.
  * Called once at startup (sync reads are fine).
  */
 function scanPlugins(): LoadedPlugin[] {
@@ -120,8 +130,25 @@ function scanPlugins(): LoadedPlugin[] {
   for (const entry of entries) {
     if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
 
-    const pluginName = entry.name;
-    const pluginDir = join(PLUGINS_DIR, pluginName);
+    const pluginDir = join(PLUGINS_DIR, entry.name);
+
+    // Require .claude-plugin/plugin.json with valid structure
+    const manifestPath = join(pluginDir, '.claude-plugin', 'plugin.json');
+    let manifest: PluginManifest;
+    try {
+      if (!existsSync(manifestPath)) continue;
+      const raw = JSON.parse(readFileSync(manifestPath, 'utf-8'));
+      if (!raw.name || !raw.version || !raw.description) {
+        logger.warn('system', `Plugin ${entry.name}: plugin.json missing required fields (name, version, description), skipping`);
+        continue;
+      }
+      manifest = { name: raw.name, version: raw.version, description: raw.description };
+    } catch {
+      logger.warn('system', `Plugin ${entry.name}: failed to parse plugin.json, skipping`);
+      continue;
+    }
+
+    const pluginName = manifest.name;
 
     // Load repo-config.json if present
     let repoConfigs: Record<string, PluginRepoConfig> | null = null;
@@ -181,6 +208,7 @@ function scanPlugins(): LoadedPlugin[] {
     plugins.push({
       name: pluginName,
       dir: pluginDir,
+      manifest,
       repoConfigs,
       agents,
       skillsPath: hasSkills ? skillsDir : null,
