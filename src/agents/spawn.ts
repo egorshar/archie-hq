@@ -9,7 +9,7 @@
  */
 
 import { join } from 'path';
-import { mkdir, symlink, readdir } from 'fs/promises';
+import { mkdir, symlink, readdir, writeFile } from 'fs/promises';
 import { existsSync } from 'fs';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { Agent } from './agent.js';
@@ -85,9 +85,12 @@ async function setupAgentWorkspace(taskId: string, agent: Agent): Promise<string
   const agentWorkspace = join(getTaskPath(taskId), 'agents', agent.def.key);
   await mkdir(agentWorkspace, { recursive: true });
 
+  const claudeDir = join(agentWorkspace, '.claude');
+  await mkdir(claudeDir, { recursive: true });
+
+  // Symlink skills from plugin
   if (agent.def.skillsPath && existsSync(agent.def.skillsPath)) {
-    const agentSkillsDir = join(agentWorkspace, '.claude', 'skills');
-    await mkdir(join(agentWorkspace, '.claude'), { recursive: true });
+    const agentSkillsDir = join(claudeDir, 'skills');
 
     for (const skillEntry of await readdir(agent.def.skillsPath, { withFileTypes: true })) {
       if (!skillEntry.isDirectory()) continue;
@@ -97,6 +100,14 @@ async function setupAgentWorkspace(taskId: string, agent: Agent): Promise<string
         await symlink(join(agent.def.skillsPath, skillEntry.name), target);
       }
     }
+  }
+
+  // Write .claude/settings.json with plugin hooks (picked up by SDK via settingSources)
+  if (agent.def.pluginHooks) {
+    const settingsPath = join(claudeDir, 'settings.json');
+    const settings = { hooks: agent.def.pluginHooks };
+    await writeFile(settingsPath, JSON.stringify(settings, null, 2));
+    logger.agent(agent.def.id, `Mounted plugin hooks to ${settingsPath}`);
   }
 
   return agentWorkspace;
@@ -306,6 +317,9 @@ Read it ONCE when you receive a new message, then proceed with your work. Don't 
 
     cwd = agentWorkspace;
     additionalDirectories = [agentWorkspace, sharedPath];
+    if (def.pluginPath) {
+      additionalDirectories.push(def.pluginPath);
+    }
     model = (def.model || 'sonnet') as string;
 
     mcpServers = {

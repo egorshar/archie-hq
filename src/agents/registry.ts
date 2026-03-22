@@ -69,6 +69,7 @@ export function scanAgentDefs(): AgentDef[] {
             defaultPath: join(REPOS_DIR, agent.key),
             repoKey: agent.key,
           },
+          pluginHooks: plugin.hooks || undefined,
           ...resolvedMcp,
         });
       } else {
@@ -84,6 +85,7 @@ export function scanAgentDefs(): AgentDef[] {
           agentPrompt: agent.prompt,
           pluginPath: plugin.dir,
           skillsPath: plugin.skillsPath || undefined,
+          pluginHooks: plugin.hooks || undefined,
           ...resolvedMcp,
         });
       }
@@ -237,6 +239,7 @@ function buildPmDef(teamDefs: AgentDef[], rootMcp: LoadedMcpConfig): AgentDef {
     pmConfig: { teamList, teamExpertise },
     pmOverlayPrompt: overlay?.prompt || undefined,
     skillsPath: pmPlugin?.skillsPath || undefined,
+    pluginHooks: pmPlugin?.hooks || undefined,
     ...resolvedMcp,
   };
 }
