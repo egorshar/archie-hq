@@ -25,6 +25,17 @@ services:
     ports:
       - "${PORT:-3000}:${PORT:-3000}"
 
+    # Capabilities for bubblewrap sandbox (full namespace isolation)
+    # SYS_ADMIN: namespace creation and mount ops
+    # seccomp/apparmor unconfined: allows bwrap's pivot_root and mount syscalls
+    # systempaths unconfined: removes /proc masking so bwrap can mount fresh procfs
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - seccomp=unconfined
+      - apparmor=unconfined
+      - systempaths=unconfined
+
     # Environment variables from .env file
     env_file:
       - .env
@@ -55,7 +66,8 @@ services:
       - ./secrets:/app/secrets:ro
 
       # Claude Code config - stores API keys, sessions, settings
-      - ./claude-data:/root/.claude
+      - ./claude-data:/home/archie/.claude
+      - ./claude-data/.claude.json:/home/archie/.claude.json
 
       # Exclude node_modules (use container's version)
       - /app/node_modules

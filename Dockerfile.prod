@@ -5,11 +5,10 @@ FROM node:20-alpine
 # Upgrade system packages to get latest security updates if node image has not been updated yet
 RUN apk upgrade --no-cache
 
-# Install git, ssh (for git fetch over ssh), git-lfs, and bash (required by Claude CLI)
-RUN apk add --no-cache git openssh-client git-lfs bash libcrypto3=3.5.5-r0 libssl3=3.5.5-r0 && \
-    git lfs install && \
-    mkdir -p ~/.ssh && \
-    ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+# Install git, git-lfs, bash (required by Claude CLI),
+# bubblewrap + socat (sandbox runtime), su-exec (entrypoint privilege drop)
+RUN apk add --no-cache git git-lfs bash su-exec bubblewrap socat libcrypto3=3.5.5-r0 libssl3=3.5.5-r0 && \
+    git lfs install
 
 # Set SHELL environment variable (required by Claude CLI)
 ENV SHELL=/bin/bash
@@ -39,14 +38,26 @@ RUN npm run build && \
 # Remove devDependencies
 RUN npm prune --production
 
-# Create directories
-RUN mkdir -p /workdir /app/secrets
+# Create non-root user (required: bypassPermissions refuses to run as root)
+RUN addgroup -g 101 -S archie 
+RUN adduser -u 100 -S archie -G archie
+
+# Create directories and set ownership
+RUN mkdir -p /workdir /app/secrets && \
+    chown -R archie:archie /workdir /app/secrets /app
 
 # Configure git authentication
 RUN chmod +x /app/scripts/git-askpass.sh
 ENV GIT_ASKPASS=/app/scripts/git-askpass.sh
 
+ENV HOME=/home/archie
+
+# Entrypoint drops to non-root user (shared with dev)
+COPY scripts/docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
+
 # Expose port (actual port comes from ENV)
 EXPOSE ${PORT:-3000}
 
+ENTRYPOINT ["/docker-entrypoint.sh"]
 CMD ["node", "dist/index.js"]
