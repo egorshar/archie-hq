@@ -71,11 +71,45 @@ The application runs as a systemd service on the VM:
 Type=simple
 ExecStart=/usr/bin/docker run --name archie-app \
   -p 3000:3000 \
+  --cap-add SYS_ADMIN \
+  --security-opt seccomp=unconfined \
+  --security-opt apparmor=unconfined \
+  --security-opt systempaths=unconfined \
   -v /workdir:/workdir \
+  -v /data/claude:/home/archie/.claude \
+  -v /data/claude/.claude.json:/home/archie/.claude.json \
   europe-west2-docker.pkg.dev/PROJECT/archie/app:latest
 Restart=always
 RestartSec=10
 ```
+
+### Docker Capabilities (Required)
+
+The bubblewrap sandbox needs these Docker flags to create Linux namespaces:
+
+| Flag | Purpose |
+|------|---------|
+| `--cap-add SYS_ADMIN` | Namespace creation and mount operations |
+| `--security-opt seccomp=unconfined` | Allows bwrap's `clone`/`unshare` syscalls |
+| `--security-opt apparmor=unconfined` | Allows bwrap's mount operations |
+| `--security-opt systempaths=unconfined` | Removes `/proc` masking for PID namespace isolation |
+
+Without these, all agent Bash commands fail with `Operation not permitted`.
+
+**AWS Fargate is NOT compatible** — it does not support `cap_add: SYS_ADMIN`. Use EC2-backed ECS or EKS.
+
+### Persistent Volumes
+
+| Host Path | Container Path | Purpose |
+|-----------|---------------|---------|
+| `/workdir` | `/workdir` | Runtime state: repos, sessions, plugins |
+| `/data/claude` | `/home/archie/.claude` | Claude CLI config and session logs |
+| `/data/claude/.claude.json` | `/home/archie/.claude.json` | Claude CLI feature flags |
+| `/data/secrets` (ro) | `/app/secrets` | GitHub App private key |
+
+### Non-Root User
+
+The container runs as user `archie` (non-root). The Claude Agent SDK's `bypassPermissions` mode refuses to execute as root. The entrypoint handles the privilege drop automatically.
 
 On restart, the application automatically recovers in-progress tasks via `recoverActiveTasks()` in `src/tasks/recovery.ts`.
 

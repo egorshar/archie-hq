@@ -18,7 +18,7 @@ Slack / CLI → PM Agent → Domain Agents
 4. The PM synthesizes results and responds to the user
 5. For engineering tasks that need code changes, the user approves **edit mode** — agents then create branches, write code, and open PRs
 
-Each repo agent gets an isolated `git clone --shared` workspace. Code changes require human approval (edit mode).
+Each agent is sandboxed: filesystem access is restricted to its workspace, network is blocked from Bash, and code changes require human approval.
 
 ## Quick Start
 
@@ -127,18 +127,21 @@ Repo agents are for engineering work (code + git + GitHub). Plugin agents are fo
 - MCP tool integration for any external service (plugin agents)
 - Human approval gate for code changes (read-only → edit mode)
 - Automated PR creation and merge orchestration
+- OS-level sandbox (bubblewrap) for filesystem and network isolation
 - Web research pipeline with structured output and injection defense
 - Per-task resource budgets (research requests, wall-clock timeout)
 
 ## Security
 
-- **Isolated workspaces** — each repo agent works in its own `git clone --shared`, preventing cross-agent interference
-- **Tool allowlists** — agents only have access to explicitly permitted tools per track and mode
-- **Read-only by default** — Write/Edit blocked until user approves edit mode via Slack
-- **Human gates** — edit mode requires Slack approval; PRs require review before merge
-- **Git safety** — branch protection server-side; no force push
+Agents run in a sandboxed environment with defense-in-depth:
 
-See [Security Architecture](docs/architecture/security.md) for details.
+- **Filesystem isolation** — each agent can only read/write its own workspace via bubblewrap (Bash) and PreToolUse hooks (Read/Write/Edit)
+- **Network deny-all** — Bash cannot reach the internet; web access only through the controlled research pipeline
+- **Tool denylists** — WebSearch/WebFetch blocked on all agents; Write/Edit blocked in read-only mode
+- **Human gates** — edit mode requires Slack approval; PRs require review before merge
+- **Git safety** — branch protection server-side; no force push; git push blocked from Bash (no network)
+
+See [Security Architecture](docs/architecture/security.md) for the full threat model, enforcement layers, and deployment requirements.
 
 ## Documentation
 
@@ -147,7 +150,7 @@ See [Security Architecture](docs/architecture/security.md) for details.
 - [Overview](docs/architecture/overview.md) — system design and concepts
 - [Agents](docs/architecture/agents.md) — agent types, prompts, communication
 - [Orchestration](docs/architecture/orchestration.md) — task lifecycle, message routing
-- [Security](docs/architecture/security.md) — threat model, defense layers, deployment
+- [Security](docs/architecture/security.md) — sandbox, threat model, defense layers, deployment
 - [Plugin System](docs/architecture/plugin-system.md) — plugin structure and agent registration
 - [Edit Mode](docs/architecture/edit-mode.md) — approval flow, shared clones, git workflow
 - [Persistence](docs/architecture/persistence.md) — session storage and recovery
@@ -166,6 +169,7 @@ See [Security Architecture](docs/architecture/security.md) for details.
 - **Runtime:** Node.js with TypeScript
 - **AI:** [Claude Agent SDK](https://docs.anthropic.com/en/docs/claude-code/sdk)
 - **Integrations:** Slack API (Bolt), GitHub App (Octokit), MCP servers
+- **Sandbox:** Bubblewrap (Linux), sandbox-exec (macOS)
 - **Storage:** File-based sessions under `ARCHIE_WORKDIR`
 
 ## License
