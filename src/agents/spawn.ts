@@ -324,6 +324,8 @@ Read it ONCE when you receive a new message, then proceed with your work. Don't 
       join(repoPath, '.claude', 'skills'),
       join(repoPath, '.claude', 'hooks'),
       join(repoPath, 'CLAUDE.md'),
+      // Prevent agent from switching branches (git checkout/switch writes .git/HEAD)
+      join(repoPath, '.git', 'HEAD'),
     ];
 
     tools = def.tools;
