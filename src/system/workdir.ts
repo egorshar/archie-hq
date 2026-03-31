@@ -110,7 +110,10 @@ export async function refreshPlugins(): Promise<void> {
   pluginsRefreshPromise = (async () => {
     try {
       if (existsSync(join(PLUGINS_DIR, '.git'))) {
-        await execAsync('git pull --ff-only', { cwd: PLUGINS_DIR });
+        const branch = process.env.ARCHIE_PLUGINS_BRANCH || 'main';
+        await execAsync('git fetch --all --prune', { cwd: PLUGINS_DIR });
+        await execAsync(`git checkout "${branch}"`, { cwd: PLUGINS_DIR });
+        await execAsync(`git reset --hard "origin/${branch}"`, { cwd: PLUGINS_DIR });
         logger.system('Plugins refreshed');
       }
       // Re-scan plugin definitions from disk (picks up new/changed agents, prompts, etc.)
