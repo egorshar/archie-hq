@@ -96,6 +96,14 @@ The bubblewrap sandbox needs these Docker flags to create Linux namespaces:
 
 Without these, all agent Bash commands fail with `Operation not permitted`.
 
+**Host kernel requirement (Ubuntu 24.04+):** Ubuntu 24.04 restricts unprivileged user namespaces via AppArmor by default, which breaks bwrap even with `apparmor=unconfined` on the container. Set this sysctl on the **host** before starting the container:
+
+```bash
+sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+# Persist across reboots:
+echo 'kernel.apparmor_restrict_unprivileged_userns=0' | sudo tee /etc/sysctl.d/99-archie-bwrap.conf
+```
+
 **AWS Fargate is NOT compatible** — it does not support `cap_add: SYS_ADMIN`. Use EC2-backed ECS or EKS.
 
 ### Persistent Volumes

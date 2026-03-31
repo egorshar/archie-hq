@@ -111,6 +111,14 @@ security_opt:
 
 These are already configured in `docker-compose.yml`. Without them, all Bash commands will fail with `Operation not permitted`.
 
+**Ubuntu 24.04+ hosts** also need a kernel sysctl to allow unprivileged user namespaces inside containers:
+
+```bash
+sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+# Persist across reboots:
+echo 'kernel.apparmor_restrict_unprivileged_userns=0' | sudo tee /etc/sysctl.d/99-archie-bwrap.conf
+```
+
 ## Handling Secrets
 
 Place your GitHub App private key in the `secrets/` directory:
