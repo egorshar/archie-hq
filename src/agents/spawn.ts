@@ -292,9 +292,9 @@ Repository: ${repoPath}
 Current branch: ${currentBranch}
 Shared folder: ${sharedPath}
 
-Live task files (these update as work progresses):
+Live task files (managed by the system, updated as work progresses):
 - ${sharedPath}/knowledge.log (conversation history and agent findings)
-- ${sharedPath}/metadata.json (task metadata - PM agent only)
+- ${sharedPath}/metadata.json (task metadata)
 
 IMPORTANT: The knowledge.log file is continuously updated by other agents and user messages.
 Read it ONCE when you receive a new message, then proceed with your work. Don't poll it repeatedly.
@@ -382,9 +382,9 @@ Task: ${taskId}
 Plugin: ${def.pluginName}
 Shared folder: ${sharedPath}
 
-Live task files (these update as work progresses):
+Live task files (managed by the system, updated as work progresses):
 - ${sharedPath}/knowledge.log (conversation history and agent findings)
-- ${sharedPath}/metadata.json (task metadata - PM agent only)
+- ${sharedPath}/metadata.json (task metadata)
 
 IMPORTANT: The knowledge.log file is continuously updated by other agents and user messages.
 Read it ONCE when you receive a new message, then proceed with your work. Don't poll it repeatedly.
