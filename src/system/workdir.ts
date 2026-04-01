@@ -9,7 +9,7 @@
  */
 
 import { join } from 'path';
-import { existsSync } from 'fs';
+import { existsSync, lstatSync } from 'fs';
 import { mkdir } from 'fs/promises';
 import { exec } from 'child_process';
 import { promisify } from 'util';
@@ -58,14 +58,25 @@ export async function bootstrapWorkdir(): Promise<void> {
   const pluginsUrl = process.env.ARCHIE_PLUGINS;
   const pluginsBranch = process.env.ARCHIE_PLUGINS_BRANCH;
   if (pluginsUrl) {
-    if (!existsSync(join(PLUGINS_DIR, '.git'))) {
+    const isSymlink = existsSync(PLUGINS_DIR) && lstatSync(PLUGINS_DIR).isSymbolicLink();
+    const hasGit = existsSync(join(PLUGINS_DIR, '.git'));
+    logger.system(`Plugins init: url=${pluginsUrl}, branch=${pluginsBranch || 'default'}, exists=${hasGit}, symlink=${isSymlink}`);
+
+    if (!hasGit) {
+      logger.system(`Plugins: cloning fresh from ${pluginsUrl}`);
       await cloneRepo(pluginsUrl, PLUGINS_DIR, 'plugins', pluginsBranch);
+      managedPlugins = true;
       lastPluginsRefresh = Date.now();
     } else {
-      if (pluginsBranch) await checkoutBranch(PLUGINS_DIR, pluginsBranch, 'plugins');
+      // Symlink = local dev (don't reset), real dir = cloned by us (safe to reset)
+      managedPlugins = !isSymlink;
+      logger.system(`Plugins: managed=${managedPlugins} (${isSymlink ? 'symlink — local dev' : 'real dir — will sync from remote'})`);
+      if (pluginsBranch && managedPlugins) await checkoutBranch(PLUGINS_DIR, pluginsBranch, 'plugins');
       await refreshPlugins();
     }
-  } else if (!existsSync(PLUGINS_DIR)) {
+  } else if (existsSync(PLUGINS_DIR)) {
+    logger.system(`Plugins init: using pre-existing directory at ${PLUGINS_DIR} (ARCHIE_PLUGINS not set)`);
+  } else {
     throw new Error(
       `Plugins directory not found at ${PLUGINS_DIR}. ` +
       `Set ARCHIE_PLUGINS to a git URL, or manually place plugins in ${PLUGINS_DIR}.`
@@ -94,6 +105,7 @@ export async function cloneRepos(
 
 const PLUGINS_REFRESH_COOLDOWN_MS = 30 * 60_000; // 30 minutes
 let lastPluginsRefresh = 0;
+let managedPlugins = false;
 let pluginsRefreshPromise: Promise<void> | null = null;
 
 /**
@@ -103,20 +115,31 @@ let pluginsRefreshPromise: Promise<void> | null = null;
  */
 export async function refreshPlugins(): Promise<void> {
   const now = Date.now();
-  if (now - lastPluginsRefresh < PLUGINS_REFRESH_COOLDOWN_MS) return;
+  const cooldownRemaining = PLUGINS_REFRESH_COOLDOWN_MS - (now - lastPluginsRefresh);
+  if (cooldownRemaining > 0) {
+    logger.debug('workdir', `Plugins refresh skipped (cooldown: ${Math.round(cooldownRemaining / 60_000)}m remaining)`);
+    return;
+  }
 
-  if (pluginsRefreshPromise) return pluginsRefreshPromise;
+  if (pluginsRefreshPromise) {
+    logger.debug('workdir', 'Plugins refresh already in progress, deduplicating');
+    return pluginsRefreshPromise;
+  }
 
   pluginsRefreshPromise = (async () => {
     try {
-      if (existsSync(join(PLUGINS_DIR, '.git'))) {
+      if (managedPlugins && existsSync(join(PLUGINS_DIR, '.git'))) {
         const branch = process.env.ARCHIE_PLUGINS_BRANCH || 'main';
+        logger.system(`Plugins: fetching and resetting to origin/${branch}`);
         await execAsync('git fetch --all --prune', { cwd: PLUGINS_DIR });
         await execAsync(`git checkout "${branch}"`, { cwd: PLUGINS_DIR });
         await execAsync(`git reset --hard "origin/${branch}"`, { cwd: PLUGINS_DIR });
-        logger.system('Plugins refreshed');
+        logger.system('Plugins refreshed from remote');
+      } else {
+        logger.system('Plugins: skipping git sync (local/symlinked — not managed by archie)');
       }
       // Re-scan plugin definitions from disk (picks up new/changed agents, prompts, etc.)
+      logger.system('Plugins: re-scanning definitions from disk');
       initPlugins();
       lastPluginsRefresh = Date.now();
     } catch (error) {
