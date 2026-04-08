@@ -20,10 +20,6 @@ RUN apt-get update && \
 # Set SHELL environment variable (required by Claude CLI)
 ENV SHELL=/bin/bash
 
-# Install Claude Code CLI globally
-RUN npm install -g @anthropic-ai/claude-code@2.1.96 && \
-    chmod +x /usr/local/lib/node_modules/@anthropic-ai/claude-code/vendor/ripgrep/*/rg
-
 # Set working directory
 WORKDIR /app
 

@@ -451,7 +451,7 @@ Read it ONCE when you receive a new message, then proceed with your work. Don't 
     cwd,
     ...(additionalDirectories ? { additionalDirectories: additionalDirectories as any } : {}),
     executable: 'node' as const,
-    pathToClaudeCodeExecutable: process.env.CLAUDE_PATH || 'claude',
+    // pathToClaudeCodeExecutable: process.env.CLAUDE_PATH || 'claude',
     settingSources: ['project'] as any,
     env: {
       NODE_ENV: process.env.NODE_ENV || 'development',
