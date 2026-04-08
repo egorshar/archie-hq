@@ -12,7 +12,7 @@ RUN apk add --no-cache git openssh-client git-lfs bash libcrypto3=3.5.5-r0 libss
 ENV SHELL=/bin/bash
 
 # Install Claude Code CLI globally
-RUN npm install -g @anthropic-ai/claude-code
+RUN npm install -g @anthropic-ai/claude-code@2.1.96
 
 # Set working directory
 WORKDIR /app
