@@ -6,6 +6,7 @@
  * Returns research findings as markdown.
  *
  * Defense layers:
+ * - AWS Bedrock Guardrails: input DLP (PII/secrets) + output prompt injection scanning
  * - Research budget enforcement (per-task)
  * - Defense tag wrapping (PostToolUse hook on outer agent)
  */
@@ -15,8 +16,7 @@ import { mkdir, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { query, tool, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
 import type { HookCallbackMatcher, HookJSONOutput } from '@anthropic-ai/claude-agent-sdk';
-import { z } from 'zod';
-import { zodToJsonSchema } from 'zod-to-json-schema';
+import { z, toJSONSchema } from 'zod';
 import { processAgentEventForLogging, logger } from '../system/logger.js';
 import { appendAgentFinding } from '../tasks/persistence.js';
 import { SESSIONS_DIR } from '../system/workdir.js';
@@ -43,9 +43,7 @@ const PresetSchema = z.object({
   reasoning: z.string(),
 });
 
-const presetJsonSchema = zodToJsonSchema(PresetSchema as any, {
-  $refStrategy: 'none',
-}) as Record<string, unknown>;
+const presetJsonSchema = toJSONSchema(PresetSchema) as Record<string, unknown>;
 
 /**
  * Classify query complexity to select the right Perplexity preset.
@@ -181,6 +179,71 @@ async function callPerplexity(preset: string, input: string): Promise<Perplexity
 }
 
 // ============================================================================
+// AWS Bedrock Guardrails (optional — input DLP + output injection scanning)
+// ============================================================================
+
+import { BedrockRuntimeClient, ApplyGuardrailCommand } from '@aws-sdk/client-bedrock-runtime';
+
+let bedrockClient: BedrockRuntimeClient | null = null;
+let guardrailWarningLogged = false;
+
+function getBedrockGuardrail(): { client: BedrockRuntimeClient; id: string; version: string } | null {
+  const guardrailId = process.env.BEDROCK_GUARDRAIL_ID;
+  if (!guardrailId) {
+    if (!guardrailWarningLogged) {
+      logger.warn('research', 'BEDROCK_GUARDRAIL_ID not set — research scanning disabled');
+      guardrailWarningLogged = true;
+    }
+    return null;
+  }
+
+  if (!bedrockClient) {
+    bedrockClient = new BedrockRuntimeClient({
+      region: process.env.AWS_REGION || 'us-east-1',
+    });
+  }
+
+  return {
+    client: bedrockClient,
+    id: guardrailId,
+    version: process.env.BEDROCK_GUARDRAIL_VERSION || 'DRAFT',
+  };
+}
+
+/**
+ * Scan text via Bedrock Guardrails. Returns blocked status.
+ * Fails open on errors — scanning is best-effort.
+ */
+async function scanWithGuardrail(
+  text: string,
+  source: 'INPUT' | 'OUTPUT',
+): Promise<{ blocked: boolean; reason?: string }> {
+  const guardrail = getBedrockGuardrail();
+  if (!guardrail) return { blocked: false };
+
+  try {
+    const result = await guardrail.client.send(new ApplyGuardrailCommand({
+      guardrailIdentifier: guardrail.id,
+      guardrailVersion: guardrail.version,
+      source,
+      content: [{ text: { text } }],
+    }));
+
+    if (result.action === 'GUARDRAIL_INTERVENED') {
+      const reason = result.actionReason || `${source} blocked by guardrail`;
+      logger.warn('research', `Guardrail BLOCKED ${source}: ${reason}`);
+      return { blocked: true, reason };
+    }
+
+    logger.agent('research', `Guardrail ${source} scan passed`);
+    return { blocked: false };
+  } catch (error) {
+    logger.warn('research', `Guardrail scan failed for ${source}, proceeding without scan`, error);
+    return { blocked: false };
+  }
+}
+
+// ============================================================================
 // Web Research Tool
 // ============================================================================
 
@@ -266,11 +329,27 @@ function createWebResearchTool(callbacks: ResearchToolCallbacks) {
       }
 
       try {
-        // Step 1: Classify preset
+        // Step 1: Input scan — check for PII/secrets before sending externally
+        const queryText = args.context ? `${args.topic}\n\n${args.context}` : args.topic;
+        const inputScan = await scanWithGuardrail(queryText, 'INPUT');
+        if (inputScan.blocked) {
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({
+                error: `Research blocked: input contains sensitive data — ${inputScan.reason}`,
+                research_id: shortId,
+              }),
+            }],
+            isError: true,
+          };
+        }
+
+        // Step 2: Classify preset
         const preset = await classifyPreset(args.topic, args.context);
         logger.agent(`research:${shortId}`, `  Preset: ${preset}`);
 
-        // Step 2: Call Perplexity
+        // Step 3: Call Perplexity
         const input = args.context
           ? `${args.topic}\n\nContext: ${args.context}`
           : args.topic;
@@ -278,17 +357,32 @@ function createWebResearchTool(callbacks: ResearchToolCallbacks) {
         const response = await callPerplexity(preset, input);
         logger.agent(`research:${shortId}`, `  Received ${response.output_text.length} chars, ${response.citations.length} citations`);
 
-        // Step 3: Build markdown with sources
+        // Step 4: Output scan — check for prompt injection in results
+        const outputScan = await scanWithGuardrail(response.output_text, 'OUTPUT');
+        if (outputScan.blocked) {
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({
+                error: `Research blocked: output flagged for prompt injection — ${outputScan.reason}`,
+                research_id: shortId,
+              }),
+            }],
+            isError: true,
+          };
+        }
+
+        // Step 5: Build markdown with sources
         let markdown = response.output_text;
         if (response.citations.length > 0) {
           markdown += '\n\n## Sources\n\n';
           markdown += response.citations.map((url, i) => `${i + 1}. ${url}`).join('\n');
         }
 
-        // Step 4: Save report
+        // Step 6: Save report
         await writeFile(join(researchDir, 'report.md'), markdown);
 
-        // Step 5: Return result
+        // Step 7: Return result
         const result = {
           research_id: shortId,
           content: markdown,
