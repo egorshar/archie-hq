@@ -668,9 +668,17 @@ export async function getChannelInfo(channelId: string): Promise<{ id: string; n
 
   try {
     const result = await client.conversations.info({ channel: channelId });
+    const channel = result.channel as { name?: string; is_im?: boolean; user?: string } | undefined;
+
+    // For DMs, resolve the other user's name instead of showing a raw ID
+    if (channel?.is_im && channel.user) {
+      const userInfo = await getUserInfo(channel.user);
+      return { id: channelId, name: `DM with ${userInfo.realName}` };
+    }
+
     return {
       id: channelId,
-      name: result.channel?.name || channelId,
+      name: channel?.name || channelId,
     };
   } catch (error) {
     logger.warn('Slack', `Failed to get channel info for ${channelId}`);
