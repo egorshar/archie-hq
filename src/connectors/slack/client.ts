@@ -14,6 +14,18 @@ let slackClient: WebClient | null = null;
 let botUserId: string | null = null;
 let botId: string | null = null;
 let workspaceUrl: string | null = null;
+let dryRun = false;
+
+/**
+ * Enable dry-run mode: receive and process events but suppress all outgoing Slack messages.
+ */
+export function setSlackDryRun(enabled: boolean): void {
+  dryRun = enabled;
+}
+
+export function isSlackDryRun(): boolean {
+  return dryRun;
+}
 
 /**
  * Initialize the Slack client and fetch bot user ID
@@ -76,6 +88,10 @@ export async function postToThread(
   threadTs: string,
   text: string
 ): Promise<string | undefined> {
+  if (dryRun) {
+    logger.system(`[DRY RUN] postToThread ${channel}:${threadTs} — ${text.slice(0, 120)}`);
+    return undefined;
+  }
   const client = getSlackClient();
 
   // Restore @<ID:Name> mentions to <@ID> before slackify (which would escape the angle brackets)
@@ -113,6 +129,10 @@ export async function postInteractiveToThread(
   text: string,
   blocks: unknown[]
 ): Promise<string | undefined> {
+  if (dryRun) {
+    logger.system(`[DRY RUN] postInteractiveToThread ${channel}:${threadTs} — ${text.slice(0, 120)}`);
+    return undefined;
+  }
   const client = getSlackClient();
 
   const result = await client.chat.postMessage({
@@ -143,6 +163,7 @@ export async function postInteractiveToThreads(
  * Failures are silently ignored (duplicate reactions, missing scopes, etc.).
  */
 export async function addReaction(channel: string, timestamp: string, emoji: string): Promise<void> {
+  if (dryRun) return;
   try {
     const client = getSlackClient();
     await client.reactions.add({ channel, timestamp, name: emoji });
@@ -156,6 +177,7 @@ export async function addReaction(channel: string, timestamp: string, emoji: str
  * Failures are silently ignored (not_reacted, missing scope, etc.).
  */
 export async function removeReaction(channel: string, timestamp: string, emoji: string): Promise<void> {
+  if (dryRun) return;
   try {
     const client = getSlackClient();
     await client.reactions.remove({ channel, timestamp, name: emoji });
@@ -173,6 +195,10 @@ export async function updateMessage(
   text: string,
   blocks?: unknown[]
 ): Promise<void> {
+  if (dryRun) {
+    logger.system(`[DRY RUN] updateMessage ${channel}:${ts} — ${text.slice(0, 120)}`);
+    return;
+  }
   const client = getSlackClient();
 
   await client.chat.update({
@@ -642,9 +668,17 @@ export async function getChannelInfo(channelId: string): Promise<{ id: string; n
 
   try {
     const result = await client.conversations.info({ channel: channelId });
+    const channel = result.channel as { name?: string; is_im?: boolean; user?: string } | undefined;
+
+    // For DMs, resolve the other user's name instead of showing a raw ID
+    if (channel?.is_im && channel.user) {
+      const userInfo = await getUserInfo(channel.user);
+      return { id: channelId, name: `DM with ${userInfo.realName}` };
+    }
+
     return {
       id: channelId,
-      name: result.channel?.name || channelId,
+      name: channel?.name || channelId,
     };
   } catch (error) {
     logger.warn('Slack', `Failed to get channel info for ${channelId}`);

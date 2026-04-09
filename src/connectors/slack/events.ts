@@ -20,6 +20,7 @@ import {
   fetchSlackThread,
   getBotId,
   addReaction,
+  setSlackDryRun,
 } from './client.js';
 import { Task } from '../../tasks/task.js';
 import { AGENT_PROMPTS } from '../../agents/prompts.js';
@@ -34,6 +35,7 @@ import { findTaskByThread } from '../../tasks/persistence.js';
 export interface SlackConfig {
   slackBotToken: string;
   slackSigningSecret: string;
+  dryRun?: boolean;
 }
 
 let app: AppType | null = null;
@@ -55,6 +57,12 @@ export async function mountSlackApp(
   });
 
   logger.plain('Slack webhook: POST /webhooks/slack');
+
+  // Enable dry-run mode (receive events, suppress outgoing messages)
+  if (config.dryRun) {
+    setSlackDryRun(true);
+    logger.plain('Slack dry-run mode: outgoing messages suppressed');
+  }
 
   // Initialize Slack client for outgoing messages
   await initSlackClient(config.slackBotToken);
@@ -94,7 +102,7 @@ export async function mountSlackApp(
     const isThreadReply = event.thread_ts && event.thread_ts !== event.ts;
     if (
       event.type === 'message' &&
-      !event.subtype &&
+      (!event.subtype || ['file_share', 'thread_broadcast'].includes(event.subtype)) &&
       (isThreadReply || isDm)
     ) {
       // In channels, @mentions are handled by app_mention handler, so skip them here
@@ -277,8 +285,6 @@ async function handleSlackEvent(event: {
 
   const thread = await fetchSlackThread(event.channel, threadId, event.ts);
 
-  logger.system(`Processing #${thread.channel.name} (thread: ${threadId})`);
-
   // const triageResult = await triageSlackMessage(thread);
   // switch (triageResult.action) {
   //   case 'new_task': {
@@ -313,6 +319,7 @@ async function handleSlackEvent(event: {
   // }
   const taskId = await findTaskByThread(threadId);
   if (taskId) {
+    logger.system(`Processing #${thread.channel.name} (thread: ${threadId})`);
     const task = await Task.get(taskId);
 
     // Check if thread is muted
@@ -335,6 +342,8 @@ async function handleSlackEvent(event: {
     await task.append(thread);
     await task.sendMessage(AGENT_PROMPTS.existingTask);
   } else if (event.type === 'app_mention' || event.channel.startsWith('D')) {
+    logger.system(`Processing #${thread.channel.name} (thread: ${threadId})`);
+
     // Bot was @mentioned, or this is a DM — start a new task
     const task = await Task.create();
     await task.append(thread);

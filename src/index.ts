@@ -162,6 +162,7 @@ async function main(): Promise<void> {
       await mountSlackApp(app, {
         slackBotToken: config.slackBotToken,
         slackSigningSecret: config.slackSigningSecret,
+        dryRun: process.env.SLACK_DRY_RUN === 'true',
       });
     } else {
       logger.plain('Slack App not configured — running in CLI-only mode');
