@@ -27,13 +27,15 @@ import {
   getTaskPath,
   getReposPath,
 } from '../tasks/persistence.js';
+import { WORKDIR } from '../system/workdir.js';
 import {
   createRecoverableInputGenerator,
 } from './message-queue.js';
-import { setupSharedClone, cloneExists, isWorktree, migrateWorktreeToClone, type CloneCheckout } from '../connectors/github/repo-clone.js';
+import { setupSharedClone, cloneExists, isWorktree, migrateWorktreeToClone, fetchOrigin, type CloneCheckout } from '../connectors/github/repo-clone.js';
 import { configureGitIdentity } from '../connectors/github/client.js';
 import { loadPrompt } from '../utils/prompt-loader.js';
 import { processAgentEventForLogging, logger } from '../system/logger.js';
+import { buildSandboxConfig, createFilesystemGuardHooks, type SandboxOptions } from './sandbox.js';
 
 // ---- Prompt generation (per track) ----
 
@@ -118,24 +120,6 @@ async function setupAgentWorkspace(taskId: string, agent: Agent): Promise<string
   return agentWorkspace;
 }
 
-/**
- * Generate mcp__<name>__* wildcards for allowedTools from plugin MCP servers.
- * When def.tools is defined, it acts as the availability restriction (query.tools),
- * so we don't need wildcards in allowedTools. When undefined, all MCP tools
- * should be auto-approved, so we generate wildcards from the mcpServers map,
- * excluding internally-registered servers (they're already listed explicitly).
- */
-function mcpWildcards(
-  def: { tools?: string[] },
-  mcpServers: Record<string, any>,
-  internalServers: string[] = [],
-): string[] {
-  if (def.tools) return [];
-  return Object.keys(mcpServers)
-    .filter((name) => !internalServers.includes(name))
-    .map((name) => `mcp__${name}__*`);
-}
-
 // ---- Main spawner ----
 
 /**
@@ -158,19 +142,21 @@ export async function spawnAgent(agent: Agent, task: Task): Promise<void> {
   let cwd: string;
   let additionalDirectories: string[] | undefined;
   let mcpServers: Record<string, any>;
-  let allowedTools: string[];
-  let tools: string[] | undefined;        // SDK availability layer (def.tools → query.tools)
   let disallowedTools: string[] | undefined;
+  let tools: string[] | undefined;
+  let sandboxOpts: SandboxOptions;
   let model: string;
 
   if (def.track === 'pm') {
     // ---- PM track ----
     const pmWorkspace = await setupAgentWorkspace(taskId, agent);
     systemPrompt = await generatePMPrompt(task);
-    cwd = pmWorkspace;
-    additionalDirectories = [pmWorkspace, sharedPath];
-    if (def.pluginPath) additionalDirectories.push(def.pluginPath);
     model = (def.model || 'opus') as string;
+    cwd = pmWorkspace;
+    additionalDirectories = [sharedPath];
+    if (def.pluginPath) {
+      additionalDirectories.push(def.pluginPath);
+    }
 
     const channelInfo = Object.entries(metadata.channels)
       .map(([id, ch]) => ch.type === 'slack' ? `#${ch.channel_name || ch.channel_id}` : id)
@@ -182,11 +168,11 @@ Channel(s): ${channelInfo}
 Task Owner: ${metadata.task_owner || 'Not assigned'}
 Participants: ${metadata.participants.join(', ') || 'None yet'}
 
-Shared folder: ${sharedPath}
+Working directory (cwd): ${pmWorkspace} [READ-WRITE]
 
-Files available to read (in shared folder):
-- knowledge.log (conversation history and agent findings)
-- metadata.json (task metadata)
+Shared folder: ${sharedPath} [READ-ONLY]
+  - knowledge.log — conversation history and agent findings
+  - metadata.json — task metadata
 `;
     systemPrompt = `${systemPrompt}\n\nCurrent Task Context:\n${context}`;
 
@@ -209,29 +195,36 @@ Files available to read (in shared folder):
     };
 
     tools = def.tools;
-    allowedTools = [
-      'Skill',
-      'Read',
-      'Glob',
-      'Grep',
-      'mcp__research-tools__*',
-      'mcp__pm-agent-tools__*',
-      ...mcpWildcards(def, mcpServers, ['pm-agent-tools', 'research-tools']),
-    ];
     disallowedTools = [
-      'Bash',
-      'Edit',
-      'Write',
-      'WebSearch',
-      'WebFetch',
+      'WebSearch', 'WebFetch',
       ...(def.disallowedTools || []),
     ];
+    sandboxOpts = {
+      cwd: pmWorkspace,
+      denyReadPaths: [WORKDIR],
+      allowReadPaths: [
+        pmWorkspace, sharedPath,
+        ...(def.pluginPath ? [def.pluginPath] : []),
+        ...(def.pluginDataPath ? [def.pluginDataPath] : []),
+      ],
+      allowWritePaths: [pmWorkspace],
+      denyWritePaths: [
+        sharedPath,
+        ...(def.pluginPath ? [def.pluginPath] : []),
+        join(pmWorkspace, '.claude', 'settings.json'),
+        join(pmWorkspace, '.claude', 'skills'),
+        join(pmWorkspace, '.claude', 'hooks'),
+        join(pmWorkspace, 'CLAUDE.md'),
+      ],
+    };
   } else if (def.track === 'repo') {
     // ---- Repo track ----
+    const repoWorkspace = await setupAgentWorkspace(taskId, agent);
     const repoInfo = metadata.repositories[def.repo!.repoKey];
     const baseRepoPath = repoInfo?.path || def.repo!.defaultPath;
     const editAllowed = metadata.edit_allowed === true;
     const baseBranch = repoInfo?.base_branch || def.repo!.baseBranch || 'main';
+    const baseObjectsPath = join(baseRepoPath, '.git', 'objects');
 
     // CWD: always a shared clone at task-local path
     const taskRepoPath = join(getReposPath(taskId), def.repo!.repoKey);
@@ -297,26 +290,27 @@ Files available to read (in shared folder):
 
     systemPrompt = await generateRepoAgentPrompt(agent);
     const currentBranch = repoInfo.current_branch || baseBranch;
+    const repoMode = editAllowed ? 'READ-WRITE' : 'READ-ONLY';
     const context = `
 Task: ${taskId}
-Repository: ${repoPath}
-Current branch: ${currentBranch}
-Shared folder: ${sharedPath}
 
-Live task files (these update as work progresses):
-- ${sharedPath}/knowledge.log (conversation history and agent findings)
-- ${sharedPath}/metadata.json (task metadata - PM agent only)
+Working directory (cwd): ${repoWorkspace} [READ-WRITE]
 
-IMPORTANT: The knowledge.log file is continuously updated by other agents and user messages.
-Read it ONCE when you receive a new message, then proceed with your work. Don't poll it repeatedly.
+Repository: ${repoPath} [${repoMode}]
+  - Current branch: ${currentBranch}
+
+Shared folder: ${sharedPath} [READ-ONLY]
+  - knowledge.log — conversation history and agent findings (read ONCE per message, don't poll)
+  - metadata.json — task metadata
 `;
     systemPrompt = `${systemPrompt}\n\nCurrent Context:\n${context}`;
 
-    cwd = repoPath;
-    additionalDirectories = [repoPath, sharedPath];
-    if (def.pluginPath) additionalDirectories.push(def.pluginPath);
+    cwd = repoWorkspace;
     model = (def.model || 'sonnet') as string;
-    tools = def.tools;
+    additionalDirectories = [repoPath, sharedPath];
+    if (def.pluginPath) {
+      additionalDirectories.push(def.pluginPath);
+    }
 
     mcpServers = {
       ...(def.mcpServers || {}),
@@ -332,41 +326,23 @@ Read it ONCE when you receive a new message, then proceed with your work. Don't 
       }),
     };
 
-    allowedTools = [
-      'mcp__repo-agent-tools__send_message_to_agent',
-      'mcp__repo-agent-tools__log_finding',
-      'mcp__research-tools__web_research',
-      // Git + PR read tools (RO + RW)
-      'mcp__repo-tools__fetch',
-      'mcp__repo-tools__switch_branch',
-      'mcp__repo-tools__list_prs',
-      'mcp__repo-tools__get_pr',
-      'mcp__repo-tools__get_pr_status',
-      'mcp__repo-tools__get_pr_reviews',
-      // RO git bash commands (no-space glob to match bare commands like `git log`)
-      'Bash(git log*)',
-      'Bash(git diff*)',
-      'Bash(git show *)',
-      'Bash(git blame *)',
-      'Bash(git branch -r*)',
-      'Bash(git branch --show-current)',
-      'Bash(git ls-files*)',
-      'Bash(git ls-tree *)',
-      'Read',
-      'Glob',
-      'Grep',
-      ...mcpWildcards(def, mcpServers, ['repo-agent-tools', 'research-tools', 'repo-tools']),
+    const denyWriteProtected = [
+      // Protect SDK config in cwd (agent workspace)
+      join(repoWorkspace, '.claude', 'settings.json'),
+      join(repoWorkspace, '.claude', 'skills'),
+      join(repoWorkspace, '.claude', 'hooks'),
+      join(repoWorkspace, 'CLAUDE.md'),
+      // Prevent agent from switching branches (git checkout/switch writes .git/HEAD)
+      join(repoPath, '.git', 'HEAD'),
+    ];
+
+    tools = def.tools;
+    disallowedTools = [
+      'WebSearch', 'WebFetch',
       ...(editAllowed
-        ? [
-            'Write',
-            'Edit',
-            'Bash(rm *)',
-            'Bash(git add *)',
-            'Bash(git rm *)',
-            'Bash(git commit *)',
-            'Bash(git status*)',
-            'Bash(git merge *)',
-            'Bash(git restore *)',
+        ? []
+        : [
+            // RO mode: block write MCP operations (Write/Edit enforced by sandbox hooks)
             'mcp__repo-tools__push_branch',
             'mcp__repo-tools__create_pull_request',
             'mcp__repo-tools__update_pr',
@@ -377,15 +353,32 @@ Read it ONCE when you receive a new message, then proceed with your work. Don't 
             'mcp__repo-tools__merge_pull_request',
             'mcp__repo-tools__close_pull_request',
             'mcp__repo-tools__create_branch',
-            'mcp__repo-tools__list_branches',
-          ]
-        : []),
-    ];
-    disallowedTools = [
-      'WebSearch',
-      'WebFetch',
+          ]),
       ...(def.disallowedTools || []),
     ];
+    const readOnlyPaths = [
+      sharedPath, baseObjectsPath,
+      ...(def.pluginPath ? [def.pluginPath] : []),
+      ...(def.pluginDataPath ? [def.pluginDataPath] : []),
+    ];
+
+    if (editAllowed) {
+      sandboxOpts = {
+        cwd,
+        denyReadPaths: [WORKDIR],
+        allowReadPaths: [repoWorkspace, repoPath, ...readOnlyPaths],
+        allowWritePaths: [repoWorkspace, repoPath],
+        denyWritePaths: [...readOnlyPaths, ...denyWriteProtected],
+      };
+    } else {
+      sandboxOpts = {
+        cwd,
+        denyReadPaths: [WORKDIR],
+        allowReadPaths: [repoWorkspace, repoPath, ...readOnlyPaths],
+        allowWritePaths: [repoWorkspace],
+        denyWritePaths: [repoPath, ...readOnlyPaths],
+      };
+    }
   } else {
     // ---- Plugin track ----
     const agentWorkspace = await setupAgentWorkspace(taskId, agent);
@@ -394,24 +387,21 @@ Read it ONCE when you receive a new message, then proceed with your work. Don't 
     const context = `
 Task: ${taskId}
 Plugin: ${def.pluginName}
-Shared folder: ${sharedPath}
 
-Live task files (these update as work progresses):
-- ${sharedPath}/knowledge.log (conversation history and agent findings)
-- ${sharedPath}/metadata.json (task metadata - PM agent only)
+Working directory (cwd): ${agentWorkspace} [READ-WRITE]
 
-IMPORTANT: The knowledge.log file is continuously updated by other agents and user messages.
-Read it ONCE when you receive a new message, then proceed with your work. Don't poll it repeatedly.
+Shared folder: ${sharedPath} [READ-ONLY]
+  - knowledge.log — conversation history and agent findings (read ONCE per message, don't poll)
+  - metadata.json — task metadata
 `;
     systemPrompt = `${systemPrompt}\n\nCurrent Context:\n${context}`;
 
     cwd = agentWorkspace;
-    additionalDirectories = [agentWorkspace, sharedPath];
+    additionalDirectories = [sharedPath];
     if (def.pluginPath) {
       additionalDirectories.push(def.pluginPath);
     }
     model = (def.model || 'sonnet') as string;
-    tools = def.tools;
 
     mcpServers = {
       ...(def.mcpServers || {}),
@@ -426,21 +416,29 @@ Read it ONCE when you receive a new message, then proceed with your work. Don't 
       }),
     };
 
-    allowedTools = [
-      'mcp__repo-agent-tools__send_message_to_agent',
-      'mcp__repo-agent-tools__log_finding',
-      'mcp__research-tools__web_research',
-      'Read',
-      'Glob',
-      'Grep',
-      'Skill',
-      ...mcpWildcards(def, mcpServers, ['repo-agent-tools', 'research-tools']),
-    ];
+    tools = def.tools;
     disallowedTools = [
-      'WebSearch',
-      'WebFetch',
+      'WebSearch', 'WebFetch',
       ...(def.disallowedTools || []),
     ];
+    sandboxOpts = {
+      cwd: agentWorkspace,
+      denyReadPaths: [WORKDIR],
+      allowReadPaths: [
+        agentWorkspace, sharedPath,
+        ...(def.pluginPath ? [def.pluginPath] : []),
+        ...(def.pluginDataPath ? [def.pluginDataPath] : []),
+      ],
+      allowWritePaths: [agentWorkspace],
+      denyWritePaths: [
+        sharedPath,
+        ...(def.pluginPath ? [def.pluginPath] : []),
+        join(agentWorkspace, '.claude', 'settings.json'),
+        join(agentWorkspace, '.claude', 'skills'),
+        join(agentWorkspace, '.claude', 'hooks'),
+        join(agentWorkspace, 'CLAUDE.md'),
+      ],
+    };
   }
 
   // ---- Build query options (session ID may change on retry) ----
@@ -451,17 +449,22 @@ Read it ONCE when you receive a new message, then proceed with your work. Don't 
     cwd,
     ...(additionalDirectories ? { additionalDirectories: additionalDirectories as any } : {}),
     executable: 'node' as const,
-    pathToClaudeCodeExecutable: process.env.CLAUDE_PATH || 'claude',
+    // pathToClaudeCodeExecutable: process.env.CLAUDE_PATH || 'claude',
     settingSources: ['project'] as any,
     env: {
       NODE_ENV: process.env.NODE_ENV || 'development',
       ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
       PATH: process.env.PATH,
+      CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
     },
     resume: sessionId,
     maxTurns: 100,
-    permissionMode: 'dontAsk' as const,
+    permissionMode: 'bypassPermissions' as const,
+    allowDangerouslySkipPermissions: true,
+    sandbox: buildSandboxConfig(sandboxOpts),
+    ...(tools ? { tools } : {}),
     hooks: {
+      PreToolUse: createFilesystemGuardHooks(sandboxOpts),
       PostToolUse: [
         createResearchPostToolHook({
           getSharedDir: () => getSharedPath(taskId),
@@ -478,9 +481,10 @@ Read it ONCE when you receive a new message, then proceed with your work. Don't 
       }],
     },
     mcpServers,
-    ...(tools ? { tools } : {}),
-    allowedTools,
     disallowedTools,
+    stderr: (data: string) => {
+      logger.debug(def.id, `stderr: ${data.trim()}`);
+    },
   });
 
   // ---- Session recovery (try → reset → retry → give up) ----

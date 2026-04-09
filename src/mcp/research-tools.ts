@@ -144,7 +144,7 @@ function createReportWriterMcpServer(researchDir: string, agentName: string) {
               allowedTools: ['Glob', 'Read'],
               maxTurns: 100,
               executable: 'node',
-              pathToClaudeCodeExecutable: process.env.CLAUDE_PATH || 'claude',
+              // pathToClaudeCodeExecutable: process.env.CLAUDE_PATH || 'claude',
               outputFormat: {
                 type: 'json_schema',
                 schema: reportWriterJsonSchema,
@@ -320,7 +320,7 @@ export function createWebResearchTool(callbacks: ResearchToolCallbacks) {
             },
             maxTurns: 50,
             executable: 'node',
-            pathToClaudeCodeExecutable: process.env.CLAUDE_PATH || 'claude',
+            // pathToClaudeCodeExecutable: process.env.CLAUDE_PATH || 'claude',
             env: {
               NODE_ENV: process.env.NODE_ENV || 'development',
               ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,

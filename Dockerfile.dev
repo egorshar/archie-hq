@@ -1,18 +1,24 @@
 # Development Dockerfile with hot reload support
 
-FROM node:20-alpine
+FROM node:24-slim
 
-# Install git, ssh (for git fetch over ssh), git-lfs, and bash (required by Claude CLI)
-RUN apk add --no-cache git openssh-client git-lfs bash libcrypto3=3.5.5-r0 libssl3=3.5.5-r0 && \
+# uv/uvx for Python tool execution
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+# Install git, ssh (for git fetch over ssh), git-lfs, bash (required by Claude CLI),
+# bubblewrap + socat (sandbox runtime), gosu (entrypoint privilege drop),
+# python3 + pip (for agent scripts)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      git openssh-client git-lfs bash bubblewrap socat gosu ca-certificates \
+      python3 python3-pip python3-venv && \
     git lfs install && \
     mkdir -p ~/.ssh && \
-    ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+    ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null && \
+    rm -rf /var/lib/apt/lists/*
 
 # Set SHELL environment variable (required by Claude CLI)
 ENV SHELL=/bin/bash
-
-# Install Claude Code CLI globally
-RUN npm install -g @anthropic-ai/claude-code@2.1.96
 
 # Set working directory
 WORKDIR /app
@@ -32,11 +38,28 @@ RUN chmod +x /app/scripts/git-askpass.sh && \
     npx tsc scripts/github-token.ts --outDir dist/scripts --module ESNext --moduleResolution node --esModuleInterop --skipLibCheck
 ENV GIT_ASKPASS=/app/scripts/git-askpass.sh
 
-# Create directories for volumes
-RUN mkdir -p /workdir /app/secrets
+# Create non-root user (required: bypassPermissions refuses to run as root)
+RUN groupadd -g 1001 archie && \
+    useradd -u 1001 -g archie -m archie
+
+# Create directories for volumes and set ownership
+RUN mkdir -p /workdir /app/secrets && \
+    chown -R archie:archie /workdir /app/secrets /app
+
+# Copy ssh known_hosts to archie user
+RUN mkdir -p /home/archie/.ssh && \
+    cp ~/.ssh/known_hosts /home/archie/.ssh/known_hosts && \
+    chown -R archie:archie /home/archie/.ssh
+
+ENV HOME=/home/archie
+
+# Copy entrypoint (starts as root to fix SSH socket perms, then drops to archie)
+COPY scripts/docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
 
 # Expose port (actual port comes from ENV)
 EXPOSE ${PORT:-3000}
 
-# Start with hot reload
+# Entrypoint fixes SSH socket permissions then drops to non-root user
+ENTRYPOINT ["/docker-entrypoint.sh"]
 CMD ["npm", "run", "dev"]

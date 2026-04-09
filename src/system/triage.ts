@@ -55,7 +55,7 @@ async function runTriage<T extends z.ZodType>(
       systemPrompt,
       cwd: sessionsDir,
       executable: "node",
-      pathToClaudeCodeExecutable: process.env.CLAUDE_PATH || "claude",
+      // pathToClaudeCodeExecutable: process.env.CLAUDE_PATH || "claude",
       env: {
         NODE_ENV: process.env.NODE_ENV || "development",
         ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,

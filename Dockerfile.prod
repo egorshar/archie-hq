@@ -1,21 +1,22 @@
 # Production Dockerfile
 
-FROM node:20-alpine
+FROM node:24-slim
 
-# Upgrade system packages to get latest security updates if node image has not been updated yet
-RUN apk upgrade --no-cache
+# uv/uvx for Python tool execution
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
-# Install git, ssh (for git fetch over ssh), git-lfs, and bash (required by Claude CLI)
-RUN apk add --no-cache git openssh-client git-lfs bash libcrypto3=3.5.5-r0 libssl3=3.5.5-r0 && \
+# Install git, git-lfs, bash (required by Claude CLI),
+# bubblewrap + socat (sandbox runtime), gosu (entrypoint privilege drop),
+# python3 + pip (for agent scripts)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      git git-lfs bash bubblewrap socat gosu ca-certificates \
+      python3 python3-pip python3-venv && \
     git lfs install && \
-    mkdir -p ~/.ssh && \
-    ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+    rm -rf /var/lib/apt/lists/*
 
 # Set SHELL environment variable (required by Claude CLI)
 ENV SHELL=/bin/bash
-
-# Install Claude Code CLI globally
-RUN npm install -g @anthropic-ai/claude-code@2.1.96
 
 # Set working directory
 WORKDIR /app
@@ -39,14 +40,26 @@ RUN npm run build && \
 # Remove devDependencies
 RUN npm prune --production
 
-# Create directories
-RUN mkdir -p /workdir /app/secrets
+# Create non-root user (required: bypassPermissions refuses to run as root)
+RUN groupadd -g 1001 archie && \
+    useradd -u 1001 -g archie -m archie
+
+# Create directories and set ownership
+RUN mkdir -p /workdir /app/secrets && \
+    chown -R archie:archie /workdir /app/secrets /app
 
 # Configure git authentication
 RUN chmod +x /app/scripts/git-askpass.sh
 ENV GIT_ASKPASS=/app/scripts/git-askpass.sh
 
+ENV HOME=/home/archie
+
+# Entrypoint drops to non-root user (shared with dev)
+COPY scripts/docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
+
 # Expose port (actual port comes from ENV)
 EXPOSE ${PORT:-3000}
 
+ENTRYPOINT ["/docker-entrypoint.sh"]
 CMD ["node", "dist/index.js"]

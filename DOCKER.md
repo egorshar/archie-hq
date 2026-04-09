@@ -13,13 +13,11 @@ cp your-github-private-key.pem secrets/github-private-key.pem
 cp .env.example .env
 # Edit .env with your actual values
 
-# 3. Clone repos (one time only)
-git clone git@github.com:your-org/backend.git repos/backend
-git clone git@github.com:your-org/mobile.git repos/mobile
+# 3. Set up workdir (repos are auto-cloned on startup via ARCHIE_PLUGINS)
+mkdir -p workdir claude-data
 
 # 4. Start the container
 npm run docker:dev   # Development (hot reload)
-npm run docker:prod  # Production
 ```
 
 ## Running Modes
@@ -27,7 +25,6 @@ npm run docker:prod  # Production
 | Mode | Command | Use Case |
 |------|---------|----------|
 | **Development** | `npm run docker:dev` | Active development with hot reload |
-| **Production** | `npm run docker:prod` | Deployment |
 | **Stop** | `npm run docker:stop` | Stop containers |
 
 ### Development Mode (Hot Reload)
@@ -39,21 +36,11 @@ npm run docker:dev
 This:
 - Uses `Dockerfile.dev` (keeps devDependencies)
 - Mounts `./src` and `./prompts` for hot reload
+- Runs as non-root user `archie` (required by `bypassPermissions`)
 - Runs `npm run dev` (tsx watch)
 - Sets `NODE_ENV=development`
 
 Edit any file in `src/` or `prompts/` → save → container auto-restarts.
-
-### Production Mode
-
-```bash
-npm run docker:prod
-```
-
-This:
-- Uses `Dockerfile.prod` (optimized, no devDependencies)
-- Sets `NODE_ENV=production`
-- Runs detached in background
 
 ## Common Commands
 
@@ -64,7 +51,10 @@ npm run docker:stop
 # View logs
 docker compose logs -f
 
-# Shell into container
+# Shell into container (as archie)
+docker compose exec -u archie archie sh
+
+# Shell into container (as root, for debugging)
 docker compose exec archie sh
 
 # Check health
@@ -77,13 +67,56 @@ curl http://localhost:${PORT:-3000}/health
 archie-hq/
 ├── .env                    # Your environment variables (git-ignored)
 ├── claude-data/            # Claude Code config/sessions (git-ignored)
+│   ├── .claude.json        # CLI feature flags (auto-generated)
+│   ├── projects/           # Per-project session logs
+│   └── backups/            # Auto-backups of .claude.json
 ├── secrets/                # Private keys (git-ignored)
 │   └── github-private-key.pem
-├── repos/                  # Cloned repositories (git-ignored)
-│   ├── backend/
-│   └── mobile/
-└── sessions/               # Persistent task data (git-ignored)
-    └── task-*/
+└── workdir/                # All runtime state (git-ignored)
+    ├── plugins/            # Auto-cloned from ARCHIE_PLUGINS
+    ├── plugins-data/       # Persistent per-plugin data
+    ├── repos/              # Base repo clones
+    │   ├── backend/
+    │   └── mobile/
+    └── sessions/           # Per-task runtime data
+        └── task-*/
+            ├── shared/     # knowledge.log, metadata, events
+            ├── agents/     # PM + plugin agent workspaces
+            └── repos/      # Task-local worktrees
+```
+
+## Container Architecture
+
+### Non-Root User
+
+The container runs as the `archie` user (non-root). This is required because Claude Agent SDK's `bypassPermissions` mode refuses to execute as root. The Docker entrypoint:
+
+1. Starts as root
+2. Fixes SSH agent socket permissions (`chmod 0666`)
+3. Drops to `archie` via `su-exec`
+4. Executes the CMD
+
+### Bubblewrap Sandbox
+
+Agent Bash commands run inside a bubblewrap (bwrap) sandbox for filesystem and network isolation. This requires specific Docker capabilities:
+
+```yaml
+cap_add:
+  - SYS_ADMIN           # Namespace creation and mount ops
+security_opt:
+  - seccomp=unconfined   # Allows bwrap's clone/unshare syscalls
+  - apparmor=unconfined  # Allows bwrap's mount operations
+  - systempaths=unconfined  # Removes /proc masking for PID namespace
+```
+
+These are already configured in `docker-compose.yml`. Without them, all Bash commands will fail with `Operation not permitted`.
+
+**Ubuntu 24.04+ hosts** also need a kernel sysctl to allow unprivileged user namespaces inside containers:
+
+```bash
+sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+# Persist across reboots:
+echo 'kernel.apparmor_restrict_unprivileged_userns=0' | sudo tee /etc/sysctl.d/99-archie-bwrap.conf
 ```
 
 ## Handling Secrets
@@ -108,45 +141,23 @@ Configure these in your `.env` file:
 | `SLACK_SIGNING_SECRET` | Slack app signing secret | `abc123...` |
 | `GITHUB_APP_ID` | GitHub App ID | `123456` |
 | `GITHUB_INSTALLATION_ID` | GitHub App installation ID | `12345678` |
+| `ARCHIE_PLUGINS` | Git URL for plugins repo | `git@github.com:org/archie-plugins.git` |
 | `PORT` | Server port (optional) | `3000` |
 
-These are automatically set by docker-compose to container paths:
+These are automatically set by docker-compose:
 - `CLAUDE_PATH` → `/usr/local/bin/claude`
-- `BACKEND_REPO_PATH` → `/app/repos/backend`
-- `MOBILE_REPO_PATH` → `/app/repos/mobile`
-- `GITHUB_APP_PRIVATE_KEY_PATH` → `/app/secrets/github-private-key.pem`
+- `ARCHIE_WORKDIR` → `/workdir`
+- `SSH_AUTH_SOCK` → `/run/host-services/ssh-auth.sock`
 
 ## Handling Repositories
 
-Clone repos once (locally or on server):
-
-```bash
-git clone git@github.com:your-org/backend.git repos/backend
-git clone git@github.com:your-org/mobile.git repos/mobile
-```
-
-Repos are mounted as a volume at `/app/repos/`. They persist across container restarts and rebuilds. The app uses git fetch and worktrees, so repos need write access.
-
-## Session Persistence
-
-Sessions are stored in `./sessions/` and mounted as a volume. This ensures:
-
-- Task data survives container restarts
-- Knowledge logs are preserved
-- Agent sessions can be resumed
-- Git worktrees persist
-
-### Backup Sessions
-
-```bash
-tar -czf sessions-backup-$(date +%Y%m%d).tar.gz sessions/
-```
+Repos are auto-cloned on startup based on plugin `repo-config.json` files. They live under `workdir/repos/` and persist across container restarts. The app uses git fetch and worktrees internally — task-specific worktrees are created at `workdir/sessions/<taskId>/repos/<repoKey>/`.
 
 ## Claude Code Configuration
 
-Claude Code stores its configuration and session data in `~/.claude`. The container mounts `./claude-data` to `/root/.claude` for persistence.
+Claude Code stores its configuration in `~/.claude` (mapped to `./claude-data`) and `~/.claude.json` (mapped to `./claude-data/.claude.json`). Both persist across container restarts.
 
-The `claude-data/` directory is created automatically on first run. Claude Code sessions and settings persist across container restarts.
+The `claude-data/` directory is created automatically on first run. If `.claude.json` is missing, Claude CLI regenerates it (you'll see a warning about a missing config file — this is harmless).
 
 ## ngrok Setup (Local Development)
 
@@ -168,37 +179,92 @@ Then update:
 
 ## Production Deployment
 
-On your production server:
+### Container Requirements
+
+Production containers **must** be started with these Docker flags:
 
 ```bash
-# First time setup
-git clone git@github.com:your-org/archie-hq.git
-cd archie-hq
-
-# Clone target repos
-git clone git@github.com:your-org/backend.git repos/backend
-git clone git@github.com:your-org/mobile.git repos/mobile
-
-# Set up secrets
-mkdir -p secrets
-cp /path/to/github-private-key.pem secrets/github-private-key.pem
-
-# Configure environment
-cp .env.example .env
-nano .env  # fill in real values
-
-# Start
-npm run docker:prod
+docker run \
+  --cap-add SYS_ADMIN \
+  --security-opt seccomp=unconfined \
+  --security-opt apparmor=unconfined \
+  --security-opt systempaths=unconfined \
+  ...
 ```
 
-For subsequent deploys (code updates):
+**AWS Fargate is NOT compatible** — it does not support `cap_add: SYS_ADMIN`. Use **EC2-backed ECS or EKS**.
 
-```bash
-git pull
-npm run docker:prod
+### Persistent Volumes
+
+| Container Path | Purpose | Required |
+|---------------|---------|----------|
+| `/workdir` | Runtime state: repos, sessions, plugins | Yes |
+| `/home/archie/.claude` | Claude CLI config and session logs | Yes |
+| `/home/archie/.claude.json` | Claude CLI feature flags | Yes |
+| `/app/secrets` | GitHub App private key (read-only) | If using GitHub App |
+
+### ECS/EKS Task Definition
+
+For ECS with EC2 launch type:
+
+```json
+{
+  "linuxParameters": {
+    "capabilities": {
+      "add": ["SYS_ADMIN"]
+    }
+  },
+  "dockerSecurityOptions": [
+    "seccomp=unconfined",
+    "apparmor=unconfined",
+    "systempaths=unconfined"
+  ]
+}
 ```
+
+For EKS, use a pod security context:
+
+```yaml
+securityContext:
+  capabilities:
+    add: ["SYS_ADMIN"]
+```
+
+With a custom seccomp/apparmor profile or the `Unconfined` pod security standard.
 
 ## Troubleshooting
+
+### Bash commands fail with "Operation not permitted"
+
+Bubblewrap sandbox can't create namespaces. Ensure Docker capabilities are set:
+```yaml
+cap_add:
+  - SYS_ADMIN
+security_opt:
+  - seccomp=unconfined
+  - apparmor=unconfined
+  - systempaths=unconfined
+```
+
+### "cannot be used with root/sudo privileges"
+
+The Claude Agent SDK's `bypassPermissions` mode requires a non-root user. Ensure the entrypoint drops to `archie` via `su-exec`. Check: `docker exec archie-hq whoami` should not return `root`.
+
+### ".claude.json not found" warning
+
+Harmless — Claude CLI regenerates this file on first run. To silence it, ensure `./claude-data/.claude.json` exists (copy from `claude-data/backups/` if available).
+
+### SSH "Permission denied (publickey)" (dev only)
+
+The SSH agent socket is mounted from macOS Docker Desktop. The entrypoint fixes permissions, but if it fails:
+```bash
+docker exec archie-hq chmod 0666 /run/host-services/ssh-auth.sock
+```
+
+### Git fetch fails
+
+- **Dev**: Ensure your SSH key is loaded (`ssh-add`) and SSH agent forwarding is working
+- **Prod**: Ensure `GIT_ASKPASS` is configured and GitHub App credentials are valid
 
 ### Container won't start
 
@@ -208,30 +274,5 @@ docker compose logs archie
 # Common issues:
 # - Missing .env file
 # - Invalid API keys
-# - Missing repos directory
+# - Missing workdir directory
 ```
-
-### CLAUDE_PATH error
-
-If you see "Claude executable not found" with your local path, ensure docker-compose.yml has the override:
-```yaml
-environment:
-  - CLAUDE_PATH=/usr/local/bin/claude
-```
-
-### Can't connect to Slack
-
-- Ensure `SLACK_BOT_TOKEN` and `SLACK_SIGNING_SECRET` are correct
-- Check that the port is exposed and accessible
-- For local dev, use ngrok
-
-### Sessions not persisting
-
-- Check that `./sessions` directory exists
-- Verify volume mount in docker-compose.yml
-- Check container logs for write errors
-
-### Git worktree errors
-
-- Ensure `repos/` is mounted writable (not `:ro`)
-- Check that repos were cloned properly with `.git` directory
