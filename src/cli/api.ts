@@ -10,11 +10,17 @@ export function getBaseUrl(): string {
 
 // ---- REST helpers ----
 
-export async function fetchTasks(): Promise<any[]> {
-  const res = await fetch(`${getBaseUrl()}/api/tasks`);
+export async function fetchTasks(
+  opts?: { limit?: number; offset?: number },
+): Promise<{ tasks: any[]; total: number }> {
+  const params = new URLSearchParams();
+  if (opts?.limit) params.set('limit', String(opts.limit));
+  if (opts?.offset) params.set('offset', String(opts.offset));
+  const qs = params.toString();
+  const res = await fetch(`${getBaseUrl()}/api/tasks${qs ? `?${qs}` : ''}`);
   if (!res.ok) throw new Error(`Failed to fetch tasks: ${res.status}`);
-  const data = (await res.json()) as { tasks: any[] };
-  return data.tasks;
+  const data = (await res.json()) as { tasks: any[]; total: number };
+  return { tasks: data.tasks, total: data.total };
 }
 
 export async function fetchTaskDetail(taskId: string): Promise<any> {
