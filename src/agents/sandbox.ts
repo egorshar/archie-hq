@@ -53,17 +53,13 @@ export function buildSandboxConfig(opts: SandboxOptions) {
     allowUnsandboxedCommands: false,
     autoAllowBashIfSandboxed: true,
     filesystem: {
-      // NOTE: /workdir/sessions is intentionally NOT denied — denyRead on a parent
-      // directory uses --tmpfs which destroys allowWrite --bind mounts on children
-      // (bwrap mount ordering bug in sandbox-runtime). Sessions are readable from
-      // Bash but PreToolUse hooks enforce read boundaries on Read/Glob/Grep tools.
+      // Callers deny WORKDIR broadly, then allowRead/allowWrite specific subdirs.
       denyRead: ['/app', '/home/archie/.claude', ...(opts.denyReadPaths || [])],
       allowRead: ['/home/archie/.claude/shell-snapshots', ...new Set(opts.allowReadPaths)],
       allowWrite: ['/tmp', ...(opts.allowWritePaths || [])],
       ...(opts.denyWritePaths && opts.denyWritePaths.length > 0
         ? { denyWrite: opts.denyWritePaths }
         : {}),
-      allowGitConfig: true,
     },
     network: {
       allowedDomains: opts.allowedNetworkDomains ?? [],

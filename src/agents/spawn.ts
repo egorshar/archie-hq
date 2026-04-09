@@ -27,7 +27,7 @@ import {
   getTaskPath,
   getReposPath,
 } from '../tasks/persistence.js';
-import { REPOS_DIR, PLUGINS_DATA_DIR } from '../system/workdir.js';
+import { WORKDIR } from '../system/workdir.js';
 import {
   createRecoverableInputGenerator,
 } from './message-queue.js';
@@ -201,7 +201,7 @@ Files available to read (in shared folder):
     ];
     sandboxOpts = {
       cwd: pmWorkspace,
-      denyReadPaths: [REPOS_DIR, PLUGINS_DATA_DIR, getReposPath(taskId)],
+      denyReadPaths: [WORKDIR],
       allowReadPaths: [
         pmWorkspace, sharedPath,
         ...(def.pluginPath ? [def.pluginPath] : []),
@@ -364,16 +364,16 @@ Read it ONCE when you receive a new message, then proceed with your work. Don't 
 
     if (editAllowed) {
       sandboxOpts = {
-        cwd: repoWorkspace,
-        denyReadPaths: [REPOS_DIR, PLUGINS_DATA_DIR, getReposPath(taskId)],
+        cwd,
+        denyReadPaths: [WORKDIR],
         allowReadPaths: [repoWorkspace, repoPath, ...readOnlyPaths],
         allowWritePaths: [repoWorkspace, repoPath],
         denyWritePaths: [...readOnlyPaths, ...denyWriteProtected],
       };
     } else {
       sandboxOpts = {
-        cwd: repoWorkspace,
-        denyReadPaths: [REPOS_DIR, PLUGINS_DATA_DIR, getReposPath(taskId)],
+        cwd,
+        denyReadPaths: [WORKDIR],
         allowReadPaths: [repoWorkspace, repoPath, ...readOnlyPaths],
         allowWritePaths: [repoWorkspace],
         denyWritePaths: [repoPath, ...readOnlyPaths],
@@ -425,7 +425,7 @@ Read it ONCE when you receive a new message, then proceed with your work. Don't 
     ];
     sandboxOpts = {
       cwd: agentWorkspace,
-      denyReadPaths: [REPOS_DIR, PLUGINS_DATA_DIR, getReposPath(taskId)],
+      denyReadPaths: [WORKDIR],
       allowReadPaths: [
         agentWorkspace, sharedPath,
         ...(def.pluginPath ? [def.pluginPath] : []),
@@ -457,6 +457,7 @@ Read it ONCE when you receive a new message, then proceed with your work. Don't 
       NODE_ENV: process.env.NODE_ENV || 'development',
       ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
       PATH: process.env.PATH,
+      CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
     },
     resume: sessionId,
     maxTurns: 100,
