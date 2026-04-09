@@ -168,11 +168,11 @@ Channel(s): ${channelInfo}
 Task Owner: ${metadata.task_owner || 'Not assigned'}
 Participants: ${metadata.participants.join(', ') || 'None yet'}
 
-Shared folder: ${sharedPath}
+Working directory (cwd): ${pmWorkspace} [READ-WRITE]
 
-Files available to read (in shared folder):
-- knowledge.log (conversation history and agent findings)
-- metadata.json (task metadata)
+Shared folder: ${sharedPath} [READ-ONLY]
+  - knowledge.log — conversation history and agent findings
+  - metadata.json — task metadata
 `;
     systemPrompt = `${systemPrompt}\n\nCurrent Task Context:\n${context}`;
 
@@ -290,18 +290,18 @@ Files available to read (in shared folder):
 
     systemPrompt = await generateRepoAgentPrompt(agent);
     const currentBranch = repoInfo.current_branch || baseBranch;
+    const repoMode = editAllowed ? 'READ-WRITE' : 'READ-ONLY';
     const context = `
 Task: ${taskId}
-Repository: ${repoPath}
-Current branch: ${currentBranch}
-Shared folder: ${sharedPath}
 
-Live task files (managed by the system, updated as work progresses):
-- ${sharedPath}/knowledge.log (conversation history and agent findings)
-- ${sharedPath}/metadata.json (task metadata)
+Working directory (cwd): ${repoWorkspace} [READ-WRITE]
 
-IMPORTANT: The knowledge.log file is continuously updated by other agents and user messages.
-Read it ONCE when you receive a new message, then proceed with your work. Don't poll it repeatedly.
+Repository: ${repoPath} [${repoMode}]
+  - Current branch: ${currentBranch}
+
+Shared folder: ${sharedPath} [READ-ONLY]
+  - knowledge.log — conversation history and agent findings (read ONCE per message, don't poll)
+  - metadata.json — task metadata
 `;
     systemPrompt = `${systemPrompt}\n\nCurrent Context:\n${context}`;
 
@@ -387,14 +387,12 @@ Read it ONCE when you receive a new message, then proceed with your work. Don't 
     const context = `
 Task: ${taskId}
 Plugin: ${def.pluginName}
-Shared folder: ${sharedPath}
 
-Live task files (managed by the system, updated as work progresses):
-- ${sharedPath}/knowledge.log (conversation history and agent findings)
-- ${sharedPath}/metadata.json (task metadata)
+Working directory (cwd): ${agentWorkspace} [READ-WRITE]
 
-IMPORTANT: The knowledge.log file is continuously updated by other agents and user messages.
-Read it ONCE when you receive a new message, then proceed with your work. Don't poll it repeatedly.
+Shared folder: ${sharedPath} [READ-ONLY]
+  - knowledge.log — conversation history and agent findings (read ONCE per message, don't poll)
+  - metadata.json — task metadata
 `;
     systemPrompt = `${systemPrompt}\n\nCurrent Context:\n${context}`;
 
