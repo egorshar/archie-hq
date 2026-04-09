@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Box, Text, useApp, useInput, useStdout } from 'ink';
+import Spinner from 'ink-spinner';
 import { ScrollView, type ScrollViewRef } from 'ink-scroll-view';
 import { fetchTaskDetail, fetchTaskEvents, sendMessage, sendApproval } from '../api.js';
 import { MessageInput } from './MessageInput.js';
@@ -18,12 +19,6 @@ interface SystemEvent {
   data: Record<string, unknown>;
 }
 
-interface PendingApproval {
-  timestamp: string;
-  text: string;
-  approvalType: 'edit_mode' | 'research_budget';
-}
-
 interface TaskDetailProps {
   taskId: string;
   onBack: () => void;
@@ -31,28 +26,16 @@ interface TaskDetailProps {
   onConnect?: boolean;
 }
 
-// ---- Event formatting ----
-
-function formatEvent(event: SystemEvent): React.ReactNode | null {
-  switch (event.type) {
-    case 'message':
-      return <><Text dimColor>[{event.data.from as string}]</Text> <Text color="cyan">@{event.data.to as string}</Text> {event.data.message as string}</>;
-    case 'agent:log':
-      return <Text dimColor>[{event.agentName}] {event.data.finding as string}</Text>;
-    case 'task:created':
-    case 'task:resumed':
-    case 'task:stopped':
-    case 'task:completed':
-    case 'agent:active':
-    case 'agent:inactive':
-      return null; // lifecycle events — shown in header/agents bar
-    case 'approval:requested':
-      return null; // handled by interactive rendering
-    case 'approval:resolved':
-      return <>{event.data.approve ? '✅' : '❌'} Approval {event.data.approve ? 'granted' : 'denied'}: {event.data.type as string}</>;
-    default:
-      return null;
-  }
+// Check if a given approval:requested event has been resolved
+function isApprovalResolved(req: SystemEvent, allEvents: SystemEvent[]): boolean {
+  const reqType = req.data.approvalType as string;
+  return allEvents.some(
+    (e) =>
+      e.type === 'approval:resolved' &&
+      // Match by approval type — resolved events use `type` field
+      (e.data.type as string) === reqType &&
+      e.timestamp > req.timestamp,
+  );
 }
 
 export function TaskDetail({ taskId, onBack, onEvent, onConnect }: TaskDetailProps) {
@@ -63,7 +46,8 @@ export function TaskDetail({ taskId, onBack, onEvent, onConnect }: TaskDetailPro
   const [events, setEvents] = useState<SystemEvent[]>([]);
   const [eventCursor, setEventCursor] = useState(0);
   const [fallbackLines, setFallbackLines] = useState<string[]>([]); // knowledge.log for old tasks
-  const [focusIndex, setFocusIndex] = useState(0); // 0 = input, 1+ = approval lines
+  const [inputActive, setInputActive] = useState(true);
+  const [focusedApprovalLine, setFocusedApprovalLine] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string>('');
   const prevOnEvent = useRef<SystemEvent | null>(null);
@@ -71,22 +55,69 @@ export function TaskDetail({ taskId, onBack, onEvent, onConnect }: TaskDetailPro
   const scrollRef = useRef<ScrollViewRef>(null);
   const autoScroll = useRef(true); // stick to bottom unless user scrolls up
   const [linesBelow, setLinesBelow] = useState(0);
+  const escapeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Derive display lines from events, falling back to knowledge.log for old tasks
-  const logLines: React.ReactNode[] = events.length > 0
-    ? events.map(formatEvent).filter((l): l is React.ReactNode => l !== null)
-    : fallbackLines;
+  // Reserve lines: header(1) + agents(1) + margin(1) + indicator/gap(2) + input(1)
+  const reservedLines = 6;
+  const logHeight = Math.max(5, termHeight - reservedLines);
 
-  const pendingApprovals: PendingApproval[] = events
-    .filter((e) => e.type === 'approval:requested')
-    .filter((req) => !events.some(
-      (e) => e.type === 'approval:resolved' && e.timestamp > req.timestamp,
-    ))
-    .map((e) => ({
-      timestamp: e.timestamp,
-      text: e.data.text as string,
-      approvalType: e.data.approvalType as 'edit_mode' | 'research_budget',
-    }));
+  // Build log lines with inline approvals
+  const logLines: { node: React.ReactNode; approval?: { approvalType: 'edit_mode' | 'research_budget'; eventIndex: number } }[] = [];
+
+  if (events.length > 0) {
+    events.forEach((event, idx) => {
+      switch (event.type) {
+        case 'message':
+          logLines.push({
+            node: <><Text dimColor>[{event.data.from as string}]</Text> <Text color="cyan">@{event.data.to as string}</Text> {event.data.message as string}</>,
+          });
+          break;
+        case 'agent:log':
+          logLines.push({
+            node: <Text dimColor>[{event.agentName}] {event.data.finding as string}</Text>,
+          });
+          break;
+        case 'approval:requested': {
+          const resolved = isApprovalResolved(event, events);
+          if (resolved) {
+            logLines.push({
+              node: <Text dimColor>✅ {event.data.text as string} (resolved)</Text>,
+            });
+          } else {
+            logLines.push({
+              node: <Text color="yellow" bold>⏳ {event.data.text as string}  [y] approve / [n] deny</Text>,
+              approval: {
+                approvalType: event.data.approvalType as 'edit_mode' | 'research_budget',
+                eventIndex: idx,
+              },
+            });
+          }
+          break;
+        }
+        case 'approval:resolved':
+          logLines.push({
+            node: <Text>{event.data.approve ? '✅' : '❌'} Approval {event.data.approve ? 'granted' : 'denied'}: {event.data.type as string}</Text>,
+          });
+          break;
+        default:
+          break;
+      }
+    });
+  } else {
+    fallbackLines.forEach((line) => {
+      logLines.push({ node: <Text>{line}</Text> });
+    });
+  }
+
+  // Collect line indices of pending approvals
+  const pendingApprovalLines = logLines
+    .map((l, i) => l.approval ? i : -1)
+    .filter((i) => i >= 0);
+
+  // The approval at the focused line (if any)
+  const focusedApproval = focusedApprovalLine !== null
+    ? logLines[focusedApprovalLine]?.approval ?? null
+    : null;
 
   // Initial load: fetch metadata + events
   const loadInitial = useCallback(async () => {
@@ -167,42 +198,86 @@ export function TaskDetail({ taskId, onBack, onEvent, onConnect }: TaskDetailPro
     }
   }, [onConnect, taskId, eventCursor]);
 
-  // Total focusable items: 1 (input) + pending approvals + 1 (unfocused/scroll mode)
-  // focusIndex: 0 = input, 1..N = approvals, N+1 = unfocused
-  const focusableCount = 1 + pendingApprovals.length + 1;
-  const unfocusedIndex = focusableCount - 1;
-
   useInput((input, key) => {
     if (key.escape) {
-      onBack();
+      // Debounce: option+arrow sends escape before the arrow key arrives.
+      // Schedule onBack, cancel if an arrow key comes within 50ms.
+      if (escapeTimer.current) clearTimeout(escapeTimer.current);
+      escapeTimer.current = setTimeout(() => {
+        escapeTimer.current = null;
+        onBack();
+      }, 50);
+      return;
     } else if (key.tab) {
-      setFocusIndex((prev) => (prev + 1) % focusableCount);
-    } else if (focusIndex === 0) {
-      // Input is focused — MessageInput handles its own input (q is just a letter here)
-    } else if (focusIndex === unfocusedIndex) {
-      // Unfocused / scroll mode
+      // Tab cycles through: input → visible pending approvals → input
+      // Only considers approvals currently visible in the viewport
+      const ref = scrollRef.current;
+      const scrollOffset = ref?.getScrollOffset() ?? 0;
+      const visibleStart = scrollOffset;
+      const visibleEnd = scrollOffset + logHeight;
+      const visiblePending = pendingApprovalLines.filter(
+        (line) => line >= visibleStart && line < visibleEnd,
+      );
+
+      if (inputActive) {
+        if (visiblePending.length > 0) {
+          setInputActive(false);
+          setFocusedApprovalLine(visiblePending[0]);
+        } else {
+          setInputActive(false);
+          setFocusedApprovalLine(null);
+        }
+      } else if (focusedApprovalLine !== null) {
+        const currentIdx = visiblePending.indexOf(focusedApprovalLine);
+        const nextIdx = currentIdx + 1;
+        if (nextIdx < visiblePending.length) {
+          setFocusedApprovalLine(visiblePending[nextIdx]);
+        } else {
+          setInputActive(true);
+          setFocusedApprovalLine(null);
+        }
+      } else {
+        setInputActive(true);
+        setFocusedApprovalLine(null);
+      }
+    } else if (!inputActive) {
+      // Scroll mode / approval handling
       if (input === 'q' || input === 'Q') exit();
-    } else {
-      // Approval line is focused — y/n to respond
-      const approvalIdx = focusIndex - 1;
-      const approval = pendingApprovals[approvalIdx];
-      if (approval && (input === 'y' || input === 'Y')) {
-        sendApproval(taskId, approval.approvalType, true).catch((err: any) => setError(err.message));
-      } else if (approval && (input === 'n' || input === 'N')) {
-        sendApproval(taskId, approval.approvalType, false).catch((err: any) => setError(err.message));
+      if (focusedApproval && (input === 'y' || input === 'Y')) {
+        sendApproval(taskId, focusedApproval.approvalType, true).catch((err: any) => setError(err.message));
+        setFocusedApprovalLine(null);
+        setInputActive(true);
+      } else if (focusedApproval && (input === 'n' || input === 'N')) {
+        sendApproval(taskId, focusedApproval.approvalType, false).catch((err: any) => setError(err.message));
+        setFocusedApprovalLine(null);
+        setInputActive(true);
       }
     }
 
-    // Scroll with arrows (clamp to bottomOffset since scrollBy clamps to contentHeight)
+    // Cancel pending escape if arrow key follows (option+arrow sequence)
+    if (key.upArrow || key.downArrow) {
+      if (escapeTimer.current) {
+        clearTimeout(escapeTimer.current);
+        escapeTimer.current = null;
+      }
+    }
+
+    // Scroll with arrows (always available) — clear focused approval when scrolling
+    const scrollStep = key.meta ? 10 : 1;
     if (key.upArrow) {
-      scrollRef.current?.scrollBy(-1);
+      setFocusedApprovalLine(null);
+      const refUp = scrollRef.current;
+      if (refUp) {
+        const current = refUp.getScrollOffset();
+        refUp.scrollTo(Math.max(0, current - scrollStep));
+      }
     } else if (key.downArrow) {
-      const ref = scrollRef.current;
-      if (ref) {
-        const bottom = ref.getBottomOffset();
-        if (ref.getScrollOffset() < bottom) {
-          ref.scrollBy(1);
-        }
+      setFocusedApprovalLine(null);
+      const refDown = scrollRef.current;
+      if (refDown) {
+        const current = refDown.getScrollOffset();
+        const bottom = refDown.getBottomOffset();
+        refDown.scrollTo(Math.min(bottom, current + scrollStep));
       }
     }
   });
@@ -224,11 +299,7 @@ export function TaskDetail({ taskId, onBack, onEvent, onConnect }: TaskDetailPro
     );
   }
 
-  // Reserve lines: header(1) + agents(1) + margin(1) + indicator/gap(2) + input(1) + approvals(1 each)
-  const reservedLines = 6 + pendingApprovals.length;
-  const logHeight = Math.max(5, termHeight - reservedLines);
-
-  const inputActive = focusIndex === 0;
+  // logHeight computed above, near hooks
 
   return (
     <Box flexDirection="column" height={termHeight}>
@@ -245,10 +316,13 @@ export function TaskDetail({ taskId, onBack, onEvent, onConnect }: TaskDetailPro
       <Box paddingX={1} gap={2}>
         {agents.length > 0 ? (
           agents.map((a) => (
-            <Box key={a.agent}>
-              <Text color={a.active ? 'green' : 'gray'}>
-                {a.active ? '●' : '○'} {a.agent}
-              </Text>
+            <Box key={a.agent} gap={1}>
+              {a.active ? (
+                <Text color="green"><Spinner type="dots" /></Text>
+              ) : (
+                <Text color="gray">○</Text>
+              )}
+              <Text color={a.active ? 'green' : 'gray'}>{a.agent}</Text>
             </Box>
           ))
         ) : (
@@ -277,9 +351,12 @@ export function TaskDetail({ taskId, onBack, onEvent, onConnect }: TaskDetailPro
             }
           }}
         >
-          {logLines.map((line, i) => (
-            <Text key={i} wrap="wrap">{line}</Text>
-          ))}
+          {logLines.map((line, i) => {
+            const isFocused = i === focusedApprovalLine;
+            return (
+              <Text key={i} wrap="wrap" inverse={isFocused}>{line.node}</Text>
+            );
+          })}
         </ScrollView>
       )}
       <Box paddingX={1} height={2} flexDirection="column" justifyContent="flex-end">
@@ -287,22 +364,6 @@ export function TaskDetail({ taskId, onBack, onEvent, onConnect }: TaskDetailPro
           <Text dimColor>↓ {linesBelow} more below</Text>
         )}
       </Box>
-
-      {/* Inline approval lines */}
-      {pendingApprovals.map((approval, i) => {
-        const focused = focusIndex === i + 1;
-        return (
-          <Box key={approval.timestamp} paddingX={1}>
-            <Text
-              bold={focused}
-              inverse={focused}
-              color="yellow"
-            >
-              ⏳ {approval.text}  [y] approve / [n] deny
-            </Text>
-          </Box>
-        );
-      })}
 
       {/* Message input */}
       <Box paddingX={1}>

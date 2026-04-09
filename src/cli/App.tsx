@@ -48,11 +48,20 @@ export function App() {
     return () => disconnect();
   }, [view, selectedTaskId, refresh]);
 
+  const lastEscRef = useRef<number>(0);
+
   useInput((input, key) => {
     if (view === 'create') return; // create view captures input
     if (view === 'detail') return; // detail view handles its own navigation (esc to go back)
     if (input === 'q' || input === 'Q') {
       exit();
+    }
+    if (key.escape && view === 'list') {
+      const now = Date.now();
+      if (now - lastEscRef.current < 500) {
+        exit();
+      }
+      lastEscRef.current = now;
     }
   });
 
@@ -66,6 +75,7 @@ export function App() {
     setSelectedTaskId(null);
     setLastEvent(null);
     setView('list');
+    refresh();
   };
 
   const handleStartCreate = () => {
@@ -96,13 +106,14 @@ export function App() {
 
       {/* Main content */}
       <Box flexDirection="column" flexGrow={1}>
-        {view === 'list' && (
+        <Box flexDirection="column" height={view === 'list' ? undefined : 0} overflow="hidden" flexGrow={view === 'list' ? 1 : 0}>
           <TaskList
             onSelect={handleSelectTask}
             onCreate={handleStartCreate}
             refreshTrigger={refreshTrigger}
+            active={view === 'list'}
           />
-        )}
+        </Box>
         {view === 'detail' && selectedTaskId && (
           <TaskDetail
             taskId={selectedTaskId}
