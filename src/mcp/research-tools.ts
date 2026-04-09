@@ -198,7 +198,7 @@ function getBedrockGuardrail(): { client: BedrockRuntimeClient; id: string; vers
 
   if (!bedrockClient) {
     bedrockClient = new BedrockRuntimeClient({
-      region: process.env.AWS_REGION || 'us-east-1',
+      ...(process.env.AWS_REGION && { region: process.env.AWS_REGION }),
     });
   }
 
