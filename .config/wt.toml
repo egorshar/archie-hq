@@ -1,0 +1,9 @@
+# Assign a unique PORT per worktree to avoid Docker port conflicts
+[post-create]
+env-port = """
+if [ -f .env ] && grep -q '^PORT=' .env; then
+    sed -i.bak 's/^PORT=.*/PORT={{ branch | hash_port }}/' .env && rm -f .env.bak
+else
+    echo 'PORT={{ branch | hash_port }}' >> .env
+fi
+"""
