@@ -136,6 +136,14 @@ export async function spawnAgent(agent: Agent, task: Task): Promise<void> {
   // false idle detection — recovery fires at 3s, MCP connections can take longer
   task.updateAgentState(def.id, true);
 
+  // ---- SDK config/tmp dirs (agent reads tool-results from here) ----
+
+  const claudeBaseDir = join(getTaskPath(taskId), 'claude', def.key);
+  const claudeConfigDir = join(claudeBaseDir, 'session');
+  const claudeTmpDir = join(claudeBaseDir, 'tmp');
+  await mkdir(claudeConfigDir, { recursive: true });
+  await mkdir(claudeTmpDir, { recursive: true });
+
   // ---- Build track-specific config ----
 
   let systemPrompt: string;
@@ -203,7 +211,7 @@ Shared folder: ${sharedPath} [READ-ONLY]
       cwd: pmWorkspace,
       denyReadPaths: [WORKDIR],
       allowReadPaths: [
-        pmWorkspace, sharedPath,
+        pmWorkspace, sharedPath, claudeBaseDir,
         ...(def.pluginPath ? [def.pluginPath] : []),
         ...(def.pluginDataPath ? [def.pluginDataPath] : []),
       ],
@@ -366,7 +374,7 @@ Shared folder: ${sharedPath} [READ-ONLY]
       sandboxOpts = {
         cwd,
         denyReadPaths: [WORKDIR],
-        allowReadPaths: [repoWorkspace, repoPath, ...readOnlyPaths],
+        allowReadPaths: [repoWorkspace, repoPath, claudeBaseDir, ...readOnlyPaths],
         allowWritePaths: [repoWorkspace, repoPath],
         denyWritePaths: [...readOnlyPaths, ...denyWriteProtected],
       };
@@ -374,7 +382,7 @@ Shared folder: ${sharedPath} [READ-ONLY]
       sandboxOpts = {
         cwd,
         denyReadPaths: [WORKDIR],
-        allowReadPaths: [repoWorkspace, repoPath, ...readOnlyPaths],
+        allowReadPaths: [repoWorkspace, repoPath, claudeBaseDir, ...readOnlyPaths],
         allowWritePaths: [repoWorkspace],
         denyWritePaths: [repoPath, ...readOnlyPaths],
       };
@@ -425,7 +433,7 @@ Shared folder: ${sharedPath} [READ-ONLY]
       cwd: agentWorkspace,
       denyReadPaths: [WORKDIR],
       allowReadPaths: [
-        agentWorkspace, sharedPath,
+        agentWorkspace, sharedPath, claudeBaseDir,
         ...(def.pluginPath ? [def.pluginPath] : []),
         ...(def.pluginDataPath ? [def.pluginDataPath] : []),
       ],
@@ -456,6 +464,8 @@ Shared folder: ${sharedPath} [READ-ONLY]
       ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
       PATH: process.env.PATH,
       CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
+      CLAUDE_CONFIG_DIR: claudeConfigDir,
+      CLAUDE_CODE_TMPDIR: claudeTmpDir,
     },
     resume: sessionId,
     maxTurns: 100,
