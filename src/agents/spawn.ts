@@ -141,11 +141,13 @@ export async function spawnAgent(agent: Agent, task: Task): Promise<void> {
   // on disk — skip to avoid breaking their sandbox config during transition.
 
   const claudeBaseDir = join(getTaskPath(taskId), 'claude', def.key);
+  const claudeConfigDir = join(claudeBaseDir, 'session');
+  const claudeTmpDir = join(claudeBaseDir, 'tmp');
   const hasClaudeDirs = existsSync(claudeBaseDir);
   if (!agent.session.session_id) {
     // Fresh spawn — create dirs
-    await mkdir(join(claudeBaseDir, 'session'), { recursive: true });
-    await mkdir(join(claudeBaseDir, 'tmp'), { recursive: true });
+    await mkdir(claudeConfigDir, { recursive: true });
+    await mkdir(claudeTmpDir, { recursive: true });
   }
   const useClaudeDirs = hasClaudeDirs || !agent.session.session_id;
 
@@ -216,11 +218,11 @@ Shared folder: ${sharedPath} [READ-ONLY]
       cwd: pmWorkspace,
       denyReadPaths: [WORKDIR],
       allowReadPaths: [
-        pmWorkspace, sharedPath, ...(useClaudeDirs ? [claudeBaseDir] : []),
+        pmWorkspace, sharedPath, ...(useClaudeDirs ? [claudeConfigDir, claudeTmpDir] : []),
         ...(def.pluginPath ? [def.pluginPath] : []),
         ...(def.pluginDataPath ? [def.pluginDataPath] : []),
       ],
-      allowWritePaths: [pmWorkspace],
+      allowWritePaths: [pmWorkspace, ...(useClaudeDirs ? [claudeTmpDir] : [])],
       denyWritePaths: [
         sharedPath,
         ...(def.pluginPath ? [def.pluginPath] : []),
@@ -379,16 +381,16 @@ Shared folder: ${sharedPath} [READ-ONLY]
       sandboxOpts = {
         cwd,
         denyReadPaths: [WORKDIR],
-        allowReadPaths: [repoWorkspace, repoPath, ...(useClaudeDirs ? [claudeBaseDir] : []), ...readOnlyPaths],
-        allowWritePaths: [repoWorkspace, repoPath],
+        allowReadPaths: [repoWorkspace, repoPath, ...(useClaudeDirs ? [claudeConfigDir, claudeTmpDir] : []), ...readOnlyPaths],
+        allowWritePaths: [repoWorkspace, repoPath, ...(useClaudeDirs ? [claudeTmpDir] : [])],
         denyWritePaths: [...readOnlyPaths, ...denyWriteProtected],
       };
     } else {
       sandboxOpts = {
         cwd,
         denyReadPaths: [WORKDIR],
-        allowReadPaths: [repoWorkspace, repoPath, ...(useClaudeDirs ? [claudeBaseDir] : []), ...readOnlyPaths],
-        allowWritePaths: [repoWorkspace],
+        allowReadPaths: [repoWorkspace, repoPath, ...(useClaudeDirs ? [claudeConfigDir, claudeTmpDir] : []), ...readOnlyPaths],
+        allowWritePaths: [repoWorkspace, ...(useClaudeDirs ? [claudeTmpDir] : [])],
         denyWritePaths: [repoPath, ...readOnlyPaths],
       };
     }
@@ -438,11 +440,11 @@ Shared folder: ${sharedPath} [READ-ONLY]
       cwd: agentWorkspace,
       denyReadPaths: [WORKDIR],
       allowReadPaths: [
-        agentWorkspace, sharedPath, ...(useClaudeDirs ? [claudeBaseDir] : []),
+        agentWorkspace, sharedPath, ...(useClaudeDirs ? [claudeConfigDir, claudeTmpDir] : []),
         ...(def.pluginPath ? [def.pluginPath] : []),
         ...(def.pluginDataPath ? [def.pluginDataPath] : []),
       ],
-      allowWritePaths: [agentWorkspace],
+      allowWritePaths: [agentWorkspace, ...(useClaudeDirs ? [claudeTmpDir] : [])],
       denyWritePaths: [
         sharedPath,
         ...(def.pluginPath ? [def.pluginPath] : []),
@@ -470,8 +472,8 @@ Shared folder: ${sharedPath} [READ-ONLY]
       PATH: process.env.PATH,
       CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
       ...(useClaudeDirs ? {
-        CLAUDE_CONFIG_DIR: join(claudeBaseDir, 'session'),
-        CLAUDE_CODE_TMPDIR: join(claudeBaseDir, 'tmp'),
+        CLAUDE_CONFIG_DIR: claudeConfigDir,
+        CLAUDE_CODE_TMPDIR: claudeTmpDir,
       } : {}),
     },
     resume: sessionId,
