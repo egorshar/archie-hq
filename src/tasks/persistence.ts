@@ -267,18 +267,18 @@ export async function appendAgentMessage(
  * Accepts a structured payload matching the Slack/CLI shape so the CLI can
  * render GitHub events uniformly: `[from in destination] @pm-agent message`.
  *
- * @param repoKey - Repository identifier (e.g., 'backend', 'mobile') for multi-repo tasks
+ * @param githubRepo - Full "owner/repo" identifier (e.g., 'sweatco/sweatcoin-mobile')
  * @param event - Structured event with author, destination (e.g. "PR #42"), and clean message body
  */
 export async function appendGitHubEvent(
   taskId: string,
-  repoKey: string,
+  githubRepo: string,
   event: { from: string; destination: string; message: string }
 ): Promise<void> {
-  const destination = `${repoKey}/${event.destination}`;
+  const destination = `github:${githubRepo}/${event.destination}`;
   const entry: LogEntry = {
     timestamp: new Date().toISOString(),
-    source: `@<${event.from}> in github:${destination}`,
+    source: `@<${event.from}> in ${destination}`,
     message: event.message,
   };
 
@@ -286,7 +286,7 @@ export async function appendGitHubEvent(
   emitEvent('message', taskId, {
     from: event.from,
     to: 'pm-agent',
-    destination: `github:${destination}`,
+    destination,
     message: event.message,
   });
 }

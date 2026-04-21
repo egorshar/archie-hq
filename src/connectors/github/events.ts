@@ -140,6 +140,6 @@ async function handleExistingTaskDirect(
     task.debouncedSave();
   }
 
-  await appendGitHubEvent(taskId, repoKey, formatGitHubEvent(context));
+  await appendGitHubEvent(taskId, context.githubRepo, formatGitHubEvent(context));
   await task.sendMessage(AGENT_PROMPTS.existingTask, 'pm-agent');
 }
