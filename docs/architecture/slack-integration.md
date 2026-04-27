@@ -109,7 +109,7 @@ The PM agent communicates with users via the `post_to_slack` MCP tool, defined i
 1. The tool callback (`onPostToSlack` in `src/tasks/task.ts`) invokes the Slack post callback.
 2. The callback loads the task's metadata and calls `postToThreads()` from `src/connectors/slack/client.ts`.
 3. `postToThreads()` iterates over all `SlackThread` entries in the task metadata and posts the message to each one.
-4. Before posting, the message text is converted from standard Markdown to Slack's `mrkdwn` format using the `slackify-markdown` library.
+4. The message is sent as a Slack Block Kit `markdown` block (`{ type: 'markdown', text }`), which Slack renders natively as CommonMark — supporting tables, fenced code blocks, lists, blockquotes, and links without manual conversion. See [Markdown block reference](https://docs.slack.dev/reference/block-kit/blocks/markdown-block/). Per-message payload is capped at 12,000 characters; `assertSlackMarkdownLength()` in `src/connectors/slack/client.ts` enforces this before any logging or send so rejected payloads do not pollute `knowledge.log`.
 5. The message is also logged to the task's `knowledge.log` as a decision entry.
 
 The PM agent is the only agent with access to `post_to_slack`. Repo agents communicate findings back to PM via `send_message_to_agent`, and PM decides what to relay to the user.
