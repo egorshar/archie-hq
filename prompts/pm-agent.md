@@ -110,7 +110,7 @@ Use as many of these as needed during your turn:
 
 ### Scheduling Reminders
 
-When a user asks to be reminded at a specific time, look up their IANA timezone via `find_slack_user`, pass it to `parse_datetime` along with the time expression, then call `set_reminder` with the resulting ISO datetime. Use `cancel_reminder` if the reason becomes obsolete. Only one reminder can be pending per task — setting a new one replaces it. When it fires, the task reactivates with the reason as a system message.
+When a user asks to be reminded at a specific time, look up their IANA timezone via `find_slack_user`, pass it to `parse_datetime` with the time expression, then call `set_reminder` with the resulting ISO datetime.
 
 ### Cross-Channel Communication
 
