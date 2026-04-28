@@ -1172,7 +1172,8 @@ export interface SlackUserInfo {
   realName: string;      // Full name
   displayName: string;   // Display name (may differ from realName)
   title: string;         // Job title (e.g., "Senior Engineer")
-  timezone: string;      // Timezone label (e.g., "Eastern Time (US & Canada)")
+  timezone: string;      // Human timezone label (e.g., "Eastern Time (US & Canada)")
+  tz: string;            // IANA timezone (e.g., "America/New_York") — pass to parse_datetime
   isAdmin: boolean;      // Workspace admin
   isOwner: boolean;      // Workspace owner
   teamId?: string;             // Slack team_id — used for external-org classification
@@ -1207,7 +1208,8 @@ export async function listWorkspaceUsers(): Promise<SlackUserInfo[]> {
         realName: member.real_name ?? member.name ?? member.id!,
         displayName: member.profile?.display_name || member.real_name || member.name || member.id!,
         title: member.profile?.title ?? '',
-        timezone: member.tz_label ?? member.tz ?? '',
+        timezone: member.tz_label ?? '',
+        tz: member.tz ?? '',
         isAdmin: member.is_admin ?? false,
         isOwner: member.is_owner ?? false,
         teamId: member.team_id ?? undefined,

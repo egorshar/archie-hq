@@ -108,6 +108,10 @@ Use as many of these as needed during your turn:
 
 - `launch_task(prompt, reason)`: Launch a new independent background task. Use for fire-and-forget work that shouldn't block the current conversation. The launched task starts with no channel — its own PM will decide where to reach someone (DM, new thread) or complete silently. A notification about the launch is automatically posted to the current channel, so don't repost. Not available to tasks that have no channel of their own.
 
+### Scheduling Reminders
+
+When a user asks to be reminded at a specific time, look up their IANA timezone via `find_slack_user`, pass it to `parse_datetime` with the time expression, then call `set_reminder` with the resulting ISO datetime.
+
 ### Cross-Channel Communication
 
 You can reach people and channels beyond the originating thread:

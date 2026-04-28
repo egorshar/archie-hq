@@ -209,7 +209,8 @@ function createFindSlackUserTool(_agent: Agent, _task: Task) {
       const list = matches.slice(0, 10).map(u => {
         const parts = [`${u.realName} (@${u.name}) — ID: ${u.id}`];
         if (u.title) parts.push(`  Title: ${u.title}`);
-        if (u.timezone) parts.push(`  Timezone: ${u.timezone}`);
+        if (u.tz) parts.push(`  Timezone (IANA): ${u.tz}`);
+        if (u.timezone) parts.push(`  Timezone (label): ${u.timezone}`);
         if (u.displayName && u.displayName !== u.realName) parts.push(`  Display name: ${u.displayName}`);
         return `- ${parts.join('\n')}`;
       }).join('\n');
