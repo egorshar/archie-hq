@@ -209,7 +209,11 @@ function createFindSlackUserTool(_agent: Agent, _task: Task) {
       const list = matches.slice(0, 10).map(u => {
         const parts = [`${u.realName} (@${u.name}) — ID: ${u.id}`];
         if (u.title) parts.push(`  Title: ${u.title}`);
-        if (u.timezone) parts.push(`  Timezone: ${u.timezone}`);
+        if (u.tz || u.timezone) {
+          const iana = u.tz || '(unknown IANA)';
+          const label = u.timezone ? ` (${u.timezone})` : '';
+          parts.push(`  Timezone: ${iana}${label}  ← pass the IANA value to parse_datetime`);
+        }
         if (u.displayName && u.displayName !== u.realName) parts.push(`  Display name: ${u.displayName}`);
         return `- ${parts.join('\n')}`;
       }).join('\n');
