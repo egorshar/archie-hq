@@ -46,7 +46,10 @@ export async function applyOAuthBindings(
       // Only set if the .mcp.json author hasn't already supplied a token.
       // (Hand-managed creds win — operator intent is explicit.)
       if (!('Authorization' in existingHeaders) && !('authorization' in existingHeaders)) {
-        config.headers = { ...existingHeaders, Authorization: `${token.tokenType} ${token.accessToken}` };
+        // RFC 6750 says scheme is case-insensitive, but real-world servers
+        // (Notion, etc.) strict-match — normalize "bearer" to "Bearer".
+        const scheme = /^bearer$/i.test(token.tokenType) ? 'Bearer' : token.tokenType;
+        config.headers = { ...existingHeaders, Authorization: `${scheme} ${token.accessToken}` };
       }
       injected.push(name);
     } catch (err) {
