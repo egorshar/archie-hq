@@ -16,7 +16,10 @@ The vault and connect flow are deliberately **provider-agnostic**:
   OAuth server is `npm run oauth:connect <name>` and nothing else.
 - Discovery follows the MCP authorization spec: RFC 9728 protected-resource
   metadata + RFC 8414 authorization-server metadata + RFC 7591 Dynamic
-  Client Registration + OAuth 2.1 / PKCE.
+  Client Registration + OAuth 2.1 / PKCE. We use
+  [`oauth4webapi`](https://github.com/panva/oauth4webapi) for the
+  protocol-level work; everything else (vault, storage, inject, CLI) is
+  custom.
 
 ## Storage layout
 

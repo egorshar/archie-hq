@@ -1,15 +1,13 @@
 /**
- * RFC 7591 Dynamic Client Registration.
+ * RFC 7591 Dynamic Client Registration via `oauth4webapi`.
  *
- * Issues a POST against the authorization server's registration_endpoint
- * announcing the redirect URI we'll use, and returns the credentials the
- * server hands back. If the server returns 4xx for non-DCR reasons (no
- * support, manual approval required, etc.), the caller is expected to
- * surface a clear error and offer the manual `--client-id`/`--client-secret`
- * fallback.
+ * Announces our redirect URI to the authorization server and returns
+ * the credentials it issues. If the server returns 4xx (no support,
+ * manual approval required, etc.) the caller surfaces a clear error
+ * and offers the manual `--client-id`/`--client-secret` fallback.
  */
 
-import type { RegisteredClient } from './types.js';
+import * as oauth from 'oauth4webapi';
 
 export interface DcrRequest {
   redirectUri: string;
@@ -17,15 +15,24 @@ export interface DcrRequest {
   clientName?: string;
   /** Scope string (space-separated) or omitted to let the server choose. */
   scope?: string;
-  /** Optional homepage URL. */
-  clientUri?: string;
+}
+
+export interface RegisteredClient {
+  client_id: string;
+  client_secret?: string;
 }
 
 export async function registerClient(
-  registrationEndpoint: string,
+  as: oauth.AuthorizationServer,
   req: DcrRequest,
 ): Promise<RegisteredClient> {
-  const body: Record<string, unknown> = {
+  if (!as.registration_endpoint) {
+    throw new Error(
+      `Authorization server "${as.issuer}" does not advertise a registration_endpoint`,
+    );
+  }
+
+  const metadata: Record<string, unknown> = {
     redirect_uris: [req.redirectUri],
     client_name: req.clientName ?? 'archie-hq',
     grant_types: ['authorization_code', 'refresh_token'],
@@ -33,44 +40,13 @@ export async function registerClient(
     token_endpoint_auth_method: 'client_secret_post',
     application_type: 'web',
   };
-  if (req.scope) body.scope = req.scope;
-  if (req.clientUri) body.client_uri = req.clientUri;
+  if (req.scope) metadata.scope = req.scope;
 
-  const res = await fetch(registrationEndpoint, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Accept: 'application/json',
-    },
-    body: JSON.stringify(body),
-  });
-
-  if (!res.ok) {
-    let detail = `HTTP ${res.status}`;
-    try {
-      const errBody = await res.text();
-      if (errBody) detail += `: ${errBody.slice(0, 500)}`;
-    } catch {}
-    throw new Error(`Dynamic Client Registration failed at ${registrationEndpoint}: ${detail}`);
-  }
-
-  const raw = (await res.json()) as Record<string, unknown>;
-  if (typeof raw.client_id !== 'string') {
-    throw new Error(`DCR response from ${registrationEndpoint} is missing client_id`);
-  }
+  const res = await oauth.dynamicClientRegistrationRequest(as, metadata as any);
+  const registered = await oauth.processDynamicClientRegistrationResponse(res);
 
   return {
-    client_id: raw.client_id,
-    client_secret: typeof raw.client_secret === 'string' ? raw.client_secret : undefined,
-    client_secret_expires_at: typeof raw.client_secret_expires_at === 'number'
-      ? raw.client_secret_expires_at
-      : undefined,
-    registration_client_uri: typeof raw.registration_client_uri === 'string'
-      ? raw.registration_client_uri
-      : undefined,
-    registration_access_token: typeof raw.registration_access_token === 'string'
-      ? raw.registration_access_token
-      : undefined,
-    raw,
+    client_id: registered.client_id,
+    client_secret: typeof registered.client_secret === 'string' ? registered.client_secret : undefined,
   };
 }

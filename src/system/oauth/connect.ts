@@ -9,6 +9,7 @@
 
 import { join } from 'path';
 import { readFileSync, existsSync } from 'fs';
+import * as oauth from 'oauth4webapi';
 import { PLUGINS_DIR } from '../workdir.js';
 import { logger } from '../logger.js';
 import {
@@ -19,7 +20,6 @@ import {
 import { registerClient } from './dcr.js';
 import { generatePkcePair, generateState, buildAuthorizeUrl } from './flow.js';
 import { writePendingRecord } from './storage.js';
-import type { AuthServerMetadata } from './types.js';
 
 export interface ConnectInput {
   serverName: string;
@@ -37,13 +37,12 @@ export interface ConnectResult {
   authorizeUrl: string;
   state: string;
   scopes: string[];
-  authServer: AuthServerMetadata;
+  authServer: oauth.AuthorizationServer;
 }
 
 /**
  * Looks up the MCP server's URL in the root .mcp.json (the same file
- * the rest of Archie reads). Returns the URL or throws if the server
- * isn't found / isn't an HTTP/SSE transport.
+ * the rest of Archie reads).
  */
 export function readMcpServerUrl(serverName: string): string {
   const path = join(PLUGINS_DIR, '.mcp.json');
@@ -51,8 +50,6 @@ export function readMcpServerUrl(serverName: string): string {
     throw new Error(`Plugins .mcp.json not found at ${path}`);
   }
   const raw = readFileSync(path, 'utf-8');
-  // Substitute env vars exactly as the runtime loader does, so URLs
-  // built with `${MCP_*}` placeholders still resolve.
   const substituted = raw.replace(/\$\{(MCP_[A-Z0-9_]+)\}/g, (_, name) => process.env[name] ?? '');
   const parsed = JSON.parse(substituted) as { mcpServers?: Record<string, { type?: string; url?: string }> };
   const entry = parsed.mcpServers?.[serverName];
@@ -83,7 +80,7 @@ export async function beginConnect(input: ConnectInput): Promise<ConnectResult> 
     );
   }
   logger.system(`OAuth connect "${serverName}": fetching resource metadata from ${resourceMetadataUrl}`);
-  const resource = await fetchProtectedResourceMetadata(resourceMetadataUrl);
+  const resource = await fetchProtectedResourceMetadata(resourceMetadataUrl, serverUrl);
 
   const authServerUrl = resource.authorization_servers?.[0];
   if (!authServerUrl) {
@@ -105,7 +102,7 @@ export async function beginConnect(input: ConnectInput): Promise<ConnectResult> 
       );
     }
     logger.system(`OAuth connect "${serverName}": registering dynamic client`);
-    const registered = await registerClient(authServer.registration_endpoint, {
+    const registered = await registerClient(authServer, {
       redirectUri,
       clientName: input.clientName ?? `archie-hq (${serverName})`,
       scope: resource.scopes_supported?.join(' '),
@@ -114,15 +111,23 @@ export async function beginConnect(input: ConnectInput): Promise<ConnectResult> 
     clientSecret = registered.client_secret;
   }
 
-  // Confirm the server supports S256 PKCE if it advertises a list at all.
-  if (authServer.code_challenge_methods_supported &&
-      !authServer.code_challenge_methods_supported.includes('S256')) {
+  // The MCP spec mandates S256 PKCE. If the server advertises supported
+  // methods at all, refuse to proceed unless S256 is in the list.
+  if (
+    authServer.code_challenge_methods_supported &&
+    !authServer.code_challenge_methods_supported.includes('S256')
+  ) {
     throw new Error(
       `Authorization server at ${authServer.issuer} does not advertise S256 PKCE — refusing to use plaintext`,
     );
   }
+  if (!authServer.authorization_endpoint || !authServer.token_endpoint) {
+    throw new Error(
+      `Authorization server at ${authServer.issuer} is missing required endpoints`,
+    );
+  }
 
-  const pkce = generatePkcePair();
+  const pkce = await generatePkcePair();
   const state = generateState();
   const scopes = resource.scopes_supported ?? [];
 
@@ -141,6 +146,7 @@ export async function beginConnect(input: ConnectInput): Promise<ConnectResult> 
       state,
       server_name: serverName,
       label: input.label,
+      issuer: authServer.issuer,
       token_endpoint: authServer.token_endpoint,
       authorization_endpoint: authServer.authorization_endpoint,
       scopes,

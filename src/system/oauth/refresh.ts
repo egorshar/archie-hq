@@ -5,7 +5,7 @@
  */
 
 import { withKeyMutex } from '../secrets-vault.js';
-import { refreshAccessToken } from './flow.js';
+import { refreshAccessToken, clientAuthFor } from './flow.js';
 import {
   readOAuthRecord,
   readOAuthSealed,
@@ -37,10 +37,8 @@ export class OAuthRefreshError extends Error {
 
 /**
  * Read the vault record, refresh if near expiry, and return a live
- * access token.
- *
- * Writes back the rotated record atomically. Concurrent callers for
- * the same server name share one refresh.
+ * access token. Writes back the rotated record atomically. Concurrent
+ * callers for the same server name share one refresh.
  */
 export async function ensureFreshToken(serverName: string, now = Date.now()): Promise<FreshToken> {
   return withKeyMutex(`oauth:${serverName}`, async () => {
@@ -65,11 +63,10 @@ export async function ensureFreshToken(serverName: string, now = Date.now()): Pr
     let response;
     try {
       response = await refreshAccessToken({
-        tokenEndpoint: record.token_endpoint,
+        as: { issuer: record.issuer, token_endpoint: record.token_endpoint },
+        client: { client_id: sealed.client_id },
+        clientAuth: clientAuthFor(sealed.client_secret),
         refreshToken: sealed.refresh_token,
-        clientId: sealed.client_id,
-        clientSecret: sealed.client_secret,
-        scope: record.scopes.length ? record.scopes.join(' ') : undefined,
       });
     } catch (err) {
       throw new OAuthRefreshError(serverName, err);
@@ -77,13 +74,13 @@ export async function ensureFreshToken(serverName: string, now = Date.now()): Pr
 
     const refreshedSealed: OAuthSealed = {
       access_token: response.access_token,
-      refresh_token: response.refresh_token ?? sealed.refresh_token,
+      refresh_token: typeof response.refresh_token === 'string' ? response.refresh_token : sealed.refresh_token,
       client_id: sealed.client_id,
       client_secret: sealed.client_secret,
       token_type: response.token_type,
     };
 
-    const expiresAt = response.expires_in
+    const expiresAt = typeof response.expires_in === 'number'
       ? nowSec + response.expires_in
       : record.expires_at; // unknown lifetime — leave as-is so we re-try next time
 
@@ -92,8 +89,6 @@ export async function ensureFreshToken(serverName: string, now = Date.now()): Pr
         ...record,
         updated_at: nowSec,
         expires_at: expiresAt,
-        token_endpoint: record.token_endpoint,
-        scopes: record.scopes,
       },
       refreshedSealed,
     );

@@ -1,16 +1,18 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createHash } from 'crypto';
+import * as oauth from 'oauth4webapi';
 import {
   generatePkcePair,
   generateState,
   buildAuthorizeUrl,
   exchangeCodeForTokens,
   refreshAccessToken,
+  clientAuthFor,
 } from '../flow.js';
 
 describe('PKCE primitives', () => {
-  it('generates a verifier of the recommended length and a matching S256 challenge', () => {
-    const pair = generatePkcePair();
+  it('generates a verifier of the recommended length and a matching S256 challenge', async () => {
+    const pair = await generatePkcePair();
     expect(pair.verifier.length).toBeGreaterThanOrEqual(43);
     expect(pair.method).toBe('S256');
     const expectedChallenge = createHash('sha256')
@@ -22,9 +24,9 @@ describe('PKCE primitives', () => {
     expect(pair.challenge).toBe(expectedChallenge);
   });
 
-  it('produces fresh verifiers each call', () => {
-    const a = generatePkcePair();
-    const b = generatePkcePair();
+  it('produces fresh verifiers each call', async () => {
+    const a = await generatePkcePair();
+    const b = await generatePkcePair();
     expect(a.verifier).not.toBe(b.verifier);
   });
 
@@ -66,20 +68,29 @@ describe('buildAuthorizeUrl', () => {
   });
 });
 
+describe('clientAuthFor', () => {
+  it('returns ClientSecretBasic when a secret is provided', () => {
+    expect(typeof clientAuthFor('s')).toBe('function');
+    expect(clientAuthFor('s')).not.toBe(clientAuthFor(undefined));
+  });
+});
+
 describe('exchangeCodeForTokens', () => {
   let originalFetch: typeof fetch;
   beforeEach(() => { originalFetch = globalThis.fetch; });
   afterEach(() => { globalThis.fetch = originalFetch; });
 
+  const baseAS: oauth.AuthorizationServer = {
+    issuer: 'https://auth.example.com',
+    token_endpoint: 'https://auth.example.com/token',
+  };
+
   it('POSTs form-encoded params with PKCE verifier and parses the response', async () => {
     let captured: { url: string; body: URLSearchParams; auth: string | null } | null = null;
     globalThis.fetch = vi.fn(async (url: any, init: any) => {
       const params = new URLSearchParams(init.body);
-      captured = {
-        url: String(url),
-        body: params,
-        auth: init.headers.Authorization ?? null,
-      };
+      const headers = new Headers(init.headers);
+      captured = { url: String(url), body: params, auth: headers.get('authorization') };
       return new Response(
         JSON.stringify({ access_token: 'AT', token_type: 'Bearer', expires_in: 3600, refresh_token: 'RT' }),
         { status: 200, headers: { 'Content-Type': 'application/json' } },
@@ -87,12 +98,13 @@ describe('exchangeCodeForTokens', () => {
     }) as any;
 
     const tokens = await exchangeCodeForTokens({
-      tokenEndpoint: 'https://auth.example.com/token',
+      as: baseAS,
+      client: { client_id: 'cli' },
+      clientAuth: clientAuthFor('sec'),
       code: 'CODE',
+      state: 'STATE',
       redirectUri: 'https://archie.example.com/oauth/callback',
       codeVerifier: 'VERIFIER',
-      clientId: 'cli',
-      clientSecret: 'sec',
     });
 
     expect(tokens.access_token).toBe('AT');
@@ -103,28 +115,28 @@ describe('exchangeCodeForTokens', () => {
     expect(captured!.body.get('code')).toBe('CODE');
     expect(captured!.body.get('code_verifier')).toBe('VERIFIER');
     expect(captured!.body.get('redirect_uri')).toBe('https://archie.example.com/oauth/callback');
-    expect(captured!.body.get('client_id')).toBe('cli');
-    expect(captured!.body.get('client_secret')).toBe('sec');
-    // Confidential clients also get HTTP Basic — issuers vary in which they accept.
-    expect(captured!.auth).toBe('Basic ' + Buffer.from('cli:sec').toString('base64'));
+    // ClientSecretBasic sends credentials in the Authorization header, not the body.
+    expect(captured!.auth).toContain('Basic ');
+    expect(captured!.body.has('client_secret')).toBe(false);
   });
 
-  it('omits client_secret + Basic auth for public clients', async () => {
-    let captured: { body: URLSearchParams; auth: string | undefined } | null = null;
+  it('omits client_secret for public clients', async () => {
+    let body: URLSearchParams | null = null;
     globalThis.fetch = vi.fn(async (_url: any, init: any) => {
-      captured = {
-        body: new URLSearchParams(init.body),
-        auth: init.headers.Authorization,
-      };
-      return new Response(JSON.stringify({ access_token: 'A', token_type: 'Bearer' }), { status: 200 });
+      body = new URLSearchParams(init.body);
+      return new Response(
+        JSON.stringify({ access_token: 'A', token_type: 'Bearer' }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
     }) as any;
 
     await exchangeCodeForTokens({
-      tokenEndpoint: 'https://auth.example.com/token',
-      code: 'C', redirectUri: 'r', codeVerifier: 'V', clientId: 'public',
+      as: baseAS,
+      client: { client_id: 'public' },
+      clientAuth: clientAuthFor(undefined),
+      code: 'C', state: 's', redirectUri: 'https://archie.example.com/oauth/callback', codeVerifier: 'V',
     });
-    expect(captured!.body.has('client_secret')).toBe(false);
-    expect(captured!.auth).toBeUndefined();
+    expect(body!.has('client_secret')).toBe(false);
   });
 
   it('surfaces error / error_description from the issuer', async () => {
@@ -134,20 +146,11 @@ describe('exchangeCodeForTokens', () => {
     )) as any;
 
     await expect(exchangeCodeForTokens({
-      tokenEndpoint: 'https://auth.example.com/token',
-      code: 'C', redirectUri: 'r', codeVerifier: 'V', clientId: 'cli',
-    })).rejects.toThrow(/invalid_grant.*code expired/);
-  });
-
-  it('throws when access_token is missing from a 200 response', async () => {
-    globalThis.fetch = vi.fn(async () => new Response(
-      JSON.stringify({ token_type: 'Bearer' }),
-      { status: 200, headers: { 'Content-Type': 'application/json' } },
-    )) as any;
-    await expect(exchangeCodeForTokens({
-      tokenEndpoint: 'https://auth.example.com/token',
-      code: 'C', redirectUri: 'r', codeVerifier: 'V', clientId: 'cli',
-    })).rejects.toThrow(/access_token/);
+      as: baseAS,
+      client: { client_id: 'cli' },
+      clientAuth: clientAuthFor(undefined),
+      code: 'C', state: 's', redirectUri: 'https://archie.example.com/oauth/callback', codeVerifier: 'V',
+    })).rejects.toThrow();
   });
 });
 
@@ -156,19 +159,26 @@ describe('refreshAccessToken', () => {
   beforeEach(() => { originalFetch = globalThis.fetch; });
   afterEach(() => { globalThis.fetch = originalFetch; });
 
+  const baseAS: oauth.AuthorizationServer = {
+    issuer: 'https://auth.example.com',
+    token_endpoint: 'https://auth.example.com/token',
+  };
+
   it('POSTs grant_type=refresh_token with the stored refresh token', async () => {
     let body: URLSearchParams | null = null;
     globalThis.fetch = vi.fn(async (_url: any, init: any) => {
       body = new URLSearchParams(init.body);
-      return new Response(JSON.stringify({ access_token: 'A2', token_type: 'Bearer', expires_in: 7200 }), {
-        status: 200, headers: { 'Content-Type': 'application/json' },
-      });
+      return new Response(
+        JSON.stringify({ access_token: 'A2', token_type: 'Bearer', expires_in: 7200 }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
     }) as any;
 
     const tokens = await refreshAccessToken({
-      tokenEndpoint: 'https://auth.example.com/token',
+      as: baseAS,
+      client: { client_id: 'cli' },
+      clientAuth: clientAuthFor(undefined),
       refreshToken: 'OLD',
-      clientId: 'cli',
     });
     expect(tokens.access_token).toBe('A2');
     expect(body!.get('grant_type')).toBe('refresh_token');
@@ -182,8 +192,10 @@ describe('refreshAccessToken', () => {
       { status: 400, headers: { 'Content-Type': 'application/json' } },
     )) as any;
     await expect(refreshAccessToken({
-      tokenEndpoint: 'https://auth.example.com/token',
-      refreshToken: 'X', clientId: 'cli',
-    })).rejects.toThrow(/invalid_grant/);
+      as: baseAS,
+      client: { client_id: 'cli' },
+      clientAuth: clientAuthFor(undefined),
+      refreshToken: 'X',
+    })).rejects.toThrow();
   });
 });

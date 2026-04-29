@@ -37,6 +37,7 @@ describe('applyOAuthBindings', () => {
         server_name: 'notion',
         expires_at: nowSec + 3600,
         created_at: nowSec, updated_at: nowSec,
+        issuer: 'https://auth.notion.com',
         token_endpoint: 'https://auth.notion.com/token',
         scopes: [],
       },
@@ -76,6 +77,7 @@ describe('applyOAuthBindings', () => {
         server_name: 'manual',
         expires_at: nowSec + 3600,
         created_at: nowSec, updated_at: nowSec,
+        issuer: 'https://auth.example.com',
         token_endpoint: 'https://auth.example.com/token',
         scopes: [],
       },
@@ -96,6 +98,7 @@ describe('applyOAuthBindings', () => {
         server_name: 'broken',
         expires_at: nowSec + 5, // within leeway → triggers refresh
         created_at: nowSec, updated_at: nowSec,
+        issuer: 'https://auth.example.com',
         token_endpoint: 'https://auth.example.com/token',
         scopes: [],
       },

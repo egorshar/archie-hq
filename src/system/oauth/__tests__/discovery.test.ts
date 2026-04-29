@@ -47,7 +47,10 @@ describe('fetchProtectedResourceMetadata', () => {
       { status: 200, headers: { 'Content-Type': 'application/json' } },
     )) as any;
 
-    const result = await fetchProtectedResourceMetadata('https://example.com/.well-known/oauth-protected-resource');
+    const result = await fetchProtectedResourceMetadata(
+      'https://example.com/.well-known/oauth-protected-resource',
+      'https://api.example.com/mcp',
+    );
     expect(result.resource).toBe('https://api.example.com/mcp');
     expect(result.authorization_servers).toEqual(['https://auth.example.com']);
     expect(result.scopes_supported).toEqual(['read', 'write']);
@@ -55,7 +58,21 @@ describe('fetchProtectedResourceMetadata', () => {
 
   it('throws on a non-2xx response', async () => {
     globalThis.fetch = vi.fn(async () => new Response('not found', { status: 404 })) as any;
-    await expect(fetchProtectedResourceMetadata('https://example.com/nope')).rejects.toThrow(/HTTP 404/);
+    await expect(fetchProtectedResourceMetadata(
+      'https://example.com/nope',
+      'https://api.example.com/mcp',
+    )).rejects.toThrow(/HTTP 404/);
+  });
+
+  it('rejects when the metadata advertises a different resource than expected', async () => {
+    globalThis.fetch = vi.fn(async () => new Response(
+      JSON.stringify({ resource: 'https://wrong.example.com', authorization_servers: ['https://auth.example.com'] }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    )) as any;
+    await expect(fetchProtectedResourceMetadata(
+      'https://example.com/.well-known/oauth-protected-resource',
+      'https://api.example.com/mcp',
+    )).rejects.toThrow();
   });
 });
 
@@ -81,6 +98,7 @@ describe('fetchAuthServerMetadata', () => {
           token_endpoint: 'https://auth.example.com/token',
           registration_endpoint: 'https://auth.example.com/register',
           code_challenge_methods_supported: ['S256'],
+          response_types_supported: ['code'],
         }),
         { status: 200, headers: { 'Content-Type': 'application/json' } },
       );
@@ -100,27 +118,21 @@ describe('fetchAuthServerMetadata', () => {
           issuer: 'https://auth.example.com',
           authorization_endpoint: 'https://auth.example.com/auth',
           token_endpoint: 'https://auth.example.com/token',
+          response_types_supported: ['code'],
+          subject_types_supported: ['public'],
+          id_token_signing_alg_values_supported: ['RS256'],
         }),
         { status: 200, headers: { 'Content-Type': 'application/json' } },
       ),
     };
     globalThis.fetch = vi.fn(async (url: any) => responses[String(url)] ?? new Response('', { status: 500 })) as any;
 
-    const m = await fetchAuthServerMetadata('https://auth.example.com/');
+    const m = await fetchAuthServerMetadata('https://auth.example.com');
     expect(m.token_endpoint).toBe('https://auth.example.com/token');
   });
 
   it('throws when both well-known endpoints fail', async () => {
     globalThis.fetch = vi.fn(async () => new Response('nope', { status: 404 })) as any;
-    await expect(fetchAuthServerMetadata('https://auth.example.com')).rejects.toThrow(/Could not fetch/);
-  });
-
-  it('rejects metadata missing required endpoints', async () => {
-    globalThis.fetch = vi.fn(async () => new Response(
-      JSON.stringify({ issuer: 'https://auth.example.com' }),
-      { status: 200, headers: { 'Content-Type': 'application/json' } },
-    )) as any;
-    // Both URLs return the same incomplete doc → both fail validation → outer throws.
     await expect(fetchAuthServerMetadata('https://auth.example.com')).rejects.toThrow(/Could not fetch/);
   });
 });

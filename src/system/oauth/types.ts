@@ -11,40 +11,6 @@
 
 import type { EncryptedEnvelope } from '../secrets-vault.js';
 
-/** Subset of RFC 8414 we care about. */
-export interface AuthServerMetadata {
-  issuer: string;
-  authorization_endpoint: string;
-  token_endpoint: string;
-  registration_endpoint?: string;
-  scopes_supported?: string[];
-  response_types_supported?: string[];
-  grant_types_supported?: string[];
-  code_challenge_methods_supported?: string[];
-  token_endpoint_auth_methods_supported?: string[];
-  /** Raw JSON body (kept so callers can inspect uncommon fields). */
-  raw: Record<string, unknown>;
-}
-
-/** Subset of RFC 9728 we care about. */
-export interface ProtectedResourceMetadata {
-  resource: string;
-  authorization_servers?: string[];
-  scopes_supported?: string[];
-  raw: Record<string, unknown>;
-}
-
-/** Result of dynamic client registration. */
-export interface RegisteredClient {
-  client_id: string;
-  client_secret?: string;
-  /** RFC 7591 expiry in seconds; 0 means non-expiring. */
-  client_secret_expires_at?: number;
-  registration_client_uri?: string;
-  registration_access_token?: string;
-  raw: Record<string, unknown>;
-}
-
 /** Plaintext metadata in an OAuth vault record. */
 export interface OAuthRecordMeta {
   server_name: string;
@@ -52,6 +18,8 @@ export interface OAuthRecordMeta {
   expires_at: number;        // unix seconds
   created_at: number;
   updated_at: number;
+  /** Authorization-server issuer URL — needed to reconstruct an AS for refresh. */
+  issuer: string;
   token_endpoint: string;
   scopes: string[];
 }
@@ -75,6 +43,8 @@ export interface OAuthPendingMeta {
   state: string;
   server_name: string;
   label?: string;
+  /** Authorization-server issuer URL — used to reconstruct the AS object. */
+  issuer: string;
   token_endpoint: string;
   authorization_endpoint: string;
   scopes: string[];
@@ -98,12 +68,3 @@ export interface OAuthPendingRecord extends OAuthPendingMeta {
   completed_at?: number;
 }
 
-/** Token response per RFC 6749 §5.1, plus optional fields we care about. */
-export interface TokenResponse {
-  access_token: string;
-  token_type: string;
-  expires_in?: number;
-  refresh_token?: string;
-  scope?: string;
-  raw: Record<string, unknown>;
-}

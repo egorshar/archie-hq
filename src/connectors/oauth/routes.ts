@@ -9,7 +9,7 @@
 
 import type { Application, Request, Response } from 'express';
 import { logger } from '../../system/logger.js';
-import { exchangeCodeForTokens } from '../../system/oauth/flow.js';
+import { exchangeCodeForTokens, clientAuthFor } from '../../system/oauth/flow.js';
 import { withKeyMutex } from '../../system/secrets-vault.js';
 import {
   readPendingRecord,
@@ -126,12 +126,13 @@ async function completeFlow(state: string, code: string): Promise<CallbackOutcom
   let tokens;
   try {
     tokens = await exchangeCodeForTokens({
-      tokenEndpoint: pending.token_endpoint,
+      as: { issuer: pending.issuer, token_endpoint: pending.token_endpoint },
+      client: { client_id: sealed.client_id },
+      clientAuth: clientAuthFor(sealed.client_secret),
       code,
+      state,
       redirectUri: pending.redirect_uri,
       codeVerifier: sealed.code_verifier,
-      clientId: sealed.client_id,
-      clientSecret: sealed.client_secret,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -145,7 +146,7 @@ async function completeFlow(state: string, code: string): Promise<CallbackOutcom
   }
 
   const nowSec = Math.floor(Date.now() / 1000);
-  const expiresAt = tokens.expires_in ? nowSec + tokens.expires_in : nowSec + 3600;
+  const expiresAt = typeof tokens.expires_in === 'number' ? nowSec + tokens.expires_in : nowSec + 3600;
 
   await writeOAuthRecord(
     {
@@ -154,12 +155,13 @@ async function completeFlow(state: string, code: string): Promise<CallbackOutcom
       expires_at: expiresAt,
       created_at: nowSec,
       updated_at: nowSec,
+      issuer: pending.issuer,
       token_endpoint: pending.token_endpoint,
       scopes: pending.scopes,
     },
     {
       access_token: tokens.access_token,
-      refresh_token: tokens.refresh_token,
+      refresh_token: typeof tokens.refresh_token === 'string' ? tokens.refresh_token : undefined,
       client_id: sealed.client_id,
       client_secret: sealed.client_secret,
       token_type: tokens.token_type,
