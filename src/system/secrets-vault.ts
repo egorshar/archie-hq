@@ -34,7 +34,7 @@ export function loadMasterKey(): Buffer {
   if (!raw) {
     throw new Error(
       'ARCHIE_SECRETS_KEY is not set. Generate one with: ' +
-      'node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64\'))"'
+      'openssl rand -base64 32'
     );
   }
   let buf: Buffer;

@@ -42,11 +42,12 @@ The `secrets/oauth/` subtree is git-ignored.
 ### Encryption
 
 All sensitive fields are sealed with AES-256-GCM. The master key comes
-from `ARCHIE_SECRETS_KEY` (32 random bytes, base64-encoded). Generate one
-with:
+from `ARCHIE_SECRETS_KEY` (32 random bytes, base64-encoded). Append one
+straight to `.env` so the value never lands on stdout or in shell
+history (prefix the line with a space when `HIST_IGNORE_SPACE` is on):
 
 ```sh
-node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+ echo "ARCHIE_SECRETS_KEY=$(openssl rand -base64 32 | tr -d '\n')" >> .env
 ```
 
 The startup check fails fast if any vault record is on disk and the key is
