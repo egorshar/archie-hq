@@ -1,6 +1,6 @@
 # Proposal: Full LLM Guard Integration
 
-> **Status:** Architecturally supported, not wired in production
+> **Status:** Previously trialed and removed; superseded in production by AWS Bedrock Guardrails. Retained as a reference design in case a self-hosted DLP layer is revisited.
 
 ## Summary
 
@@ -8,12 +8,13 @@ Deploy LLM Guard as a self-hosted Docker service to provide DLP (Data Loss Preve
 
 ## Current State
 
-The prompt injection defense architecture (implemented in v9) includes five defense layers. Layer 2 (LLM Guard scanning) is designed but not fully deployed:
+The prompt injection defense architecture (implemented in v9) includes five defense layers. Layer 2 (content/DLP scanning) is currently filled by AWS Bedrock Guardrails, not LLM Guard:
 
-- **Implemented:** Sandwich defense hooks, structured JSON output schema, research budgets, defense tagging
-- **Not implemented:** LLM Guard Docker service, DLP scanner profiles, automated scanning at interception points
+- **Implemented:** Sandwich defense hooks, structured JSON output schema, research budgets, defense tagging, AWS Bedrock Guardrails scanning of research input/output (see `scanWithGuardrail` in `src/mcp/research-tools.ts`)
+- **Not implemented:** LLM Guard Docker service, DLP scanner profiles, automated LLM-Guard scanning at the three interception points described below
+- **Previously implemented and removed:** An earlier LLM Guard integration was wired in and later removed (too heavy, pattern matching judged unreliable for prompt-injection detection — see `docs/architecture/security.md` "What Is NOT Yet Implemented")
 
-The hook infrastructure in `src/mcp/research-tools.ts` supports adding LLM Guard scanning — the integration points exist, the service doesn't.
+The research pipeline in `src/mcp/research-tools.ts` already calls a guardrail-style scanner on input and output; swapping or augmenting that with LLM Guard would reuse the same call sites.
 
 ## Design
 

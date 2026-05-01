@@ -14,10 +14,11 @@ How the system works today. Each doc describes the actual implementation, verifi
 | [Persistence](architecture/persistence.md) | File-based sessions, metadata, shared knowledge log |
 | [Slack Integration](architecture/slack-integration.md) | Webhooks, message flow, UX patterns |
 | [GitHub Integration](architecture/github-integration.md) | PR management, webhooks, merge orchestration |
-| [Edit Mode](architecture/edit-mode.md) | Read/write modes, worktrees, approval flow |
+| [Edit Mode](architecture/edit-mode.md) | Read/write modes, shared clones, approval flow |
 | [Plugin System](architecture/plugin-system.md) | Plugin architecture, agent tracks, skill discovery |
 | [Web Research](architecture/web-research.md) | Research pipeline, multi-agent research tool |
 | [Security](architecture/security.md) | Threat model, defense layers, prompt injection defense |
+| [Secrets](architecture/secrets.md) | OAuth vault, encryption, secret handling |
 
 ## Guides
 
@@ -28,6 +29,7 @@ How to work with the system. Setup, deployment, and development patterns.
 | [Local Development](guides/local-development.md) | Prerequisites, setup, running, debugging |
 | [Deployment](guides/deployment.md) | GCP deployment, CI/CD, monitoring, operations |
 | [SDK Patterns](guides/sdk-patterns.md) | Agent SDK hooks, turn detection, streaming input |
+| [Bedrock Guardrails Setup](guides/bedrock-guardrails-setup.md) | Configuring AWS Bedrock guardrails for prompt injection defense |
 
 ## Plans
 
@@ -45,6 +47,23 @@ Historical record of development milestones. Each plan has a status header indic
 | [v8](plans/v8-web-research.md) | Web research pipeline | Implemented |
 | [v9](plans/v9-prompt-injection-defense.md) | Prompt injection defense | Implemented |
 | [v10](plans/v10-agent-recovery-impl.md) | Agent recovery implementation | Partially implemented |
+| [v11](plans/v11-workdir-consolidation.md) | Workdir consolidation | Implemented |
+| [v12](plans/v12-task-agent-refactor.md) | Task/agent refactor | Implemented |
+| [v13](plans/v13-connectors-restructure.md) | Connectors restructure | Implemented |
+| [v14](plans/v14-cli-tui-channels.md) | CLI/TUI channels | Implemented |
+| [v15](plans/v15-events-jsonl.md) | Events JSONL persistence | Implemented |
+| [v16](plans/v16-pr-tools-to-repo-agent.md) | Move PR tools to repo agent | Implemented |
+| [v17](plans/v17-git-workflow.md) | Git workflow refinements | Implemented |
+| [v18](plans/v18-shared-clones.md) | Shared repo clones | Implemented |
+| [v19](plans/v19-sandbox-lockdown.md) | Sandbox lockdown | Implemented |
+| [v20](plans/v20-slack-user-lookup-targeted-messaging.md) | Slack user lookup & targeted messaging | Implemented |
+| [v21](plans/v21-agent-reminders.md) | Agent reminders | Implemented |
+| [v22](plans/v22-github-triage-removal.md) | GitHub triage removal | Implemented |
+| [v23](plans/v23-launch-task.md) | Launch task tooling | Implemented |
+| [v24](plans/v24-shared-channel-guardrails.md) | Shared channel guardrails | Implemented |
+| [v25](plans/v25-task-titles.md) | Task titles | Implemented |
+| [v26](plans/v26-artifact-sharing.md) | Artifact sharing | Implemented |
+| [v27](plans/v27-oauth-mcp-secrets.md) | OAuth-managed MCP secrets | Implemented |
 
 See [plans/README.md](plans/README.md) for the full evolution arc.
 
@@ -57,21 +76,23 @@ Future work and unimplemented features. These are ideas that have been designed 
 | [GitHub @mention Workflow](proposals/github-mention-workflow.md) | @mention Archie in GitHub PRs |
 | [Distributed Queues](proposals/distributed-queues.md) | Redis/GroupMQ for multi-pod scaling |
 | [LLM Guard Integration](proposals/llm-guard-integration.md) | Full DLP scanning service |
+| [Analytics Plugin Gaps](proposals/analytics-plugin-gaps.md) | Roadmap for analytics plugin (MVP shipped) |
+| [Architecture Simplification](proposals/architecture-simplification.md) | Ideas to reduce complexity in core flows |
 
 ## Quick Reference
 
-**Message flow:** Slack/GitHub → PM Agent → Specialist Agents (triage agent currently disabled)
+**Message flow:** Slack/GitHub → PM Agent → Specialist Agents. The triage agent (`src/system/triage.ts`) exists but is currently disabled — Slack messages route directly to the PM.
 
 **Agent types:**
-- ~~**Triage** (Haiku) — classifies incoming events~~ (currently disabled)
-- **PM** (Opus) — manages tasks, assigns owners, communicates with users
-- **Repo Agents** (Sonnet) — investigate and modify code in specific repositories
-- **Plugin Agents** (Sonnet) — domain-specific agents without git infrastructure
+- **PM** (Opus by default) — manages tasks, assigns owners, communicates with users
+- **Repo Agents** — investigate and modify code in specific repositories (model configured per agent in plugin frontmatter)
+- **Plugin Agents** — domain-specific agents without git infrastructure (model configured per agent in plugin frontmatter)
 
 **Key files:**
 - Entry point: `src/index.ts`
-- Agent spawners: `src/agents/`
+- Agent spawners and registry: `src/agents/`
 - System orchestration: `src/system/`
 - MCP tools: `src/mcp/`
+- Connectors (Slack, GitHub, OAuth, API): `src/connectors/`
 - Agent prompts: `prompts/`
-- Domain plugins: `plugins/`
+- Plugins are git-cloned into the runtime workdir (`ARCHIE_WORKDIR`, default `./workdir`); see `src/system/workdir.ts` and `src/system/plugin-loader.ts`

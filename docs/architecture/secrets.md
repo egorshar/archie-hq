@@ -50,8 +50,10 @@ history (prefix the line with a space when `HIST_IGNORE_SPACE` is on):
  echo "ARCHIE_SECRETS_KEY=$(openssl rand -base64 32 | tr -d '\n')" >> .env
 ```
 
-The startup check fails fast if any vault record is on disk and the key is
-missing or the wrong length.
+The startup check (`src/index.ts`) calls `validateMasterKey()` whenever
+any vault record exists in `${OAUTH_DIR}` *or* `ARCHIE_SECRETS_KEY` is
+set, so a misconfigured deployment fails fast instead of erroring at
+agent-spawn time.
 
 ### Vault record (`oauth/<server-name>.json`)
 
@@ -62,6 +64,7 @@ missing or the wrong length.
   "expires_at": 1730000000,     // unix seconds; refresh leeway = 60s
   "created_at": 1729000000,
   "updated_at": 1730000000,
+  "issuer": "https://api.notion.com",
   "token_endpoint": "https://api.notion.com/v1/oauth/token",
   "scopes": ["..."],
   "envelope": {
@@ -78,10 +81,10 @@ The encrypted blob:
 ```jsonc
 {
   "access_token": "...",
-  "refresh_token": "...",
+  "refresh_token": "...",       // optional — some providers don't issue one
   "client_id": "...",
   "client_secret": "...",       // present when DCR returned a confidential client
-  "token_type": "Bearer"
+  "token_type": "Bearer"        // verbatim from token endpoint
 }
 ```
 
@@ -91,22 +94,22 @@ created by DCR, not deploy-time config.
 ## Connect flow
 
 ```
-operator               daemon (running)              OAuth provider
-   │                         │                              │
-   │ npm run oauth:connect   │                              │
-   │ ────────────────────►   │ (CLI runs in same process)   │
-   │                         │  discovery + DCR             │
-   │                         │  write pending file          │
-   │ ◄── authorize URL ───   │                              │
-   │                         │                              │
-   │ open URL in browser ─────────────────────────────────► │
-   │                         │                              │
-   │                         │ ◄── GET /oauth/callback ──── │
-   │                         │  exchange code, write vault, │
-   │                         │  delete pending              │
-   │                         │                              │
-   │ poll FS for completion  │                              │
-   │ ◄── success ────────────│                              │
+operator        CLI (oauth:connect)      daemon (running)      OAuth provider
+   │                   │                       │                     │
+   │ npm run connect   │                       │                     │
+   │ ────────────────► │  discovery + DCR      │                     │
+   │                   │  write pending file   │                     │
+   │ ◄── authorize URL │                       │                     │
+   │                                                                 │
+   │ open URL in browser ──────────────────────────────────────────► │
+   │                                           │                     │
+   │                                           │ ◄── GET /callback ──│
+   │                                           │  exchange code,     │
+   │                                           │  write vault,       │
+   │                                           │  delete pending     │
+   │                   │                       │                     │
+   │ ◄─ poll FS until ─│                       │                     │
+   │    vault appears  │                       │                     │
 ```
 
 Two processes coordinate via the shared `SECRETS_DIR` filesystem. They do
@@ -127,7 +130,10 @@ redirects to.
 5. If `--client-id` was passed, use it; otherwise call the
    `registration_endpoint` for Dynamic Client Registration.
 6. Generate state + PKCE, write `${SECRETS_DIR}/oauth/.pending/<state>.json`
-   (encrypted with the master key, mode `0o600`).
+   (mode `0o600`; plaintext meta — `state`, `server_name`, `issuer`,
+   `token_endpoint`, `authorization_endpoint`, `scopes`, `redirect_uri`,
+   `created_at` — alongside an envelope sealing the PKCE verifier and
+   client credentials).
 7. Print the authorize URL.
 8. Poll for completion: when the pending file is gone and a vault record
    exists for the server, success. If `error` shows up on the pending
@@ -147,8 +153,8 @@ existing Express app. On request:
 5. Delete the pending file.
 6. Render a small success page so the operator can close the tab.
 
-A periodic reaper inside the same process deletes pending files older
-than the TTL.
+A periodic reaper inside the same process (15-min interval, plus a
+sweep at startup) deletes pending files older than the TTL.
 
 ### Required env vars
 
@@ -167,14 +173,18 @@ For each `mcpServers` entry whose transport is `http` or `sse`:
 
 - If a vault record exists for the server name, run `ensureFreshToken()`
   (refreshes when within 60s of expiry, atomic write-back, per-key mutex
-  so concurrent spawns share one round-trip), then set
-  `headers.Authorization = "Bearer <token>"`.
-- If the operator already supplied an `Authorization` header in
-  `.mcp.json`, leave it alone — explicit operator intent wins.
-- If the refresh fails, drop that one entry from the SDK options and
-  log an error. Other MCP servers spawn normally.
-- stdio MCP entries are untouched — they keep their existing
-  `${MCP_*}` env-var substitution path.
+  keyed `oauth:<server>` so concurrent spawns share one round-trip), then
+  set `headers.Authorization = "<scheme> <token>"`. The scheme is
+  normalized — `bearer` becomes `Bearer` — because some providers
+  (Notion, etc.) strict-match it.
+- If the operator already supplied an `Authorization` (or lowercase
+  `authorization`) header in `.mcp.json`, leave it alone — explicit
+  operator intent wins.
+- If the refresh fails, drop that one entry from the `mcpServers` map
+  and log an error. Other MCP servers spawn normally.
+- Non-http/sse MCP entries (stdio, in-process SDK servers like
+  `createBaseAgentMcpServer`) are untouched — stdio entries keep their
+  existing `${MCP_*}` env-var substitution path.
 
 ## Reconnect / revoke
 

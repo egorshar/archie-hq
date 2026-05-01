@@ -13,18 +13,20 @@ settings:
     request_url: https://<host>/webhooks/slack
     bot_events:
       - app_mention
+      - assistant_thread_started
       - message.channels
+      - message.im
   interactivity:
     is_enabled: true
     request_url: https://<host>/webhooks/slack
   socket_mode_enabled: false
 ```
 
-The Bolt app is created in `src/connectors/slack/events.ts`, where `ExpressReceiver` is instantiated with the Slack signing secret and the `/webhooks/slack` endpoint. The Bolt `App` is then attached to this receiver.
+The Bolt app is mounted by `mountSlackApp()` in `src/connectors/slack/events.ts`, which constructs an `ExpressReceiver` against an existing Express app with the Slack signing secret and the `/webhooks/slack` endpoint, then attaches a Bolt `App` to that receiver.
 
 ### Bot Scopes
 
-The manifest declares these bot scopes: `app_mentions:read`, `chat:write`, `channels:history`, `channels:read`, `users:read`, `usergroups:read`, `files:read`.
+The manifest declares these bot scopes: `app_mentions:read`, `chat:write`, `channels:history`, `channels:read`, `groups:read`, `im:history`, `im:read`, `im:write`, `users:read`, `usergroups:read`, `files:read`, `files:write`, `reactions:write`, `assistant:write`. The `im:*` scopes enable DM-originated tasks; `reactions:write` powers the eyes-emoji acknowledgment pattern; `assistant:write` is required to push generated titles to DM-rooted assistant threads via `assistant.threads.setTitle`.
 
 ## Bot Identity Detection
 
@@ -37,52 +39,47 @@ On startup, `initSlackClient()` in `src/connectors/slack/client.ts` calls `auth.
 
 The server registers two Bolt event handlers:
 
-1. **`app_mention`** -- Fires when a user mentions `@Archie` in any channel. This is the primary way users start new tasks or interact with existing ones.
+1. **`app_mention`** -- Fires when a user mentions `@Archie` in any channel. This is the primary way users start new tasks in channels.
 
-2. **`message`** -- Fires for all channel messages. The handler filters to only process thread replies (messages where `thread_ts` exists and differs from `ts`) that do not contain a bot mention (to avoid double-processing with `app_mention`).
+2. **`message`** -- Fires for thread replies and DM messages. The handler accepts an event when it is either a thread reply (`event.thread_ts && event.thread_ts !== event.ts`) or a DM (channel ID starting with `D`), and the subtype is empty / `file_share` / `thread_broadcast`. In channels, messages containing a bot mention are skipped here because `app_mention` already handles them; in DMs, mention-containing messages are processed here because `app_mention` does not fire for DMs.
 
-Both handlers follow the same flow:
+Both handlers run the same pipeline:
 
 ```
 Slack webhook
-  -> routeSlackEvent() [discard own bot messages]
-  -> processSlackTriage() [inline, fire-and-forget]
+  -> routeSlackEvent()  [discard own bot messages by bot_id]
+  -> handleSlackEvent() [inline, fire-and-forget]
 ```
 
-Events are processed inline with no queue -- the webhook is acknowledged immediately and processing happens asynchronously. See `src/connectors/slack/events.ts`.
+Events are processed inline with no queue — the Bolt receiver acknowledges the webhook immediately and processing continues asynchronously. The shutdown flag short-circuits handlers during graceful shutdown. See `src/connectors/slack/events.ts`.
 
-## Triage and Message Classification
+## Triage Agent (Disabled)
 
-Every Slack event that passes the bot-identity filter goes through triage (processed inline in `src/connectors/slack/events.ts`). The triage agent (Haiku model, defined in `src/system/triage.ts`) classifies each message into one of four actions:
+The Haiku-based triage agent in `src/system/triage.ts` is **currently disabled**. The classification block in `handleSlackEvent` is commented out (`src/connectors/slack/events.ts:351-382`); routing is performed directly by the event handler using the structural cues described below. The triage module is kept in the tree because it may be reintroduced.
 
-| Action | Description |
-|---|---|
-| `new_task` | A new work request. Creates a task, appends thread history to knowledge log, spawns PM agent. |
-| `existing_task` | Follow-up on an active task. Appends new messages to the task's knowledge log, reactivates PM. |
-| `cancel_task` | User wants to stop work. Calls `stopTask()` and posts a confirmation message. |
-| `noop` | Acknowledgment or noise. No action taken. |
+## Message Flow: Slack to PM Agent
 
-The triage agent receives the current message plus full thread history (fetched via `conversations.replies`) to make its classification decision.
-
-## Message Flow: Slack to Agents
+`handleSlackEvent` (in `src/connectors/slack/events.ts`) drives all routing without an LLM step:
 
 ```
-User @mentions Archie in Slack thread
-  -> connectors/slack/events.ts: app_mention handler
-  -> routeSlackEvent() - filters bot messages
-  -> processSlackTriage()
-    -> Fetches thread history via fetchThreadHistory()
-    -> Runs triage agent (Haiku) to classify the message
-    -> Routes based on classification:
-       new_task:      Task.createFromSlackThread() -> task.sendMessage(PM)
-       existing_task: Task.get()   -> task.sendMessage(PM, "New input received...")
-       cancel_task:   task.stop()  -> posts confirmation to threads
-       noop:          no action
+Slack webhook
+  -> routeSlackEvent()                       [drop own bot's messages]
+  -> External-author bail-out                [resolve user, skip if external/guest]
+  -> Eyes reaction (ack)                     [add to current msg, remove from prev]
+  -> fetchSlackThread()                      [history + author resolution + shared flag]
+  -> findTaskByThread(threadId):
+       found    -> Task.get() -> task.append(thread)
+                   -> task.sendMessage(AGENT_PROMPTS.existingTask)
+       not found, app_mention OR DM -> Task.create() -> task.append(thread)
+                                       -> task.sendMessage(AGENT_PROMPTS.newTask)
+       not found, plain thread reply -> ignore (bot was never invited)
 ```
 
-## Multi-Thread Support
+A muted thread (`SlackChannel.muted = true`, set by the PM's `mute_thread` tool) is unmuted by an `@mention` and otherwise skipped. Title generation runs as a fire-and-forget Haiku call after the first append; for DM-rooted tasks the resulting title is pushed to Slack via `assistant.threads.setTitle` (see `src/connectors/slack/title.ts`). External users (different `team_id`, or `is_restricted` / `is_ultra_restricted` guests) are filtered out before any work is spawned; their messages are still re-read on later events because `fetchSlackThread` refreshes full history each time.
 
-A single task can be associated with multiple Slack threads (and other channel types). The `TaskMetadata` type (`src/types/task.ts`) holds a `channels` record keyed by channel ID:
+## Multi-Channel Support
+
+A single task can be linked to multiple destinations — Slack threads (channel or DM) and the CLI. The `TaskMetadata` type (`src/types/task.ts`) holds a `channels` record keyed by `slack:<channelId>:<threadTs>` (or `cli` for the CLI channel). The relevant Slack entry shape is:
 
 ```typescript
 interface SlackChannel {
@@ -91,36 +88,43 @@ interface SlackChannel {
   channel_id: string;
   channel_name: string;
   last_processed_ts: string;
+  url?: string;
+  muted?: boolean;
+  isShared?: boolean;
+  warnedUsers?: string[];
+  forwardNotifiedUsers?: string[];
 }
 ```
 
-When triage classifies a message as `existing_task` and the thread is not yet tracked for that task, the event handler adds the new thread to `metadata.channels` and posts a linking confirmation. All subsequent `post_to_slack` calls from the PM agent post to every tracked Slack channel.
+New Slack destinations are linked when the PM calls `post_to_user` with `target.new_dm <userId>` or `target.new_thread <channelId>`; both flows post the message via `postSlackMessage`, register the new thread on `metadata.channels`, and return the channel key so the PM can reuse it later (notably with `post_files_to_user`). The first linked channel is also recorded as `default_channel`, which is the implicit destination when `post_to_user` is called without a target.
 
 ## Message Deduplication
 
-Each `SlackThread` stores a `last_processed_ts` field. When processing an existing thread, the event handler only appends messages with a timestamp greater than `last_processed_ts`, then updates the field to the current message's timestamp. This prevents duplicate processing when multiple events arrive for the same thread.
+Each Slack channel entry stores a `last_processed_ts` timestamp. The eyes-reaction acknowledgment in `handleSlackEvent` uses it to remove the previous "eyes" reaction before adding one to the new message, so only the most recent inbound message ever shows the indicator. `task.append(thread)` in `src/tasks/task.ts` is also responsible for advancing `last_processed_ts` and skipping messages it has already absorbed into the knowledge log.
 
-See `src/connectors/slack/events.ts`, `handleExistingTask()` -- specifically the comparison `msg.ts <= lastProcessedTs` used to skip already-processed messages.
+## How PM Replies Reach Slack
 
-## The `post_to_slack` MCP Tool
+There is no `post_to_slack` MCP tool and no event-bus subscription that ferries messages to Slack — the PM calls `postSlackMessage` (and `postSlackFiles`) directly, in-process, through the `Task` instance. The pipeline is:
 
-The PM agent communicates with users via the `post_to_slack` MCP tool, defined in `src/agents/tools.ts`. When the PM calls this tool:
+1. The PM agent calls the `post_to_user` MCP tool (defined in `src/agents/tools.ts`). This is the **only** outbound user-messaging tool — repo and plugin agents do not have it; they communicate via `send_message_to_agent` and let the PM decide what to relay. File uploads use the sibling `post_files_to_user` tool, which can only attach to an already-linked thread.
+2. The tool handler invokes `task.postToUser(message, agentName, target)` in `src/tasks/task.ts`, which routes by target:
+   - no target → post to `default_channel` (Slack or CLI)
+   - `target.channel <key>` → post to a specific already-linked thread
+   - `target.new_dm <userId>` → `openDMChannel` then post + register
+   - `target.new_thread <channelId>` → post a top-level message + register
+3. Each branch ultimately calls `postSlackMessage()` in `src/connectors/slack/client.ts`, which renders the text as a single Block Kit `markdown` block (`{ type: 'markdown', text }`). Slack renders that natively as CommonMark — headings, tables, fenced code blocks, lists, blockquotes, task lists, and links — without manual conversion. See [Markdown block reference](https://docs.slack.dev/reference/block-kit/blocks/markdown-block/). Per-message payload is capped at 12,000 characters (`SLACK_MARKDOWN_LIMIT`); the function asserts the limit and throws `SlackMarkdownLimitError` on overflow.
+4. On success, `Task.logOutgoingMessage` writes the message to the task's `knowledge.log`, emits a `message` event on the in-process event bus (consumed only by the SSE/CLI streaming endpoint — see `src/system/event-bus.ts`), and logs via the unified logger. On failure, nothing is logged or emitted; the tool returns split-and-retry guidance to the agent via `formatSlackSendError`.
 
-1. The tool callback (`onPostToSlack` in `src/tasks/task.ts`) invokes the Slack post callback.
-2. The callback loads the task's metadata and calls `postSlackMessage()` from `src/connectors/slack/client.ts` for each linked target — replying inside an existing thread when `threadTs` is supplied, or starting a new top-level message otherwise.
-3. The message is sent as a Slack Block Kit `markdown` block (`{ type: 'markdown', text }`), which Slack renders natively as CommonMark — supporting headings, tables, fenced code blocks, lists, blockquotes, task lists, and links without manual conversion. See [Markdown block reference](https://docs.slack.dev/reference/block-kit/blocks/markdown-block/). Per-message payload is capped at 12,000 characters; `postSlackMessage()` enforces this and throws `SlackMarkdownLimitError` on overflow.
-4. On a successful send, the message is logged to the task's `knowledge.log` as a decision entry. A failed send (length limit, transport error) skips the log so rejected payloads never reach `knowledge.log` or the event bus, and the agent receives split-and-retry guidance via the tool response.
-
-The PM agent is the only agent with access to `post_to_slack`. Repo agents communicate findings back to PM via `send_message_to_agent`, and PM decides what to relay to the user.
+`@<U…:Real Name>` mention syntax used in agent prompts is converted back to Slack's `<@U…>` form by `restoreMentions` inside `postSlackMessage` so notifications fire correctly.
 
 ## Interactive Messages
 
-Some system events require user decisions via Slack buttons. These use `postInteractiveToThreads()`, which posts Block Kit messages with action buttons. Currently implemented interactive flows:
+Some system events require user decisions via Slack buttons. The PM calls `task.postInteractiveToUser(text, blocks, approvalType)`, which routes to `postInteractiveToThreads()` for the task's default Slack channel. Currently implemented interactive flows:
 
 - **Edit mode approval**: "Approve" / "Deny" buttons (action IDs: `approve_edit_mode`, `deny_edit_mode`). See [Edit Mode](./edit-mode.md).
 - **Research budget approval**: "Approve (+5)" / "Deny" buttons (action IDs: `approve_research_budget`, `deny_research_budget`).
 
-Button clicks are handled by Bolt action handlers in `src/connectors/slack/events.ts`. When clicked, the handler acknowledges the interaction, updates the original message (removing buttons and showing the outcome), and calls the corresponding handler function (e.g., `task.handleEditModeApproval()`) which modifies task metadata and reactivates the PM agent.
+Button clicks are handled by Bolt action handlers in `src/connectors/slack/events.ts`. When clicked, the handler acknowledges the interaction, updates the original message (removing buttons and showing the outcome), and calls the corresponding `Task` method (`handleEditModeApproval` / `handleEditModeDenial` / `handleResearchBudgetApproval` / `handleResearchBudgetDenial`), which modifies task metadata and reactivates the PM agent.
 
 ## Natural Language Guidelines for PM Responses
 
@@ -151,14 +155,21 @@ This resolution happens in `fetchMentionInfo()` and `applyMentionReplacements()`
 
 The Slack client extracts file metadata from messages, including files shared directly, files nested in forwarded messages, and image attachments from unfurled links. File metadata is captured as `SlackFile` objects with download URLs. The `downloadSlackFile()` function handles authenticated downloads using the bot token via Bearer authorization headers.
 
+## Acknowledgment, Muting, and Shared-Channel Awareness
+
+- **Eyes reaction** — every accepted inbound message gets a `:eyes:` reaction added; the previous message's eyes is removed first so only one indicator is live per thread. Cleaned up on task stop/complete by `removeEyesFromAllChannels`.
+- **Muting** — the PM's `mute_thread` tool sets `SlackChannel.muted = true`, after which the thread is ignored until a new `@mention` toggles it back on.
+- **Shared channels (Slack Connect)** — `isChannelShared` (60s TTL cache) flags external-shared channels; `sendSharedChannelWarnings` posts ephemeral notices once per (thread × user): a general shared-channel heads-up to internal participants, and a forward-from-external notice to anyone who pastes content originally authored by an external user.
+
 ## Relevant Source Files
 
-- `src/connectors/slack/client.ts` -- Slack WebClient wrapper, message posting, thread history, mention resolution, file downloads
-- `src/connectors/slack/callbacks.ts` -- Slack callback registry (post_to_slack, interactive messages)
-- `src/connectors/slack/events.ts` -- Bolt app setup, event handlers, triage routing, interactive action handlers
-- `src/system/triage.ts` -- Haiku-based message classifier
-- `src/agents/tools.ts` -- `post_to_slack` tool definition
-- `src/tasks/task.ts` -- Task class with Slack callback implementations
-- `src/types/index.ts` -- `SlackThread`, `SlackMessage`, `SlackFile` type definitions
-- `slack-manifest.yaml` -- Slack app configuration
-- `prompts/pm-agent.md` -- PM agent communication guidelines
+- `src/connectors/slack/client.ts` — Slack WebClient wrapper: `postSlackMessage`, `postSlackFiles`, `postInteractiveToThread(s)`, thread history, mention resolution, file downloads, shared-channel detection, user/channel lookup caches
+- `src/connectors/slack/events.ts` — Bolt app setup (`mountSlackApp`), `app_mention` / `message` handlers, `routeSlackEvent` + `handleSlackEvent`, button action handlers, title pipeline, shared-channel warnings
+- `src/connectors/slack/title.ts` — `assistant.threads.setTitle` wrapper for DM-rooted tasks
+- `src/system/triage.ts` — Haiku-based message classifier (currently disabled at the call site)
+- `src/agents/tools.ts` — `post_to_user`, `post_files_to_user`, `mute_thread`, `find_slack_user`, `find_slack_channel`, etc. (no `post_to_slack`)
+- `src/tasks/task.ts` — `postToUser`, `postFilesToUser`, `postInteractiveToUser`, channel registration
+- `src/system/event-bus.ts` — in-process event bus (used for SSE streaming to CLI; not a Slack transport)
+- `src/types/task.ts` — `SlackChannel`, `TaskMetadata.channels`, `default_channel`
+- `slack-manifest.yaml` — Slack app configuration
+- `prompts/pm-agent.md` — PM agent communication guidelines

@@ -41,12 +41,14 @@ Currently, all user interaction flows through Slack. GitHub is only used for web
 
 ## Implementation Notes
 
-The existing GitHub webhook infrastructure (`src/system/server.ts`, `src/github/webhook-utils.ts`) already handles PR comment events. The main work would be:
+The existing GitHub webhook infrastructure (`src/connectors/github/events.ts`, `src/connectors/github/webhooks.ts`) already handles PR comment events — `issue_comment` events on PRs are already routed to the existing-task handler (`handleExistingTaskDirect`) when a task is linked via the branch name pattern or PR number. Repo agents also already have GitHub reply tools: `add_pr_comment`, `add_review_comment`, and `reply_to_review_comment` (see `src/agents/tools.ts`). The remaining work would be:
 
-1. Route `issue_comment` events for @mention detection
-2. Create tasks from GitHub context (PR metadata, files changed)
-3. Add GitHub reply capability to agents (currently they only post to Slack)
+1. Detect @mentions inside `issue_comment` bodies (currently the comment body is logged but not scanned for bot mentions, and routing only fires for PRs already linked to a task)
+2. Create new tasks from GitHub context when an @mention lands on an unlinked PR (PR metadata, files changed)
+3. Verify `comment.user == pr.author` before acting
 4. Track `created_from: "github"` in task metadata
+
+> **Status note (2026-05):** Items 1–4 above are not implemented. The webhook plumbing, PR-to-task linkage, and agent-side GitHub reply tools listed as prerequisites already exist.
 
 ## Original Design Document
 

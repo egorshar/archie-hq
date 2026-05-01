@@ -11,10 +11,12 @@ after restarts.
 
 ## File-Based Persistence Architecture
 
-Archie uses a file-based approach: each task gets its own directory under `sessions/`.
-While a task is active, `runtime.metadata` (in memory) is the source of truth. Disk is
-treated as a **crash-recovery checkpoint** -- written to via a debounced mechanism so
-that rapid state changes coalesce into a single I/O operation.
+Archie uses a file-based approach: each task gets its own directory under
+`${ARCHIE_WORKDIR}/sessions/` (default: `./workdir/sessions/`, exported as
+`SESSIONS_DIR` from `src/system/workdir.ts`). While a task is active, the in-memory
+`Task.metadata` is the source of truth. Disk is treated as a **crash-recovery
+checkpoint** -- written to via a debounced mechanism so that rapid state changes
+coalesce into a single I/O operation.
 
 There is no database. All lookups (find task by thread, find task by PR number, find
 tasks by status) scan the filesystem, using `grep` where possible for speed.
@@ -24,35 +26,49 @@ tasks by status) scan the filesystem, using `grep` where possible for speed.
 ## Directory Structure
 
 ```
-sessions/
+${ARCHIE_WORKDIR}/sessions/
   task-{YYYYMMDD}-{HHMM}-{random}/       # e.g. task-20251223-1712-a3f9k2
-    shared/                                # PM agent working directory
+    shared/                                # shared task state (read-only to agents)
       metadata.json                        # task metadata (canonical state)
       knowledge.log                        # append-only shared knowledge log
+      events.jsonl                         # append-only system events (one JSON per line)
       memory/                              # agent memory (created at task init)
       attachments/                         # downloaded Slack file attachments
         {file_id}-{filename}               # e.g. F08ABC123-screenshot.png
+      artifacts/                           # cross-agent shared files (versioned)
+        {basename}.{8hex}.{ext}            # content-hash-deduped per basename+ext
     agents/
-      pm/                                  # PM agent workspace
+      {agentKey}/                          # Per-agent workspace (PM and plugin agents)
         .claude/
-          skills/                          # symlinked PM skills from plugins
-      {agentKey}/                          # Plugin agent workspaces
-        .claude/
-          skills/                          # symlinked agent skills
-    repos/                                 # git worktrees (always created; detached HEAD for RO, feature branch for RW)
+          settings.json                    # plugin hooks (when defined)
+          skills/                          # symlinked skills from the plugin
+    claude/
+      {agentKey}/
+        session/                           # SDK config dir
+        tmp/                               # SDK tool-results scratch dir
+    researches/                            # web_research outputs (when used)
+    repos/                                 # git shared clones (created lazily)
 ```
 
 ### Path helpers (`src/tasks/persistence.ts`)
 
+All paths below are rooted at `SESSIONS_DIR` (`${ARCHIE_WORKDIR}/sessions`).
+
 | Function | Returns |
 |---|---|
-| `getTaskPath(taskId)` | `sessions/{taskId}` |
-| `getSharedPath(taskId)` | `sessions/{taskId}/shared` |
-| `getReposPath(taskId)` | `sessions/{taskId}/repos` |
-| `getMetadataPath(taskId)` | `sessions/{taskId}/shared/metadata.json` |
-| `getKnowledgeLogPath(taskId)` | `sessions/{taskId}/shared/knowledge.log` |
-| `getMemoryPath(taskId)` | `sessions/{taskId}/shared/memory` |
-| `getAttachmentsPath(taskId)` | `sessions/{taskId}/shared/attachments` |
+| `getTaskPath(taskId)` | `{SESSIONS_DIR}/{taskId}` |
+| `getSharedPath(taskId)` | `{SESSIONS_DIR}/{taskId}/shared` |
+| `getReposPath(taskId)` | `{SESSIONS_DIR}/{taskId}/repos` |
+| `getMetadataPath(taskId)` | `{SESSIONS_DIR}/{taskId}/shared/metadata.json` |
+| `getKnowledgeLogPath(taskId)` | `{SESSIONS_DIR}/{taskId}/shared/knowledge.log` |
+| `getMemoryPath(taskId)` | `{SESSIONS_DIR}/{taskId}/shared/memory` |
+| `getAttachmentsPath(taskId)` | `{SESSIONS_DIR}/{taskId}/shared/attachments` |
+| `getArtifactsPath(taskId)` | `{SESSIONS_DIR}/{taskId}/shared/artifacts` |
+| `getEventsLogPath(taskId)` | `{SESSIONS_DIR}/{taskId}/shared/events.jsonl` |
+
+Per-agent workspaces (`{taskId}/agents/{agentKey}/`) and SDK runtime dirs
+(`{taskId}/claude/{agentKey}/{session,tmp}`) are created in `src/agents/spawn.ts`,
+not in `persistence.ts`.
 
 ### Task ID format
 
@@ -132,7 +148,7 @@ Present only on old tasks loaded from disk. Migrated to `channels` on first acce
 ```typescript
 interface RepositoryInfo {
   path: string;                                    // base repo path on disk
-  worktree_path?: string;                          // path to task-local worktree
+  clone_path?: string;                             // path to task-local shared clone
   current_branch?: string;                         // branch agent is on (key into branch_states)
   branch_states?: Record<string, BranchState>;     // per-branch tracking
   // Legacy fields (mirrored from current branch state for rollback safety):
@@ -149,16 +165,14 @@ interface RepositoryInfo {
 
 ```typescript
 interface BranchState {
-  owned: boolean;                      // true = agent created, false = existing branch (detached HEAD)
-  head_sha: string;                    // HEAD position when agent last left this branch
   base_branch?: string;                // PR target branch (e.g. 'main', 'master')
   pr_number?: number;                  // PR associated with this branch
-  last_processed_comment_id?: number;  // triage tracking for this branch's PR
+  last_processed_comment_id?: number;  // last GitHub comment id processed for this branch's PR
   stash_name?: string;                 // set if dirty work was auto-stashed when leaving
 }
 ```
 
-Branch state tracks each branch the agent creates or visits. The `owned` flag distinguishes agent-created branches (checked out normally) from existing branches (visited in detached HEAD mode). Legacy top-level fields (`feature_branch`, `pr_number`, etc.) are mirrored from the current branch state by `mirrorLegacyFields()` in `src/connectors/github/branch-state.ts` for backward compatibility.
+Branch state tracks each branch the agent creates or visits. Legacy top-level fields (`feature_branch`, `pr_number`, etc.) are mirrored from the current branch state by `mirrorLegacyFields()` in `src/connectors/github/branch-state.ts` for backward compatibility.
 
 ### AgentSessionState
 
@@ -183,8 +197,8 @@ type TaskStatus = 'in_progress' | 'stopped' | 'completed';
 ### Related types
 
 ```typescript
-type AgentName = 'pm-agent' | 'triage-agent' | `${string}-agent`;
-type FindingType = 'discovery' | 'decision' | 'completion' | 'blocker';
+type AgentName = CoreAgentName | `${string}-agent`;  // CoreAgentName covers built-in roles
+type FindingType = 'discovery' | 'decision' | 'completion' | 'blocker' | 'artifact';
 ```
 
 ---
@@ -235,57 +249,55 @@ The `url_private_download` URL is preferred over `url_private` for API-based dow
 
 ## Debounced Writes
 
-**Source**: `src/tasks/persistence.ts`
+**Source**: `src/tasks/task.ts` — `Task.save()` and `Task.debouncedSave()`.
 
 ### Design
 
-```typescript
-const DEBOUNCE_MS = 500;
-```
-
-The `saveTask()` function coalesces rapid metadata changes into a single disk write.
-Multiple calls within 500 ms result in only one `writeFile` operation.
+The 500 ms debounce coalesces rapid metadata changes into a single disk write. Both
+the debounced and flushed paths sync agent session state into metadata before
+writing.
 
 ### Implementation
 
 ```typescript
-async function saveTask(runtime: TaskRuntimeState, flush?: boolean): Promise<void>
+async save(flush?: boolean): Promise<void>
+debouncedSave(): void
 ```
 
 | Mode | Behavior |
 |---|---|
-| Default (`flush` omitted or `false`) | Cancels any pending timer, schedules a new write in 500 ms |
-| Flush (`flush = true`) | Cancels any pending timer, writes immediately |
+| `debouncedSave()` (or `save(false)`) | If a save timer is already armed, returns. Otherwise arms a 500 ms timer that syncs sessions and writes `metadata.json` once it fires. |
+| `save(true)` (flush) | Syncs sessions and writes `metadata.json` synchronously via `writeFile`. Does not cancel a pending debounced timer (the next debounced fire is harmless — it just rewrites the same JSON). |
 
-Flush mode is used during `stopTask()` and `completeTask()` to ensure the final status
-is persisted before the runtime is removed from memory.
+Flush mode is used during `Task.stop()` and `Task.complete()` to guarantee the final
+status is persisted before the task instance is removed from `activeTasks`.
 
 ### Session state sync
 
-Before every write (debounced or flushed), `syncAndWrite()` copies the in-memory
-`task.sessions` map into `metadata.agent_sessions`:
+Before every write (debounced or flushed), the save path copies each in-memory
+`Agent.session` into `metadata.agent_sessions`:
 
 ```typescript
-async function syncAndWrite(task: Task): Promise<void> {
-  for (const [name, session] of task.sessions) {
-    task.metadata.agent_sessions[name] = { ...session };
-  }
-  task.metadata.updated_at = new Date().toISOString();
-  await writeFile(getMetadataPath(task.taskId), JSON.stringify(task.metadata, null, 2));
+for (const [agentName, agent] of this.agentProcesses) {
+  this.metadata.agent_sessions[agentName] = { ...agent.session };
 }
+this.metadata.updated_at = new Date().toISOString();
+await writeFile(getMetadataPath(this.taskId), JSON.stringify(this.metadata, null, 2));
 ```
 
-This ensures the on-disk metadata always reflects the latest agent session state,
-including `session_id`, `active`, and `last_activity` fields.
+This ensures on-disk metadata always reflects the latest agent session state
+(`session_id`, `active`, `last_activity`).
 
 ### Internal state
 
-Two maps track pending writes:
+The debounce uses a single per-instance timer field on the `Task`:
 
 ```typescript
-const debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();  // taskId -> timer
-const debouncedRuntimes = new Map<string, TaskRuntimeState>();            // taskId -> runtime
+private saveTimer?: ReturnType<typeof setTimeout>;
 ```
+
+A second per-task write queue (`writeQueues` in `persistence.ts`) serialises
+appends to `events.jsonl` so event ordering is preserved.
 
 ---
 
@@ -293,37 +305,41 @@ const debouncedRuntimes = new Map<string, TaskRuntimeState>();            // tas
 
 ### Per-thread tracking
 
-Each `SlackThread` in metadata carries a `last_processed_ts` field -- the Slack
-timestamp of the most recently processed message in that thread.
+Each `SlackChannel` in `metadata.channels` carries a `last_processed_ts` field -- the
+Slack timestamp of the most recently processed message in that thread.
 
 ### New thread for existing task
 
-When a new Slack thread is linked to an existing task (`handleExistingTask()` in
-`connectors/slack/events.ts`), the full thread history is appended to the knowledge log and the
-thread is added to `metadata.channels` as a `SlackChannel` with `last_processed_ts` set to the
-current message's timestamp.
+When a new Slack thread is linked to an existing task (`Task.append()` in
+`src/tasks/task.ts`), the full thread history is appended to the knowledge log and a
+new `SlackChannel` entry is added to `metadata.channels` (keyed
+`slack:{channelId}:{threadId}`) with `last_processed_ts` set to the current message's
+timestamp. `default_channel` is promoted via `??=` only the first time.
 
 ### Existing thread
 
-When a message arrives in an already-tracked thread, the event handler fetches the
-thread history and only appends messages with `ts > last_processed_ts`. Bot messages
-(from the system's own bot user ID) are filtered out. After processing,
-`last_processed_ts` is updated to the current message's timestamp.
+When a message arrives in an already-tracked thread, `Task.append()` only writes
+messages with `ts > last_processed_ts`. Bot-message and external-user filtering
+happens upstream in `src/connectors/slack/events.ts` before `append()` is called.
+After processing, `last_processed_ts` is updated to the current message's timestamp
+and a debounced save is scheduled.
 
 ```typescript
-// connectors/slack/events.ts - existing thread dedup
-for (const msg of threadHistory) {
-  if (!msg.ts || msg.ts <= lastProcessedTs) continue;
-  if (!msg.user || msg.user === 'unknown' || msg.user === getBotUserId()) continue;
-  // ... append to knowledge log
+// src/tasks/task.ts — existing thread dedup
+const lastProcessedTs = existing.last_processed_ts;
+for (const msg of thread.messages) {
+  if (msg.ts <= lastProcessedTs) continue;
+  await writeMessage(msg);
 }
-existingThread.last_processed_ts = message.ts;
+existing.last_processed_ts = thread.currentMessageTs;
+this.debouncedSave();
 ```
 
 ### GitHub comment deduplication
 
 Similarly, `BranchState.last_processed_comment_id` (per-branch) tracks the most recently
-processed GitHub PR comment ID. When GitHub triage fires, only comments with
+processed GitHub PR comment ID. When `issue_comment` events arrive at
+`handleExistingTaskDirect()` in `src/connectors/github/events.ts`, only comments with
 `id > last_processed_comment_id` are appended to the knowledge log. The legacy
 `RepositoryInfo.last_processed_comment_id` is still supported for backward compatibility
 and mirrored from the current branch state.
@@ -343,24 +359,28 @@ and mirrored from the current branch state.
 2. For each task, `Task.get(taskId)` rebuilds the in-memory `Task` from the
    metadata file.
 3. `recoverTaskAgents()` re-spawns agents that were active before shutdown:
-   - Iterates `task.sessions` looking for entries with `active === true`.
+   - Iterates `metadata.agent_sessions` looking for entries with `active === true`
+     (legacy bare-string entries are treated as inactive).
    - Sends `AGENT_PROMPTS.recovery` to each active agent via `task.sendMessage()`.
    - If no agents had `active === true` (stale metadata), falls back to spawning
      `pm-agent` with the recovery prompt.
 
 ### Shutdown preservation
 
-During graceful shutdown, `isShuttingDown` is set to `true` via `src/system/shutdown.ts`.
-`task.updateAgentState()` checks this flag and **skips** deactivation writes, preserving
-the `active: true` state in metadata. This ensures recovery correctly identifies which
-agents to re-spawn.
+During graceful shutdown, `isShuttingDown` is flipped to `true` via
+`src/system/shutdown.ts` (`getIsShuttingDown()` / `setIsShuttingDown()`).
+`Task.updateAgentState()` checks this flag and **skips** deactivation writes,
+preserving the `active: true` state in metadata. This ensures recovery correctly
+identifies which agents to re-spawn.
 
 ### Task reactivation
 
-`Task.get()` is idempotent: if the task is already in the active tasks map, it returns
-the existing instance. Otherwise, it reads metadata from disk and constructs a new `Task`,
-which sets `metadata.status = 'in_progress'` regardless of the on-disk status. This
-is how stopped tasks are reactivated (e.g., after edit mode approval or research budget
+`Task.get()` is idempotent at the active-tasks-map level: if the task is already in
+`activeTasks`, it returns the existing instance; otherwise it reads metadata from
+disk and constructs a new `Task` (inert until the first `sendMessage()`). The status
+on disk is preserved by the constructor; reactivation to `in_progress` happens in
+`Task.activate()`, which is called lazily on the first `sendMessage()`. This is how
+stopped tasks are reactivated (e.g., after edit mode approval or research budget
 approval).
 
 ---

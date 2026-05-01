@@ -1,16 +1,18 @@
 # Architecture Simplification Proposal
 
-## Problem
+> **Status (2026-05-01): Largely implemented.** The structural reorganization described below has been adopted. `connectors/slack/` and `connectors/github/` exist and absorb the old slack/github modules; `agents/registry.ts`, `agents/spawn.ts` (track-branching), and co-located `agents/tools.ts` replace the old per-track spawners and split tool defs/impls; `tasks/task.ts` (the `Task` class with `sendMessage`) replaces the `task-runtime.ts` god module; `tasks/persistence.ts` consolidates persistence; `index.ts` owns the HTTP server and mounts connectors. The "Problem" section below describes the *historical* pre-refactor codebase and is preserved for context. Note: the triage agent referenced throughout is currently disabled — Slack messages route directly to the PM (see commented-out call in `src/connectors/slack/events.ts`). Also note that the proposed `connectors/github/worktree.ts` module did not survive: worktrees were later replaced by shared clones in `connectors/github/repo-clone.ts` (see [v18-shared-clones](../plans/v18-shared-clones.md)).
 
-The core flow (message → triage → task → agent → response) touches 11+ files spread across `system/`, `agents/`, `mcp/`, `slack/`, and `github/`. Understanding "what happens when a Slack message arrives" requires jumping through server, webhook router, event handler, task runtime, three separate agent spawners, tool definitions, tool callback implementations, and three persistence modules.
+## Problem (historical)
+
+The pre-refactor core flow (message → triage → task → agent → response) touched 11+ files spread across `system/`, `agents/`, `mcp/`, `slack/`, and `github/`. Understanding "what happens when a Slack message arrives" required jumping through server, webhook router, event handler, task runtime, three separate agent spawners, tool definitions, tool callback implementations, and three persistence modules.
 
 Key pain points:
 
-1. **Scatter** — Related logic is split across distant files. Tool *definitions* live in `mcp/tools.ts`, but their *implementations* are closures inside `task-runtime.ts`. Three nearly identical agent spawners sit in separate files. Three config builders (`plugin-loader` → `repo-configs` → `plugin-configs`) transform the same plugin data into different shapes.
+1. **Scatter** — Related logic was split across distant files. Tool *definitions* lived in `mcp/tools.ts`, but their *implementations* were closures inside `task-runtime.ts`. Three nearly identical agent spawners sat in separate files. Three config builders (`plugin-loader` → `repo-configs` → `plugin-configs`) transformed the same plugin data into different shapes.
 
-2. **God module** — `task-runtime.ts` (1140 lines) does everything: creates tasks, spawns agents, builds 20+ tool callbacks, handles approvals, manages timeouts, and orchestrates task lifecycle.
+2. **God module** — `task-runtime.ts` (1140 lines) did everything: created tasks, spawned agents, built 20+ tool callbacks, handled approvals, managed timeouts, and orchestrated task lifecycle.
 
-3. **Circular dependencies** — Tools need task state to operate, and the task runtime needs to create the tools. Currently solved with callback interfaces, but the real issue is one module doing too many things.
+3. **Circular dependencies** — Tools needed task state to operate, and the task runtime needed to create the tools. Solved with callback interfaces, but the real issue was one module doing too many things.
 
 ## Core Model
 

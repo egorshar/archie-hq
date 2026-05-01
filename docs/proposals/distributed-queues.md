@@ -8,7 +8,7 @@ Replace the current in-memory message queues with a durable, Redis-backed queue 
 
 ## Motivation
 
-The current system uses in-memory `MessageQueue` instances per agent per task (`src/system/message-queue.ts`). This works well for single-pod deployment but has limitations:
+The current system uses in-memory `MessageQueue` instances per agent per task (`src/agents/message-queue.ts`). This works well for single-pod deployment but has limitations:
 
 - **Task state lost on restart** — mitigated by v10's restart recovery, but messages in transit are lost
 - **No graceful deployment** — restarting the process interrupts all active tasks

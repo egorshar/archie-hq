@@ -6,13 +6,13 @@ Archie operates in two modes: **readonly** (the default) and **edit** (after hum
 
 ### Readonly Mode (Default)
 
-When a task starts, all agents operate in readonly mode. Repo agents can read and search code using `Read`, `Glob`, and `Grep` tools, plus read-only git commands (`git log`, `git diff`, `git show`, `git blame`, `git branch`) and PR read tools (`list_prs`, `get_pr`, `get_pr_status`, `get_pr_reviews`). They cannot modify any files.
+When a task starts, all repo agents operate in readonly mode. Their `cwd` is an agent workspace under `sessions/{taskId}/agents/{agentKey}`, and the repository is mounted as an additional directory at `sessions/{taskId}/repos/{repoKey}`. The repo path is mounted read-only by the OS sandbox (and read-only via filesystem-guard PreToolUse hooks for in-process tools), so `Write`, `Edit`, and write-to-repo Bash commands fail even though the tools are nominally available. PR/branch write MCP tools (`push_branch`, `create_pull_request`, `merge_pull_request`, `create_branch`, etc.) are explicitly listed in `disallowedTools`. Read tools, git read commands via `Bash`, the `fetch` and `switch_branch` MCP tools, and PR read tools (`list_prs`, `get_pr`, `get_pr_status`, `get_pr_reviews`, `get_pr_comments`, `get_review_threads`) all work.
 
-In readonly mode, the repo agent's `cwd` is a task-local worktree at `sessions/{taskId}/repos/{repoKey}` in detached HEAD mode at `origin/{baseBranch}`. Readonly worktrees are cleaned up when the task stops or completes.
+In readonly mode the clone is checked out on the base branch (`{ type: 'base' }`). When the task stops or completes, the clone is removed by `cleanupClones()` to free disk space.
 
 ### Edit Mode (After Approval)
 
-Once edit mode is approved for a task, repo agents gain access to file modification tools, local git commands, and PR write tools (push, create PR, merge, etc.). The worktree switches to a feature branch, and additional tools become available. Edit mode is a one-way, permanent transition for the task -- once approved, it cannot be revoked.
+Once edit mode is approved for a task, the repo path's sandbox flips from read-only to read-write (`Write`, `Edit`, and write-capable `Bash` commands are now allowed against the clone), and the previously-disallowed MCP tools become available: `push_branch`, `create_pull_request`, `update_pr`, `add_pr_comment`, `add_review_comment`, `reply_to_review_comment`, `resolve_review_thread`, `request_re_review`, `merge_pull_request`, `close_pull_request`, and `create_branch`. The next time a repo agent is spawned, the clone is set up on a fresh feature branch (`{ type: 'new_branch', name: 'feature/{taskId}' }`). Edit mode is a one-way, permanent transition for the task — once approved, it cannot be revoked. Clones for tasks with `edit_allowed === true` are NOT removed on stop/complete (they hold local commits, branches, and PR state).
 
 ## Human-in-the-Loop Approval Flow
 
@@ -20,37 +20,37 @@ The transition from readonly to edit mode follows this sequence:
 
 ### 1. PM Requests Edit Mode
 
-The PM agent calls the `request_edit_mode` MCP tool (defined in `src/agents/tools.ts`) with a reason string explaining what changes are needed. Before calling this tool, the PM is expected to have already explained the situation to the user via `post_to_slack`.
+The PM agent calls the `request_edit_mode` MCP tool (defined in `src/agents/tools.ts`) with a reason string explaining what changes are needed. Before calling this tool, the PM is expected to have already explained the situation to the user via `post_to_user`.
 
-### 2. Interactive Buttons Posted to Slack
+### 2. Interactive Buttons Posted
 
-The `onRequestEditMode` callback in `src/tasks/task.ts` posts a Block Kit message to all tracked Slack threads with two buttons:
+`request_edit_mode` logs a `decision` finding (`Edit mode requested: <reason>`) and calls `task.postInteractiveToUser(...)` with a Block Kit message containing two buttons:
 
 ```
 *Edit mode request:* <reason>
 [ Approve ]  [ Deny ]
 ```
 
-The buttons use action IDs `approve_edit_mode` and `deny_edit_mode`, with the task ID as the button value.
+The buttons use action IDs `approve_edit_mode` and `deny_edit_mode`, with the task ID as the button value. `postInteractiveToUser` posts to the task's default channel (Slack today; other connectors may not surface the buttons).
 
 ### 3. Task Pauses
 
-Immediately after posting the approval request, the system calls `task.stop()`. This stops all agent queues and deactivates all agents. The task is fully paused until the user responds.
+Immediately after posting the approval request, `request_edit_mode` calls `task.stop()`. This stops all agent queues, marks the task `stopped`, and (because `edit_allowed` is not yet true) cleans up clones via `cleanupClones()`. The task is fully paused until the user responds.
 
 ### 4. User Clicks a Button
 
-**Approve** (handled in `src/connectors/slack/events.ts: app.action("approve_edit_mode")`):
-- The original message is updated to remove the buttons and show "Edit mode approved by \<user\>".
+**Approve** (handled in `src/connectors/slack/events.ts: app.action("approve_edit_mode")`, with an equivalent path in `src/connectors/api/routes.ts` for the CLI/API):
+- The original message is updated to replace the buttons with `Edit mode approved by <@user>`.
 - `handleEditModeApproval()` in `src/tasks/task.ts` is called.
-- Sets `metadata.edit_allowed = true` on the task.
-- Logs "Edit mode approved by user" to the knowledge log.
-- Reactivates the PM agent with "New input received. Check knowledge.log for the update."
+- Sets `metadata.edit_allowed = true` on the task and persists via `debouncedSave()`.
+- Appends the system finding `Edit mode approved by user` (decision) to `knowledge.log`.
+- Reactivates the PM agent by sending the `existingTask` agent prompt (which reactivates the task and re-spawns agents — repo agents now spawn into a fresh `feature/{taskId}` branch).
 
-**Deny** (handled in `src/connectors/slack/events.ts: app.action("deny_edit_mode")`):
-- The original message is updated to remove the buttons and show "Edit mode denied by \<user\>".
+**Deny** (handled in `src/connectors/slack/events.ts: app.action("deny_edit_mode")`, with the same API equivalent):
+- The original message is updated to replace the buttons with `Edit mode denied by <@user>`.
 - `handleEditModeDenial()` in `src/tasks/task.ts` is called.
-- Logs "Edit mode denied by user" to the knowledge log.
-- Reactivates the PM agent to handle the denial (e.g., provide readonly findings instead).
+- Appends the system finding `Edit mode denied by user` (decision) to `knowledge.log`.
+- Reactivates the PM agent with the `existingTask` prompt to handle the denial (e.g., provide readonly findings instead).
 
 ## Task-Level Mode Transition
 
@@ -69,63 +69,62 @@ Key properties of this transition:
 - **One-way**: Once `edit_allowed` is set to `true`, it is never set back to `false`. There is no mechanism to revoke edit mode for an active task.
 - **Persistent**: The flag is stored in `metadata.json` on disk and survives task stop/reactivation cycles.
 
-## Git Worktree Management
+## Shared Clone Management
 
-All repo agents operate in isolated git worktrees, regardless of mode. This is managed by `src/connectors/github/worktree.ts`.
+Each repo agent gets its own task-local **shared clone** (created with `git clone --shared`), regardless of mode. This is managed by `src/connectors/github/repo-clone.ts`. A shared clone is an independent repository that borrows objects from the base repo via an `objects/info/alternates` file but has its own `.git/` directory, refs, index, and `origin` remote pointing at GitHub. (An older worktree-based design has been replaced; `migrateWorktreeToClone` exists only to upgrade legacy task state on first reuse.)
 
-### `setupWorktree()`
+### `setupSharedClone()`
 
-The `setupWorktree()` function creates a new worktree for a repository in a task. It accepts a `WorktreeCheckout` parameter that determines the checkout mode:
+The `setupSharedClone()` function creates a new clone for a repository in a task. It accepts a `CloneCheckout` parameter that determines the checkout mode:
 
 ```typescript
-type WorktreeCheckout =
-  | { type: 'detached'; sha?: string }    // Detached HEAD at origin/{baseBranch} or specific SHA
-  | { type: 'branch'; name: string }       // Checkout existing branch (normal)
-  | { type: 'new_branch'; name: string };  // Create new branch from origin/{baseBranch}
+type CloneCheckout =
+  | { type: 'new_branch'; name: string }   // RW fresh: clone base, create branch
+  | { type: 'branch'; name: string }       // RW resume / branch visit
+  | { type: 'base' };                      // RO default: clone on base branch
 ```
 
 Steps:
-1. **Base branch detection**: Uses the provided `baseBranch` parameter, or auto-detects by checking `refs/remotes/origin/HEAD`, then falling back to `origin/main`, then `origin/master`.
-2. **Fetch latest**: Calls `fetchOrigin(baseRepoPath, baseBranch)` to pull the latest commits for the base branch.
-3. **Worktree creation**: Creates the worktree using the appropriate git command based on checkout type:
-   - `detached`: `git worktree add --detach "{path}" origin/{baseBranch}` (or specific SHA)
-   - `branch`: `git worktree add "{path}" {branchName}`
-   - `new_branch`: `git worktree add -b {branchName} "{path}" origin/{baseBranch}`
-4. **Existing branch handling**: If a `new_branch` already exists (e.g., task recovery), it checks for an existing worktree first, then falls back to creating a worktree with the existing branch.
+1. **Base branch detection**: Uses the provided `baseBranch` parameter, or auto-detects via `getDefaultBranch()` by reading `symbolic-ref refs/remotes/origin/HEAD`, then falling back to `origin/main`, then `origin/master`.
+2. **Fetch latest**: Calls `fetchOrigin(baseRepoPath)` (and additionally `fetchOrigin(baseRepoPath, name)` for `branch` checkouts) to pull the latest commits.
+3. **Base repo sync**: Resets the local branch in the base repo to `origin/{cloneBranch}` so `git clone --shared` sees up-to-date refs.
+4. **Clone**: `git clone --shared --branch {cloneBranch} "{baseRepoPath}" "{clonePath}"`, then `submodule update --init --recursive` (best-effort), then `remote set-url origin <github-url>` so pushes go to GitHub rather than the base repo.
+5. **Feature branch creation**: For `new_branch`, runs `checkout -b {name}` after cloning.
 
-The worktree is placed at `sessions/{taskId}/repos/{repoKey}` (e.g., `sessions/task-abc123/repos/backend`).
+The clone is placed at `sessions/{taskId}/repos/{repoKey}` (e.g., `sessions/task-abc123/repos/backend`).
 
-### Worktree Creation at Spawn
+### Clone Creation at Spawn
 
-Worktrees are created when a repo agent is spawned. This happens inside the repo track branch of `spawnAgent()` in `src/agents/spawn.ts`:
+Clones are created when a repo agent is spawned. This happens inside the repo track branch of `spawnAgent()` in `src/agents/spawn.ts`:
 
 ```
 spawnAgent() called (repo track)
-  -> Check if worktree already exists at task-local path
-  -> If yes: reuse existing worktree, fetch origin for latest base
-  -> If no:
-    -> Determine checkout target from previous branch state + edit mode:
-      - edit_allowed && no previous branch: new_branch (feature/{taskId})
-      - had an owned branch: branch (restore it)
-      - was on existing branch: detached at recorded SHA
-      - default: detached HEAD at base branch
-    -> Call setupWorktree() with the checkout target
-    -> Update metadata with worktree info and branch state
-    -> Start a fresh SDK session (cwd changed)
+  -> If task-local path is a legacy worktree → migrateWorktreeToClone()
+  -> If a shared clone already exists at the path → reuse it
+  -> Otherwise pick a CloneCheckout from previous branch state + edit mode:
+       editAllowed && (no previous branch || previous == base) → new_branch (feature/{taskId})
+       editAllowed && previous != base                          → branch (restore previous_branch)
+       readonly                                                 → base
+     Then call setupSharedClone(...) with that checkout.
+  -> configureGitIdentity(clonePath)
+  -> Update metadata.repositories[repoKey] with clone_path / current_branch /
+     branch_states (hydrated for any non-base feature branch)
+  -> Spawn the SDK session with cwd = agent workspace and the clone path
+     listed under additionalDirectories
 ```
 
-### Worktree Cleanup
+### Clone Cleanup
 
-When a readonly task stops or completes, the `removeWorktree()` function (`src/connectors/github/worktree.ts`) is called to clean up the worktree from the base repository. This uses `git worktree remove --force` and falls back to `git worktree prune` if the directory is already gone.
+When a task stops or completes AND `metadata.edit_allowed !== true`, `cleanupClones()` (`src/tasks/task.ts`) iterates `metadata.repositories` and calls `removeClone(clone_path)` (`src/connectors/github/repo-clone.ts`), which is a simple `rm -rf`, then clears `clone_path` so the next spawn re-creates a fresh clone. Clones for edit-mode tasks are kept on disk because they hold un-pushed commits, branches, and PR bookkeeping.
 
-### Worktree Metadata
+### Repository Metadata
 
-After worktree creation, the following fields are stored in `metadata.repositories[repoKey]` (`src/types/task.ts`):
+After clone creation, the following fields are stored in `metadata.repositories[repoKey]` (`src/types/task.ts`):
 
 ```typescript
 interface RepositoryInfo {
   path: string;                                    // Base repository path
-  worktree_path?: string;                          // Path to active worktree
+  clone_path?: string;                             // Path to active task-local shared clone
   current_branch?: string;                         // Branch agent is on (key into branch_states)
   branch_states?: Record<string, BranchState>;     // Per-branch tracking
   // Legacy fields (mirrored from current branch state for rollback safety):
@@ -142,12 +141,10 @@ Each branch the agent creates or visits is tracked independently:
 
 ```typescript
 interface BranchState {
-  owned: boolean;                      // true = agent created, false = existing branch
-  head_sha: string;                    // HEAD position when agent last left this branch
-  base_branch?: string;                // PR target branch (e.g. 'main')
+  base_branch?: string;                // PR target branch (e.g. 'main', 'master')
   pr_number?: number;                  // PR associated with this branch
-  last_processed_comment_id?: number;  // GitHub comment triage cursor
-  stash_name?: string;                 // Set if dirty work was auto-stashed
+  last_processed_comment_id?: number;  // triage tracking for this branch's PR
+  stash_name?: string;                 // set if dirty work was auto-stashed when leaving
 }
 ```
 
@@ -158,71 +155,60 @@ Branch state helpers live in `src/connectors/github/branch-state.ts`:
 
 ## Tool Restrictions
 
-The allowed tools for a repo agent are determined at spawn time based on the `edit_allowed` flag. In `src/agents/spawn.ts`, the `allowedTools` array is constructed conditionally:
+Repo-agent tool gating is implemented through two mechanisms in `src/agents/spawn.ts` (repo track):
 
-### Readonly Mode Tools
-- `Read` -- Read file contents
-- `Glob` -- Find files by pattern
-- `Grep` -- Search file contents
-- `mcp__repo-agent-tools__send_message_to_agent` -- Inter-agent communication
-- `mcp__repo-agent-tools__log_finding` -- Write to shared knowledge log
-- `mcp__research-tools__web_research` -- Web research
-- `mcp__repo-tools__fetch` -- Fetch latest refs from origin
-- `mcp__repo-tools__switch_branch` -- Switch branches with auto-stash
-- `mcp__repo-tools__list_prs` -- List PRs with filters
-- `mcp__repo-tools__get_pr` -- Get full PR details including diff
-- `mcp__repo-tools__get_pr_status` -- Check PR mergeable state
-- `mcp__repo-tools__get_pr_reviews` -- Fetch PR reviews and comments
-- `Bash(git log*)` -- View commit history
-- `Bash(git diff*)` -- View changes
-- `Bash(git show *)` -- Inspect commits
-- `Bash(git blame *)` -- Line-by-line attribution
-- `Bash(git branch -r*)` -- List remote branches
-- `Bash(git branch --show-current)` -- Show current branch name
-- `Bash(git ls-files*)` -- List tracked files
-- `Bash(git ls-tree *)` -- List tree contents
+1. **`disallowedTools`** — RO mode appends a fixed list of write-side MCP tools to `disallowedTools`. RW mode appends nothing extra. Both modes always also disallow `WebSearch` and `WebFetch`.
+2. **Sandbox** — In RO mode the clone path appears only in `allowReadPaths` and `denyWritePaths`, so `Write`, `Edit`, and any write-touching `Bash` invocation against the clone are blocked by both the OS sandbox and the `createFilesystemGuardHooks()` PreToolUse hooks. In RW mode the clone path is added to `allowWritePaths`, and write tools succeed. The `.git/HEAD` file is also kept in `denyWritePaths` to prevent the agent from doing raw `git checkout`/`switch` (branch movement must go through `switch_branch`/`create_branch`).
 
-### Edit Mode Additional Tools
-- `Write` -- Write entire file contents
-- `Edit` -- Make targeted edits to files
-- `Bash(rm *)` -- Delete files
-- `Bash(git add *)` -- Stage changes
-- `Bash(git rm *)` -- Remove tracked files
-- `Bash(git commit *)` -- Create commits
-- `Bash(git status*)` -- Check working tree status
-- `Bash(git merge *)` -- Merge branches (for conflict resolution with origin/main)
-- `Bash(git restore *)` -- Unstage or discard changes
-- `mcp__repo-tools__push_branch` -- Push commits to origin
-- `mcp__repo-tools__create_pull_request` -- Create a PR on GitHub
-- `mcp__repo-tools__update_pr` -- Update PR title/description
-- `mcp__repo-tools__add_pr_comment` -- Add a general PR comment
-- `mcp__repo-tools__add_review_comment` -- Comment on a specific line
-- `mcp__repo-tools__resolve_review_thread` -- Mark a review thread as resolved
-- `mcp__repo-tools__request_re_review` -- Request reviewers to re-review
-- `mcp__repo-tools__merge_pull_request` -- Merge a PR
-- `mcp__repo-tools__close_pull_request` -- Close a PR without merging
-- `mcp__repo-tools__create_branch` -- Create and switch to a new branch
-- `mcp__repo-tools__list_branches` -- List branches in the current task
+The full single allowed-tool list (set as `def.tools` on the repo agent definition) is the same in RO and RW; what changes is which entries actually function.
 
-Note: Bash permission patterns use space syntax (e.g., `Bash(git add *)`) not colon syntax.
+### Always available (RO and RW)
+- `Read`, `Glob`, `Grep` — file inspection (sandbox-bounded reads)
+- `Bash` — read-side git commands work; write-side commands are blocked by the sandbox in RO mode
+- `mcp__repo-agent-tools__send_message_to_agent`, `mcp__repo-agent-tools__log_finding`, `mcp__repo-agent-tools__share_artifact`
+- `mcp__research-tools__web_research`
+- `mcp__repo-tools__fetch` — fetch latest refs from origin
+- `mcp__repo-tools__switch_branch` — switch branches with auto-stash
+- `mcp__repo-tools__list_branches` — list branches the agent has touched in this task
+- `mcp__repo-tools__list_prs`, `mcp__repo-tools__get_pr`, `mcp__repo-tools__get_pr_status`, `mcp__repo-tools__get_pr_reviews`, `mcp__repo-tools__get_pr_comments`, `mcp__repo-tools__get_review_threads`
+
+### Disallowed in RO, allowed in RW
+- `mcp__repo-tools__push_branch`
+- `mcp__repo-tools__create_pull_request`
+- `mcp__repo-tools__update_pr`
+- `mcp__repo-tools__add_pr_comment`
+- `mcp__repo-tools__add_review_comment`
+- `mcp__repo-tools__reply_to_review_comment`
+- `mcp__repo-tools__resolve_review_thread`
+- `mcp__repo-tools__request_re_review`
+- `mcp__repo-tools__merge_pull_request`
+- `mcp__repo-tools__close_pull_request`
+- `mcp__repo-tools__create_branch`
+
+### Effectively gated by the sandbox (registered everywhere, but only succeed in RW)
+- `Write`, `Edit` — blocked by `createFilesystemGuardHooks()` in RO; allowed in RW
+- `Bash` write-side commands against the clone (`git add`, `git commit`, `git rm`, `git restore`, `git merge`, `rm`, etc.) — blocked by the OS sandbox `denyWrite` on the clone path in RO; allowed in RW
 
 ## Branch Strategy
 
-All feature branches follow the pattern `feature/task-{taskId}`, where `taskId` is the full task identifier (e.g., `task-01012026-1823-abc123`). This naming convention serves double duty:
+The first feature branch follows the pattern `feature/{taskId}`, where `taskId` is the full task identifier (e.g., `task-20260101-1823-abc123`) and so already begins with `task-`. If the agent calls `create_branch` again on the same task, additional branches are auto-numbered as `feature/{taskId}-2`, `feature/{taskId}-3`, etc. This naming serves double duty:
 
-1. **Isolation**: Each task gets its own branch, preventing cross-task interference.
-2. **Webhook routing**: The webhook router uses `extractTaskIdFromBranch()` in `src/connectors/github/webhooks.ts` to match incoming GitHub events (pushes, CI results, reviews) back to the correct task. The regex pattern `^feature\/(task-[a-z0-9-]+)$` extracts the task ID from the branch name.
+1. **Isolation**: Each task gets its own branch (or family of branches), preventing cross-task interference.
+2. **Webhook routing**: The webhook router uses `extractTaskIdFromBranch()` in `src/connectors/github/webhooks.ts` to match incoming GitHub events (pushes, CI results, reviews) back to the correct task. The regex `^feature\/(task-\d{8}-\d{4}-[a-z0-9]+)(?:-\d+)?$` extracts the task ID, allowing the optional `-N` suffix from multi-branch tasks.
 
 ## Cross-Agent Isolation
 
-Each repo agent in a task operates in its own worktree within the task's session directory:
+Each repo agent in a task operates in its own shared clone within the task's session directory, plus a per-agent workspace under `agents/{agentKey}` that serves as the SDK `cwd`:
 
 ```
 sessions/
   task-abc123/
+    agents/
+      backend/     <- workspace cwd for backend-agent (.claude/skills, hooks, etc.)
+      mobile/      <- workspace cwd for mobile-agent
     repos/
-      backend/     <- worktree for backend-agent
-      mobile/      <- worktree for mobile-agent
+      backend/     <- shared clone for backend-agent
+      mobile/      <- shared clone for mobile-agent
     shared/
       knowledge.log
       metadata.json
@@ -230,25 +216,27 @@ sessions/
 
 Key isolation properties:
 
-- **Separate worktrees**: Each repo agent gets its own worktree cloned from a different base repository. There is no cross-contamination between repositories.
-- **Separate branches**: Each worktree has its own `feature/task-{id}` branch, branched from the respective repository's base branch.
-- **Base repo isolation**: Worktrees are created from the base repository using `git worktree add`, which means the base repository remains untouched. Multiple tasks can share the same base repo without conflict.
-- **Git identity inheritance**: Worktrees inherit the git user name and email from the base repository, which is configured once at server startup.
+- **Separate clones**: Each repo agent gets its own task-local shared clone derived from a different base repository, so there is no cross-contamination between repositories.
+- **Separate branches**: Each clone has its own `feature/{taskId}` branch (created in RW mode), branched from the respective repository's base branch.
+- **Base repo isolation**: Clones are created with `git clone --shared` from the base repository. They borrow objects via `objects/info/alternates` but have independent refs/index, and `origin` is rewritten to GitHub so pushes never go back to the base repo. Multiple tasks can share the same base repo without conflict.
+- **Git identity**: `configureGitIdentity(clonePath)` runs after clone creation so commits get the configured user name and email.
 
 ## Session Handling on Mode Transition
 
-When a new worktree is created (either for a fresh readonly task or after edit mode approval), `spawnAgent()` sets `startFreshSession = true`, which causes the agent to start a fresh Claude Agent SDK session. This ensures the agent's filesystem context is correct for the new working directory.
+The PM agent's reactivation after approval/denial uses `task.sendMessage(AGENT_PROMPTS.existingTask, 'pm-agent')`, which routes through the standard task-reactivation path. When the PM later sends work to a repo agent, `ensureAgentSpawned()` calls `spawnAgent()` for that agent. Because the readonly clone was deleted on the earlier `task.stop()`, `cloneExists()` returns false and a brand-new clone is created — in RW mode that means `setupSharedClone({ type: 'new_branch', name: 'feature/{taskId}' })`. The SDK session for the repo agent is started without a prior `session_id`, so it starts fresh against the new clone path.
 
-If the worktree already exists (e.g., task was stopped and reactivated), the existing session ID is reused and the agent fetches the latest origin to ensure remote refs are up-to-date.
+If a clone is reused across stop/reactivate cycles (e.g., RW reactivation where the clone was preserved), the existing SDK `session_id` (stored in `metadata.agent_sessions[agentId]`) is passed via `resume`, and the spawn flow runs `fetch origin` on the reused clone before continuing.
 
 ## Relevant Source Files
 
-- `src/connectors/github/worktree.ts` -- `setupWorktree()`, `removeWorktree()`, `worktreeExists()`, `getWorktreeBranch()`, `WorktreeCheckout` type, base branch detection
-- `src/connectors/github/branch-state.ts` -- `hydrateBranchState()`, `mirrorLegacyFields()`, `findBranchStateByPR()` (per-branch state helpers)
-- `src/agents/spawn.ts` -- `spawnAgent()` with repo track logic, tool restriction, worktree creation trigger
-- `src/agents/tools.ts` -- `repo-tools` MCP server (git workflow + PR tools), `request_edit_mode` tool definition
-- `src/tasks/task.ts` -- `handleEditModeApproval()`, `handleEditModeDenial()`
-- `src/connectors/slack/events.ts` -- `approve_edit_mode` and `deny_edit_mode` Bolt action handlers
-- `src/types/task.ts` -- `TaskMetadata.edit_allowed`, `RepositoryInfo` with `branch_states`, `BranchState` type
-- `src/connectors/github/client.ts` -- `configureGitIdentity()`, `fetchOrigin()` (with optional branch parameter)
-- `src/connectors/github/webhooks.ts` -- `extractTaskIdFromBranch()` for branch-to-task mapping
+- `src/connectors/github/repo-clone.ts` — `setupSharedClone()`, `removeClone()`, `cloneExists()`, `isWorktree()`, `migrateWorktreeToClone()`, `CloneCheckout` type, `getDefaultBranch()`, `gitExec()`
+- `src/connectors/github/branch-state.ts` — `hydrateBranchState()`, `mirrorLegacyFields()`, `findBranchStateByPR()` (per-branch state helpers)
+- `src/agents/spawn.ts` — `spawnAgent()` with repo-track logic, tool gating, clone creation trigger, sandbox config
+- `src/agents/sandbox.ts` — `buildSandboxConfig()`, `createFilesystemGuardHooks()` — the two layers that enforce the read-only clone in RO mode
+- `src/agents/tools.ts` — `createPMAgentMcpServer` / `createRepoToolsMcpServer` / `createBaseAgentMcpServer`, `request_edit_mode` tool definition
+- `src/tasks/task.ts` — `handleEditModeApproval()`, `handleEditModeDenial()`, `cleanupClones()`, `postInteractiveToUser()`
+- `src/connectors/slack/events.ts` — `approve_edit_mode` and `deny_edit_mode` Bolt action handlers
+- `src/connectors/api/routes.ts` — non-Slack approval/denial path (CLI/HTTP) that calls the same `handleEditMode*` methods
+- `src/types/task.ts` — `TaskMetadata.edit_allowed`, `RepositoryInfo` with `clone_path` and `branch_states`, `BranchState` type
+- `src/connectors/github/client.ts` — `configureGitIdentity()`, `fetchOrigin()`
+- `src/connectors/github/webhooks.ts` — `extractTaskIdFromBranch()` for branch-to-task mapping
