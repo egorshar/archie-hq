@@ -2,34 +2,44 @@
 
 ## Infrastructure
 
-Single-VM deployment on GCP Compute Engine, containerized with Docker.
+Single-VM deployment, containerized with Docker.
 
 ```
-GitHub Actions (CI/CD)
+Jenkins (CI/CD)
     ↓
 Container Registry (Docker images)
     ↓
-Compute Engine VM (e2-standard-2)
+VM host
     ├── /workdir/         # Working directory (plugins, repos, sessions)
+    ├── /app/secrets/     # GitHub App key + encrypted OAuth vault
     └── /app/             # Application container
 
-Secrets: GCP Secret Manager
-Monitoring: Cloud Logging + Cloud Monitoring
+Secrets: env file + mounted /app/secrets volume
+Monitoring: container logs + /health endpoint
 ```
 
 **Capacity:** 10-20 concurrent tasks
-**Cost:** ~$100-200/month (VM + API usage)
 
 ## Security
 
 ### Secrets Management
 
-All secrets stored in GCP Secret Manager:
-- `ANTHROPIC_API_KEY` — Claude API access
-- `SLACK_BOT_TOKEN` — Slack integration
-- `SLACK_SIGNING_SECRET` — Webhook verification
-- `GITHUB_APP_PRIVATE_KEY` — Repository access
-- `GITHUB_APP_ID` — GitHub App identifier
+Secrets are injected via the container's environment file plus the mounted
+`/app/secrets` volume. See `.env.example` for the full list. Required at runtime:
+
+- `ANTHROPIC_API_KEY` — Claude API access (required; startup fails without it)
+- `SLACK_BOT_TOKEN` / `SLACK_SIGNING_SECRET` — Slack integration (optional; CLI-only mode if omitted)
+- `GITHUB_APP_ID`, `GITHUB_APP_SLUG`, `GITHUB_INSTALLATION_ID` — GitHub App identifiers
+- `GITHUB_APP_PRIVATE_KEY_PATH` — path to PEM file (mount under `/app/secrets`)
+- `GITHUB_WEBHOOK_SECRET` — webhook signature verification (PR tools disabled if unset)
+- `ARCHIE_PLUGINS` — git URL for the plugins repo, cloned into `$ARCHIE_WORKDIR/plugins` on startup
+- `ARCHIE_PLUGINS_BRANCH` — optional branch override (defaults to repo default)
+- `ARCHIE_WORKDIR` — base working directory (defaults to `./workdir`; production mounts `/workdir`)
+- `ARCHIE_SECRETS_KEY` — base64 master key for the OAuth secrets vault. Required when any OAuth records exist; validated at startup
+- `ARCHIE_SECRETS_DIR` — overrides the secrets directory (defaults to `/app/secrets` in container)
+- `ARCHIE_PUBLIC_URL` — public HTTPS URL for OAuth provider redirects (`${url}/oauth/callback`)
+- `CLAUDE_PATH` — absolute path to the Claude Code `cli.js` (set to `/usr/local/bin/claude` in container)
+- `PORT` — HTTP port (defaults to `3000`)
 
 ### Repository Access
 
@@ -44,23 +54,20 @@ GitHub App with fine-grained, read-only permissions scoped to the organization. 
 
 ## CI/CD Pipeline
 
-GitHub Actions deploys on push to main:
+Jenkins builds and publishes the production container image:
 
-1. Build Docker image
-2. Push to GCP Artifact Registry
-3. SSH to VM, pull new image
-4. Restart systemd service
-5. Health check verification
+1. Jenkins runs `Jenkinsfile.build` (`containerBuildPipeline_v1` shared library)
+2. Image is built from `Dockerfile.prod` and pushed under the `sweatcoin-archie-hq` repo
+3. Operator pulls the new tag on the VM and restarts the service
+4. Health check verification via `GET /health`
 
-See `Jenkinsfile.build` for the build pipeline configuration.
+There is no GitHub Actions workflow in this repo. Deployment to the VM is operator-driven.
 
 ## Docker Configuration
 
-Docker configuration:
-
-- `Dockerfile.prod` — Production image (optimized, minimal)
-- `Dockerfile.dev` — Development image (with hot reload)
-- `docker-compose.yml` — Local development compose
+- `Dockerfile.prod` — Production image (Node 24-slim, bubblewrap sandbox, non-root `archie` user)
+- `Dockerfile.dev` — Development image (with hot reload, used by `docker-compose.yml`)
+- `docker-compose.yml` — Local development compose (`npm run docker:dev`)
 
 ## Systemd Service
 
@@ -70,15 +77,17 @@ The application runs as a systemd service on the VM:
 [Service]
 Type=simple
 ExecStart=/usr/bin/docker run --name archie-app \
+  --env-file /etc/archie/archie.env \
   -p 3000:3000 \
   --cap-add SYS_ADMIN \
   --security-opt seccomp=unconfined \
   --security-opt apparmor=unconfined \
   --security-opt systempaths=unconfined \
   -v /workdir:/workdir \
+  -v /app/secrets:/app/secrets \
   -v /data/claude:/home/archie/.claude \
   -v /data/claude/.claude.json:/home/archie/.claude.json \
-  europe-west2-docker.pkg.dev/PROJECT/archie/app:latest
+  <registry>/sweatcoin-archie-hq:latest
 Restart=always
 RestartSec=10
 ```
@@ -110,10 +119,10 @@ echo 'kernel.apparmor_restrict_unprivileged_userns=0' | sudo tee /etc/sysctl.d/9
 
 | Host Path | Container Path | Purpose |
 |-----------|---------------|---------|
-| `/workdir` | `/workdir` | Runtime state: repos, sessions, plugins |
+| `/workdir` | `/workdir` | Runtime state: `plugins/`, `repos/`, `sessions/`, `plugins-data/` (set via `ARCHIE_WORKDIR`) |
 | `/data/claude` | `/home/archie/.claude` | Claude CLI config and session logs |
 | `/data/claude/.claude.json` | `/home/archie/.claude.json` | Claude CLI feature flags |
-| `/data/secrets` (ro) | `/app/secrets` | GitHub App private key |
+| `/app/secrets` | `/app/secrets` | GitHub App private key + encrypted OAuth vault (read-write — daemon persists refreshed tokens) |
 
 ### Non-Root User
 
@@ -126,10 +135,12 @@ On restart, the application automatically recovers in-progress tasks via `recove
 ### Health Check
 
 ```
-GET /health → { status: "ok", activeTasks: N }
+GET /health → 200 { status: "ok", activeTasks: N }
+GET /health → 503 { status: "shutting_down", activeTasks: N }   # while draining on SIGTERM/SIGINT
 ```
 
-External uptime monitoring via Cloud Monitoring (every 1 min, alert if down > 5 min).
+The handler is mounted directly in `src/index.ts`. External uptime monitoring should poll
+every minute and alert on sustained failure.
 
 ### Logging
 
@@ -139,7 +150,8 @@ The unified logger (`src/system/logger.ts`) provides color-coded, semantic outpu
 - Inter-agent message logging
 - Error and warning highlighting
 
-Application logs flow to Cloud Logging for querying and alerting.
+Application logs are written to stdout/stderr; ship them off the VM with your preferred
+log forwarder (`docker logs`, journald, or a sidecar) for querying and alerting.
 
 ### Key Metrics
 
@@ -152,24 +164,25 @@ Application logs flow to Cloud Logging for querying and alerting.
 
 ### Session Backup
 
-Automated daily backup to Cloud Storage:
-```bash
-gsutil -m rsync -r /workdir/sessions gs://PROJECT-backups/sessions/$(date +%Y-%m-%d)/
-```
+Sessions persist as files under `$ARCHIE_WORKDIR/sessions`. Snapshot or rsync that
+directory (and `/app/secrets` for the OAuth vault + GitHub App key) to your backup
+target on a daily schedule.
 
 ### Recovery Procedures
 
-**App crash:** Systemd auto-restarts. In-progress tasks resume from disk state via session recovery (~10 seconds).
+**App crash:** Systemd auto-restarts. On startup, `recoverActiveTasks()` (`src/tasks/recovery.ts`,
+called from `src/index.ts`) replays in-progress tasks from disk state.
 
-**VM failure:** Create new VM, install Docker, restore sessions from Cloud Storage, deploy latest image. Repos and plugins auto-clone on startup (~30 minutes).
+**VM failure:** Create new VM, install Docker, restore `/workdir/sessions` and
+`/app/secrets` from backup, deploy latest image. Repos and plugins auto-clone on startup
+via `bootstrapWorkdir()` and `cloneRepos()` in `src/system/workdir.ts`.
 
 ## Scaling
 
 ### Vertical (Current)
 
-Start with `e2-standard-2` (2 vCPU, 8GB, ~$60/month). Scale up as needed:
-- `e2-standard-4` (4 vCPU, 16GB, ~$120/month)
-- `e2-standard-8` (8 vCPU, 32GB, ~$240/month)
+Run on a single VM sized for ~10-20 concurrent tasks (2-4 vCPU, 8-16 GB RAM is typical).
+Scale up the host if CPU/memory utilisation stays high.
 
 ### Horizontal (Future)
 
@@ -189,11 +202,10 @@ curl http://localhost:3000/health
 
 # Inspect task state
 ls /workdir/sessions/
-cat /workdir/sessions/task-*/shared/metadata.json | jq .status
 ```
 
 ### Incident Response
 
-- **Secrets leak:** Rotate immediately in GCP Secret Manager, rotate GitHub App credentials
-- **High API costs:** Check active task count, look for stuck agents, review logs for loops
+- **Secrets leak:** Rotate the affected values in the env file and `/app/secrets`, redeploy, and rotate the GitHub App credentials and `ARCHIE_SECRETS_KEY` if the OAuth vault is implicated
+- **High API costs:** Check active task count via `/health`, look for stuck agents, review logs for loops
 - **VM compromised:** Stop VM, snapshot for forensics, launch new VM from backup, rotate all secrets

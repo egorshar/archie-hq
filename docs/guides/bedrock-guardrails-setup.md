@@ -114,6 +114,8 @@ BEDROCK_GUARDRAIL_ID=abc123def456
 # Optional — defaults shown
 BEDROCK_GUARDRAIL_VERSION=DRAFT    # or "1", "2", etc. for published versions
 AWS_REGION=us-east-1               # region where the guardrail was created
+                                   # if unset, the AWS SDK default chain applies
+                                   # (env, shared config file, instance metadata)
 ```
 
 AWS credentials are picked up automatically from:

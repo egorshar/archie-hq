@@ -20,7 +20,7 @@ The system configures git identity using the GitHub App's bot credentials:
 - Name: `{appSlug}[bot]` (e.g., `archie-hq[bot]`)
 - Email: `{appId}+{appSlug}[bot]@users.noreply.github.com`
 
-This is set once per base repository at server startup via `configureGitIdentity()` in `src/connectors/github/client.ts`. Worktrees inherit this configuration from the base repo.
+This is set once per base repository at server startup via `configureGitIdentity()` in `src/connectors/github/client.ts`. Shared clones inherit this configuration from the base repo.
 
 ## Webhook Handling
 
@@ -31,7 +31,7 @@ GitHub webhooks arrive at `POST /webhooks/github`, registered in `src/index.ts` 
 3. Responds with `200 OK` immediately (acknowledging receipt).
 4. Processes the event asynchronously (fire-and-forget).
 
-The webhook secret is optional in `ServerConfig` -- if not provided, the GitHub webhook endpoint is not registered.
+The webhook secret is read from `GITHUB_WEBHOOK_SECRET` (loaded into `AppConfig` in `src/index.ts`) -- if not provided, the GitHub webhook endpoint is not registered.
 
 ### Self-Event Filtering
 
@@ -39,7 +39,7 @@ Before routing, the system checks if the event was triggered by its own bot user
 
 ## Webhook Router
 
-The webhook router (`src/connectors/github/webhooks.ts`) uses a two-tier routing strategy: deterministic routing for structured events and triage-based routing for ambiguous ones.
+The webhook router (`src/connectors/github/webhooks.ts`) uses purely deterministic routing -- every event type maps to one of: `merge_check`, `existing_task`, or `noop` (discard). There is no triage step.
 
 ### Task Identification
 
@@ -53,7 +53,7 @@ If no task ID is found, the event is discarded as "Not our branch pattern."
 
 ### Deterministic Routing
 
-Most GitHub events follow deterministic paths based on event type and action. The `determineRouteAction()` function maps events to one of four internal actions:
+All GitHub events follow deterministic paths based on event type and action. The `determineRouteAction()` function maps events to one of three internal actions (`merge_check`, `existing_task`, `noop`):
 
 | Event Type | Action/State | Route |
 |---|---|---|
@@ -62,34 +62,31 @@ Most GitHub events follow deterministic paths based on event type and action. Th
 | `pull_request_review` | `state=commented` | `existing_task` |
 | `pull_request_review_comment` | any | `existing_task` |
 | `pull_request` | `opened` or `synchronize` | `merge_check` |
-| `pull_request` | `closed` | discard (noop) |
+| `pull_request` | `closed` | `existing_task` |
 | `push` | any | `merge_check` |
 | `workflow_run` | `completed` + `failure` | `existing_task` |
 | `workflow_run` | `completed` + success | `merge_check` |
-| `issue_comment` | `created` | `triage_comment` |
+| `issue_comment` | `created` | `existing_task` |
 
 Route actions map to handler types:
 
 - **`merge_check`** -- Handled directly by the merge orchestrator (see below). Debounced.
-- **`existing_task`** -- Formatted as a human-readable event message, appended to the task's knowledge log, and the PM agent is reactivated.
-- **`triage_comment`** -- Goes through GitHub-specific triage.
+- **`existing_task`** -- Formatted as a structured event entry, appended to the task's knowledge log, and the PM agent is reactivated.
 
-### Triage-Based Routing (PR Comments)
+### `issue_comment` Handling
 
-PR comments (`issue_comment` events) are the only GitHub events that go through triage. This is because PR comment threads may contain conversational noise (e.g., "thanks!", "LGTM") that does not require agent action.
-
-The GitHub triage flow (`src/connectors/github/events.ts: processGitHubTriage()`) fetches the full PR comment history via the GitHub API, then runs the triage agent to determine if the comment warrants reactivating the task. If classified as `existing_task`, new comments since the last processed ID are appended to the knowledge log and the PM is reactivated. Otherwise, the comment is silently ignored.
+`issue_comment` events lack branch info, so the router resolves the task by PR number via `findTaskByPRNumber()`. Once routed as `existing_task`, `handleExistingTaskDirect()` deduplicates by `last_processed_comment_id` (tracked per-branch in `BranchState` with a legacy fallback on `RepositoryInfo`) before logging and waking the PM. There is no separate triage step -- every new comment reactivates the task.
 
 ### Event Message Formatting
 
-`formatGitHubEventMessage()` in `src/connectors/github/webhooks.ts` converts GitHub event context into human-readable log entries:
+`formatGitHubEvent()` in `src/connectors/github/webhooks.ts` converts an event context into a structured `{from, destination, message}` shape (matching Slack/CLI events) so the knowledge log renders uniformly. Examples:
 
-- `PR #42 approved by alice`
-- `PR #42: bob requested changes: needs more tests`
-- `CI workflow failure for feature/task-abc123`
-- `Push to feature/task-abc123 by alice`
+- `from=alice, destination=PR #42, message=approved`
+- `from=bob, destination=PR #42, message=requested changes: needs more tests`
+- `from=ci, destination=branch:feature/task-abc123, message=workflow failure`
+- `from=alice, destination=branch:feature/task-abc123, message=pushed`
 
-These messages are written to the task's knowledge log so the PM agent can understand what happened.
+These entries are written to the task's knowledge log so the PM agent can understand what happened.
 
 ## GitHub MCP Tools
 
@@ -97,32 +94,37 @@ GitHub and git tools are exposed to **repo agents** via the `repo-tools` MCP ser
 
 ### Available Tools (via `repo-tools` MCP server)
 
+All tools below are registered on the same `repo-tools` MCP server. Whether a tool is reachable from a given agent is gated by the `allowedTools` list passed at spawn time (see `src/agents/spawn.ts`), which expands write tools only when `edit_allowed` is set on the agent.
+
 **Always available (read-only and edit mode):**
 
 | Tool | Description |
 |---|---|
 | `fetch` | Fetch latest refs from origin. |
 | `switch_branch` | Switch to a different branch. Auto-stashes dirty work, auto-pops on return. |
+| `list_branches` | List branches created or visited by this agent in the current task. |
 | `list_prs` | List pull requests with optional filters (state, base, sort, limit). |
 | `get_pr` | Get full PR details: title, description, diff, state, and branches. |
 | `get_pr_status` | Get PR state, mergeable status, and approval status. Returns `state`, `mergeable`, `mergeableState`, `approved`. |
-| `get_pr_reviews` | Fetch all reviews and inline comments on a PR. Groups comments by review and includes file paths and line numbers. |
+| `get_pr_reviews` | Review-level summary for a PR (approvals, change requests, review bodies). |
+| `get_pr_comments` | Top-level PR conversation comments (issue comments). |
+| `get_review_threads` | Every review thread on a PR via GraphQL: `thread_id` (for `resolve_review_thread`) and per-comment `comment_id` (for `reply_to_review_comment`). |
 
 **Edit mode only:**
 
 | Tool | Description |
 |---|---|
-| `push_branch` | Push commits from the local worktree to origin. Uses `git push -u origin HEAD:{branch}` for owned branches. |
+| `push_branch` | Push commits from the local shared clone to origin via `git push -u origin HEAD:{branch}`. |
 | `create_pull_request` | Create a PR on GitHub. Stores the PR number in the current branch's `BranchState`. |
-| `update_pr` | Update the title and/or description of an existing PR (both fields optional). |
+| `create_branch` | Create a new branch (auto-named `feature/{taskId}` or `feature/{taskId}-N`) and switch to it. |
+| `update_pr` | Update the title, description, and/or base branch of an existing PR (all fields optional). |
 | `add_pr_comment` | Add a general comment to a PR (issue comment). |
-| `add_review_comment` | Add a comment on a specific file and line in a PR diff. |
-| `resolve_review_thread` | Mark a review comment thread as resolved (placeholder -- requires GraphQL in production). |
+| `add_review_comment` | Start a NEW review thread on a specific file and line. |
+| `reply_to_review_comment` | Reply inside an existing review thread, given any `comment_id` from that thread. |
+| `resolve_review_thread` | Mark a review thread as resolved via the `resolveReviewThread` GraphQL mutation. Requires the GraphQL `thread_id` (e.g. `PRRT_...`). |
 | `request_re_review` | Request re-review from all previous reviewers. Fetches existing reviewers and sends review requests. |
 | `merge_pull_request` | Merge a pull request. Checks mergeability first and returns status if not ready. |
 | `close_pull_request` | Close a pull request without merging. |
-| `create_branch` | Create a new branch (auto-named from task ID) and switch to it. |
-| `list_branches` | List branches created or visited by this agent in the current task. |
 
 Each repo agent's tools are scoped to its own repository (the `githubRepo` from the agent's config). PR numbers are stored per-branch in `BranchState.pr_number`.
 
@@ -134,8 +136,8 @@ The merge orchestrator (`src/connectors/github/merge.ts`) is a system-level comp
 
 The merge orchestrator is triggered by:
 
-1. **Webhook events** -- Via `handleMergeCheckDirect()` on PR approval, push, CI completion.
-2. **Repo agent tool call** -- Repo agents can merge individual PRs via the `merge_pull_request` tool on the `repo-tools` MCP server. The merge orchestrator runs automatically for webhook-triggered checks.
+1. **Webhook events** -- Via `handleMergeCheckDirect()` on approving review, `pull_request opened/synchronize`, `push`, and successful `workflow_run`.
+2. **Repo agent tool call** -- Repo agents can merge an individual PR directly via the `merge_pull_request` tool. That tool calls `GitHubClient.mergePullRequest()` and bypasses the cross-repo orchestrator (it operates on a single PR scoped to the agent's repo).
 
 ### Debouncing
 
@@ -190,26 +192,25 @@ When a GitHub event arrives for an existing task:
 
 ```
 GitHub webhook
-  -> connectors/github/events.ts: verifyWebhookSignature()
+  -> connectors/github/events.ts: mountGitHubWebhook() handler
+     -> verifyWebhookSignature() (HMAC-SHA256)
+     -> ack 200, dispatch to handleGitHubWebhook()
   -> connectors/github/webhooks.ts: routeGitHubEvent()
-    -> Extract branch -> extract task ID -> verify task exists
-    -> Determine route action (merge_check / existing_task / triage_comment)
+    -> Discard own-bot events (sender === `${GITHUB_APP_SLUG}[bot]`)
+    -> Extract branch -> extract task ID (or look up by PR number for issue_comment)
+    -> Verify task exists via loadMetadata()
+    -> determineRouteAction() -> 'merge_check' | 'existing_task' | 'noop'
 
   merge_check:
-    -> webhooks.ts: handleMergeCheckDirect() [debounced]
-    -> merge.ts: checkAndMergeLinkedPRs()
-    -> If conflicts/merges: appendAgentFinding() + task.sendMessage(PM)
+    -> webhooks.ts: handleMergeCheckDirect() [5s debounce per task]
+    -> merge.ts: checkAndMergeLinkedPRs() -> triggerMergeCheck()
+    -> If conflicts/merges: appendAgentFinding() + task.sendMessage(pm-agent)
 
   existing_task:
     -> events.ts: handleExistingTaskDirect()
-    -> Format event message, append to knowledge.log
-    -> task.sendMessage(PM, "New input received...")
-
-  triage_comment:
-    -> events.ts: processGitHubTriage()
-    -> Fetch PR comment history
-    -> Run triage agent
-    -> If actionable: append new comments, task.sendMessage(PM)
+    -> For issue_comment: dedup via last_processed_comment_id
+    -> appendGitHubEvent() -> structured entry in knowledge.log
+    -> task.sendMessage(pm-agent, AGENT_PROMPTS.existingTask)
 ```
 
 ## Agent Involvement for Blockers
@@ -218,16 +219,17 @@ The system is designed so that the PM agent is only reactivated for GitHub event
 
 - **Merge conflicts** (`mergeableState === 'dirty'`): PM is notified with a blocker finding to coordinate conflict resolution with repo agents.
 - **CI failures** (`workflow_run` with `conclusion === 'failure'`): Routed as `existing_task`, PM is reactivated to assess and delegate investigation.
-- **Review feedback** (`changes_requested`, review comments): Routed as `existing_task`, PM reads the feedback and coordinates changes with repo agents.
-- **Approvals and CI passes**: Handled silently by the merge orchestrator. PM is only notified if a merge actually happens.
+- **Review feedback** (`changes_requested`, review comments, PR conversation comments): Routed as `existing_task`, PM reads the feedback and coordinates changes with repo agents.
+- **PR closed/merged externally** (`pull_request closed`): Routed as `existing_task` so the PM is informed.
+- **Approvals and CI passes**: Trigger a debounced merge check via the orchestrator. PM is only notified if a merge actually happens or a conflict is detected.
 
 ## Relevant Source Files
 
-- `src/connectors/github/client.ts` -- GitHubClient class, Octokit wrapper, git identity configuration, GIT_ASKPASS, `listPRs`, `getPRDetails`, `mergePullRequest`, `closePullRequest`
-- `src/connectors/github/events.ts` -- GitHub webhook dispatch, triage processing (`processGitHubTriage`)
-- `src/connectors/github/webhooks.ts` -- Signature verification, deterministic routing, context extraction, event formatting, merge check debouncing
-- `src/connectors/github/merge.ts` -- Auto-merge logic, linked PR checking (reads from `branch_states`), PM notification
-- `src/connectors/github/worktree.ts` -- Git worktree lifecycle (`setupWorktree`, `removeWorktree`, `WorktreeCheckout`)
+- `src/connectors/github/client.ts` -- `GitHubClient` class wrapping `@octokit/app`, `configureGitIdentity()`, `fetchOrigin()`, `getGitHubClient()` singleton; PR ops (`listPRs`, `getPRDetails`, `getPRStatus`, `getPRReviews`, `getReviewThreads`, `getPRComments`, `createPullRequest`, `updatePR`, `addPRComment`, `addReviewComment`, `replyToReviewComment`, `resolveReviewThread` (GraphQL), `requestReReview`, `mergePullRequest`, `closePullRequest`)
+- `src/connectors/github/events.ts` -- `mountGitHubWebhook()` Express handler, `handleGitHubWebhook()`, `handleExistingTaskDirect()` (with comment dedup)
+- `src/connectors/github/webhooks.ts` -- HMAC-SHA256 signature verification, context extraction, deterministic routing (`routeGitHubEvent`, `determineRouteAction`), structured event formatting (`formatGitHubEvent`), merge check debouncing (`handleMergeCheckDirect`)
+- `src/connectors/github/merge.ts` -- Auto-merge logic (`checkAndMergeLinkedPRs`, `triggerMergeCheck`), linked PR collection from `branch_states`, PM notification on conflicts/merges
+- `src/connectors/github/repo-clone.ts` -- Shared-clone lifecycle (`setupSharedClone`, `removeClone`, `CloneCheckout`); each agent gets its own `git clone --shared` from the base repo
 - `src/connectors/github/branch-state.ts` -- Per-branch state helpers (`hydrateBranchState`, `mirrorLegacyFields`, `findBranchStateByPR`)
-- `src/agents/tools.ts` -- `repo-tools` MCP server (git workflow + PR tools for repo agents), `pm-agent-tools` MCP server
+- `src/agents/tools.ts` -- `createRepoToolsMcpServer` (`repo-tools` MCP: git workflow + PR tools), `createPMAgentMcpServer` (`pm-agent-tools` MCP)
 - `src/types/task.ts` -- `RepositoryInfo` with `branch_states`, `BranchState` type with per-branch PR tracking

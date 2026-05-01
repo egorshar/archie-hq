@@ -26,14 +26,15 @@ Archie (Autonomous Responsive and Collaborative Hyper Intelligent Employee) is a
               │ (events.ts) │  │  (events.ts)    │
               └──────┬──────┘  └────────┬────────┘
                      │                  │
+                     │  Deterministic routing: thread/branch/PR
+                     │  lookup → existing task or new task.
+                     │  (Triage agent exists but is currently
+                     │   disabled — events go straight to the
+                     │   PM via the Task.)
+                     │                  │
+─────────────────────┼──────────────────┼─────────── Task Layer
+                     │                  │
                     ┌▼──────────────────▼─────┐
-                    │   Triage Agent          │
-                    │  (Haiku — disabled)     │
-                    └────────────┬────────────┘
-                                 │
-─────────────────────────────────┼─────────────────── Task Layer
-                                 │
-                    ┌────────────▼────────────┐
                     │      Task Class         │
                     │  (tasks/task.ts)        │
                     │  Message queues, agent  │
@@ -54,7 +55,7 @@ Archie (Autonomous Responsive and Collaborative Hyper Intelligent Employee) is a
               ┌──────────────────┼──────────────────┐
               │                  │                  │
      ┌────────▼──────┐  ┌───────▼──────┐  ┌────────▼────────┐
-     │  metadata.json│  │ knowledge.log│  │  Git Worktrees  │
+     │  metadata.json│  │ knowledge.log│  │  Git Clones     │
      └───────────────┘  └──────────────┘  └─────────────────┘
 ```
 
@@ -64,7 +65,7 @@ Archie (Autonomous Responsive and Collaborative Hyper Intelligent Employee) is a
 |---|---|
 | Runtime | Node.js >= 20, TypeScript, ES modules |
 | Agent Framework | `@anthropic-ai/claude-agent-sdk` ^0.2.77 |
-| Models | Opus (PM), Sonnet (repo agents, plugin agents, research). Haiku (triage — currently disabled) |
+| Models | Opus (PM), Sonnet (repo agents, plugin agents, research). Haiku (title generation, triage — triage currently disabled) |
 | Slack Integration | `@slack/bolt` ^4.6.0, `@slack/web-api` ^7.0.0 |
 | GitHub Integration | `@octokit/app` ^16.1.2, `@octokit/webhooks` ^14.2.0 |
 | Schema Validation | `zod` ^4.3.6, `zod-to-json-schema` ^3.25.0 |
@@ -98,13 +99,13 @@ Each task gets its own `Task` instance (a class that encapsulates runtime state)
 - Task-scoped budgets (research requests, inter-agent messages, wall-clock timeout)
 - Metadata and knowledge log persisted to disk
 
-### Git Worktrees
+### Shared Git Clones
 
-All repo agents work in isolated git worktrees (`src/connectors/github/worktree.ts`), regardless of mode. In **readonly mode**, the worktree is created in detached HEAD at `origin/{baseBranch}`. In **edit mode**, the worktree has a feature branch (`feature/task-{taskId}`) based on the repository's default branch. Agents can track multiple branches per worktree via `BranchState` records. Agents commit locally and manage their own PRs via `repo-tools` MCP server; worktrees for readonly tasks are cleaned up on task stop/complete.
+All repo agents work in isolated `git clone --shared` checkouts (`src/connectors/github/repo-clone.ts`), regardless of mode. Each clone has its own `.git/` directory, refs, index, and HEAD, but borrows objects from the base repo's object store via alternates. In **readonly mode**, the clone is checked out on `origin/{baseBranch}`. In **edit mode**, the clone has a feature branch (`feature/task-{taskId}`) based on the repository's default branch. Agents can track multiple branches per clone via `BranchState` records. Agents commit locally and manage their own PRs via the `repo-tools` MCP server; clones for readonly tasks are cleaned up on task stop/complete. Legacy worktrees are migrated to shared clones on first encounter (`migrateWorktreeToClone`).
 
 ### Plugin Architecture
 
-Agents and capabilities are loaded dynamically from a `plugins/` directory (`src/system/plugin-loader.ts`). Each plugin can provide:
+Agents and capabilities are loaded dynamically from the plugins directory under the runtime workdir (`$ARCHIE_WORKDIR/plugins`, default `./workdir/plugins`). On startup `bootstrapWorkdir()` (`src/system/workdir.ts`) clones the repo specified by `ARCHIE_PLUGINS` into that location (or pulls/resets it on subsequent boots) before `initPlugins()` (`src/system/plugin-loader.ts`) scans it. `initRegistry()` then builds `AgentDef`s from the loaded plugins, and `cloneRepos()` clones every repo declared by repo-track agent frontmatter into `$ARCHIE_WORKDIR/repos/<repo-key>` (or fetches+resets if already cloned). Each plugin can provide:
 
 - **Repo agents**: Via `agents/*.md` with repo metadata in frontmatter (or legacy `repo-config.json`)
 - **Plugin agents**: Via `agents/*.md` without repo metadata (lightweight, read-only)
@@ -120,23 +121,28 @@ See [plugin-system.md](plugin-system.md) for details.
 ### Slack Message Flow
 
 ```
-1. Slack event (app_mention or thread reply)
+1. Slack event (app_mention, DM, or thread reply)
    → connectors/slack/events.ts receives via Slack Bolt
 
-2. Route filters (bot messages)
-   → routeSlackEvent() discards own bot messages or passes through
+2. Route filters
+   → routeSlackEvent() discards our own bot messages; external/guest authors
+     are skipped in handleSlackEvent() before any task work
 
-3. Message routed directly to PM (triage agent is currently disabled)
-   → New thread: Task.createFromSlackThread() → task.sendMessage(pm-agent)
-   → Existing thread: Task.get() → append to knowledge.log → task.sendMessage(pm-agent)
+3. Deterministic thread→task lookup (triage agent is currently disabled)
+   → findTaskByThread(threadId): if a task is already linked to this Slack
+     thread, route to it (Task.get → task.append → task.sendMessage with
+     AGENT_PROMPTS.existingTask)
+   → Otherwise, if it's an @mention or DM, start a new task
+     (Task.create → task.append → task.sendMessage with AGENT_PROMPTS.newTask)
+   → Plain replies in threads the bot was never part of are ignored
 
-5. PM Agent processes input:
+4. PM Agent processes input:
    → Reads knowledge.log for context
    → Loads relevant PM skill via Skill tool
    → Delegates to repo/plugin agents via send_message_to_agent
-   → Or responds directly via post_to_slack + report_completion
+   → Or responds directly via post_to_user + report_completion
 
-6. Specialist Agents work:
+5. Specialist Agents work:
    → Read knowledge.log for context
    → Investigate/modify code in their repository
    → Report findings back to PM or task owner via send_message_to_agent
@@ -146,14 +152,15 @@ See [plugin-system.md](plugin-system.md) for details.
 
 ```
 1. GitHub webhook (PR review, comment, push, check_run)
-   → index.ts receives via Express endpoint
+   → connectors/github/events.ts receives via Express endpoint
 
 2. connectors/github/webhooks.ts performs deterministic routing:
    → Matches task by branch name (feature/task-{id}) or PR number
    → Routes to: direct (reviews, CI, comments), merge_check, or discard
 
-3. Events routed directly to PM agent (triage currently disabled for GitHub too)
-5. For merge checks: Merge orchestrator evaluates and merges if ready
+3. Events are appended to the matched task and the PM agent is messaged
+   directly (the GitHub path has never used the triage agent)
+4. For merge checks: merge orchestrator evaluates and merges if ready
 ```
 
 See [slack-integration.md](slack-integration.md) and [github-integration.md](github-integration.md) for details.
@@ -165,51 +172,60 @@ src/
 ├── index.ts                     # Entry point, HTTP server, startup, plugin/agent loading
 ├── connectors/
 │   ├── slack/
-│   │   ├── client.ts            # Slack Web API wrapper, mention resolution, file downloads
-│   │   ├── callbacks.ts         # Slack callback registry (post_to_slack, interactive messages)
-│   │   └── events.ts            # Slack Bolt app, event handlers, triage routing, button actions
-│   └── github/
-│       ├── client.ts            # GitHub App / Octokit wrapper, git identity, GIT_ASKPASS
-│       ├── events.ts            # GitHub webhook dispatch, triage processing
-│       ├── webhooks.ts          # Signature verification, routing, context extraction, formatting
-│       ├── merge.ts             # PR merge logic, linked PR checking
-│       ├── worktree.ts          # Git worktree lifecycle (setup, remove, detached/branch modes)
-│       └── branch-state.ts      # Per-branch state helpers (hydrate, mirror legacy, find by PR)
+│   │   ├── client.ts            # Slack Web API wrapper, posting helpers, mention resolution, file downloads
+│   │   ├── events.ts            # Slack Bolt app, event handlers, deterministic thread→task routing, button actions
+│   │   └── title.ts             # Assistant-thread title sync (DM list naming)
+│   ├── github/
+│   │   ├── client.ts            # GitHub App / Octokit wrapper, git identity, GIT_ASKPASS
+│   │   ├── events.ts            # GitHub webhook dispatch (deterministic, no triage)
+│   │   ├── webhooks.ts          # Signature verification, routing, context extraction, formatting
+│   │   ├── merge.ts             # PR merge logic, linked PR checking
+│   │   ├── repo-clone.ts        # Shared `git clone --shared` lifecycle (setup, remove, worktree migration)
+│   │   └── branch-state.ts      # Per-branch state helpers (hydrate, mirror legacy, find by PR)
+│   ├── api/
+│   │   └── routes.ts            # REST + SSE routes for the CLI/admin UI
+│   └── oauth/
+│       └── routes.ts            # OAuth provider redirect endpoints (token exchange)
 ├── agents/
 │   ├── agent.ts                 # Agent class: prompt composition, spawning, session management
-│   ├── spawn.ts                 # Agent spawn entrypoint, worktree setup, tool wiring
+│   ├── spawn.ts                 # Agent spawn entrypoint, clone setup, tool wiring, edit-mode branching
 │   ├── registry.ts              # Agent definition registry (from plugins)
 │   ├── tools.ts                 # MCP tool definitions (PM + repo agent tools)
+│   ├── sandbox.ts               # Filesystem-guard hook + sandbox config builder
+│   ├── artifacts.ts             # Per-task artifact capture
 │   ├── message-queue.ts         # Async message queue with recovery
 │   └── prompts.ts               # Shared prompt constants (new task, recovery, etc.)
 ├── tasks/
 │   ├── task.ts                  # Task class: lifecycle, budgets, agent management, callbacks
+│   ├── launch.ts                # Spawn an independent child task from a running task
 │   ├── persistence.ts           # Disk I/O: metadata, knowledge log, debounced writes, lookups
-│   └── recovery.ts              # Startup recovery, idle detection, progressive recovery
+│   ├── recovery.ts              # Startup recovery, idle detection, progressive recovery
+│   └── title-generator.ts       # Haiku-authored task title pipeline
 ├── system/
 │   ├── shutdown.ts              # Shutdown state (getIsShuttingDown / setShuttingDown)
 │   ├── logger.ts                # Unified color-coded logger
-│   ├── triage.ts                # Triage agent (Haiku classifier — currently disabled)
-│   ├── plugin-loader.ts         # Plugin directory scanner
-│   └── workdir.ts               # Bootstrap: path constants, clone/pull/fetch helpers
+│   ├── triage.ts                # Triage agent (Haiku classifier — currently disabled, not invoked from any connector)
+│   ├── plugin-loader.ts         # Plugin directory scanner ($ARCHIE_WORKDIR/plugins)
+│   ├── workdir.ts               # Bootstrap: path constants (WORKDIR, PLUGINS_DIR, REPOS_DIR, SESSIONS_DIR, SECRETS_DIR), clone/pull/fetch helpers
+│   ├── secrets-vault.ts         # Encrypted vault for OAuth tokens (master-key validated at startup)
+│   ├── reminder-scheduler.ts    # Periodic reminder scheduler
+│   ├── event-bus.ts             # Process-local event emitter (for SSE / observers)
+│   └── oauth/                   # OAuth flow helpers (token injection into agent env)
 ├── mcp/
-│   └── research-tools.ts        # Web research pipeline (multi-agent)
+│   └── research-tools.ts        # Web research pipeline (multi-agent, prompts inline)
 ├── types/
 │   ├── task.ts                  # TaskMetadata, SlackThread, RepositoryInfo, etc.
 │   ├── agent.ts                 # AgentDef, AgentHandle, AgentSessionState
 │   └── index.ts                 # Type re-exports
-├── utils/
-│   └── prompt-loader.ts         # Markdown prompt file loader with variable substitution
-└── prompts/
-    ├── agent-core.md            # Layer 1: Universal multi-agent protocol
-    ├── pm-agent.md              # PM agent system prompt
-    ├── repo-agent.md            # Layer 2: Repo agent track extension
-    ├── plugin-agent.md          # Layer 2: Plugin agent track extension
-    ├── triage-agent.md          # Triage agent system prompt
-    └── research/                # Research pipeline prompts
-        ├── lead-agent.md
-        ├── researcher.md
-        └── report-writer.md
+└── utils/
+    └── prompt-loader.ts         # Markdown prompt file loader with variable substitution
+
+prompts/                         # Repo-root: layered system prompts
+├── agent-core.md                # Layer 1: Universal multi-agent protocol
+├── pm-agent.md                  # PM agent system prompt
+├── repo-agent.md                # Layer 2: Repo agent track extension
+├── plugin-agent.md              # Layer 2: Plugin agent track extension
+└── triage-agent.md              # Triage agent system prompt (loaded only if triage is re-enabled)
 ```
 
 ## Related Documentation
@@ -219,7 +235,7 @@ src/
 - [Persistence](persistence.md) -- task storage, metadata, and knowledge log
 - [Slack Integration](slack-integration.md) -- Slack Bolt setup, event handling, interactive messages
 - [GitHub Integration](github-integration.md) -- webhooks, PR management, merge orchestrator
-- [Edit Mode](edit-mode.md) -- approval flow, worktrees, and git workflow
+- [Edit Mode](edit-mode.md) -- approval flow, shared clones, and git workflow
 - [Plugin System](plugin-system.md) -- plugin structure, loading, and agent registration
 - [Web Research](web-research.md) -- multi-agent research pipeline and defense layers
 - [Security](security.md) -- research budget, sandwich defense, prompt injection mitigations

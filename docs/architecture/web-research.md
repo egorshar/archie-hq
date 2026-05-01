@@ -2,6 +2,8 @@
 
 Web research is available to all agents (PM, repo, and plugin) as an MCP tool called `web_research`. It classifies query complexity via Haiku, then delegates to the Perplexity Agent API with the appropriate preset. Results are returned as markdown.
 
+The SDK's built-in `WebSearch` and `WebFetch` tools are explicitly disallowed for every agent track (see `disallowedTools` in `src/agents/spawn.ts`). All web access flows through `web_research` so that budget enforcement, isolation, and defense-tag wrapping always apply.
+
 ## Tool Registration
 
 The `web_research` tool is registered as an MCP server on every agent's `query()` call:
@@ -56,10 +58,11 @@ Falls back to `pro-search` on any classification failure.
 
 A single `fetch()` call to `https://api.perplexity.ai/v1/agent` with:
 - `preset`: From step 1
+- `model`: `anthropic/claude-sonnet-4-6`
 - `input`: The research topic + optional context
 - `stream: false`
 
-Returns `output_text` (markdown) and `citations` (source URLs).
+The Agent API follows the OpenAI Responses API format: the response's `output` array is parsed for `message` items (extracting `output_text` blocks and `url_citation` annotations) and `search_results` items (extracting result URLs). Top-level `output_text` and `citations` fields are used as a fallback. Citations are deduped before being returned.
 
 ### Step 3: Output
 

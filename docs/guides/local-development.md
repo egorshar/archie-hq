@@ -12,12 +12,15 @@ cp .env.example .env
 # 2. Ensure your SSH key is loaded (used for git inside Docker)
 ssh-add
 
-# 3. Setup plugins (symlink for local editing)
-git clone git@github.com:<org>/<plugins-repo>.git ../archie-plugins
-mkdir -p workdir
-ln -s ../archie-plugins workdir/plugins
+# 3. Setup plugins — pick ONE:
+#    a) Auto-clone: leave ARCHIE_PLUGINS=<git-url> in .env (default)
+#    b) Local symlink (for editing the plugins repo):
+#         git clone git@github.com:<org>/<plugins-repo>.git ../archie-plugins
+#         mkdir -p workdir && ln -s ../archie-plugins workdir/plugins
+#         (then unset/comment out ARCHIE_PLUGINS in .env)
 
-# 4. Clone repos with SSH (one per repo defined in plugins)
+# 4. (Optional) Pre-clone repos with SSH so git uses your local keys.
+#    If skipped, the server auto-clones each repo declared by plugins on startup.
 mkdir -p workdir/repos
 git clone git@github.com:<org>/<repo>.git workdir/repos/<key>
 
@@ -69,7 +72,8 @@ The `docker-compose.yml`:
 The CLI provides an interactive terminal UI for creating and monitoring tasks. The server must be running.
 
 ```bash
-npm run cli
+npm run cli                                    # interactive TUI
+ARCHIE_URL=http://localhost:3000 npm run cli   # override server URL
 ```
 
 **Controls:**
@@ -80,7 +84,20 @@ npm run cli
 - `Esc` — Go back
 - `q` — Quit
 
-You can also use the REST API directly:
+### OAuth CLI
+
+For MCP servers that authenticate via OAuth, use the `oauth` subcommands. They run on the same host as the daemon (they share `SECRETS_DIR`) and require `ARCHIE_SECRETS_KEY` (and `ARCHIE_PUBLIC_URL` for `connect`).
+
+```bash
+npm run oauth:connect <server-name>   # begin authorize flow
+npm run oauth:list                    # show connected servers
+npm run oauth:refresh <server-name>   # force-refresh a token
+npm run oauth:revoke  <server-name>   # delete a record
+```
+
+### REST API
+
+In addition to the TUI, you can drive the server with HTTP directly:
 
 ```bash
 # Create a task
@@ -108,15 +125,16 @@ mkdir -p workdir
 ln -s ../archie-plugins workdir/plugins
 ```
 
-**Repos** — pre-clone with SSH remotes so git uses your SSH keys. The `<key>` must match the key in the plugin's `repo-config.json`:
+**Repos** — declared by plugins. On startup the server auto-clones (or fetches and resets to the configured base branch) each repo into `workdir/repos/<key>`. If you want git operations to use your local SSH key instead of the GitHub App's HTTPS URL, pre-clone with an SSH remote first — `git fetch`/`reset` will reuse the existing remote.
+
 ```bash
 mkdir -p workdir/repos
 git clone git@github.com:<org>/<repo>.git workdir/repos/<key>
 ```
 
-On startup, the app detects existing repos and runs `git fetch --all` to update refs. It won't re-clone repos that already exist.
+The `<key>` must match the `repoKey` declared by the plugin's repo-track agent.
 
-If `ARCHIE_PLUGINS` is set to a git URL, the app auto-clones the plugins repo instead of using the local directory.
+If `ARCHIE_PLUGINS` is set to a git URL, the app auto-clones the plugins repo on startup and refreshes it from `origin` periodically. If `ARCHIE_PLUGINS` is unset, `workdir/plugins` must already exist (e.g. via the symlink approach above).
 
 ## Environment Variables
 
@@ -135,13 +153,21 @@ ANTHROPIC_API_KEY=sk-ant-...           # Claude API key
 # GITHUB_INSTALLATION_ID=12345678
 # GITHUB_WEBHOOK_SECRET=your-webhook-secret
 
-# Optional - Plugins (omit if using local symlink)
+# Optional - Plugins (omit if using local symlink at workdir/plugins)
 # ARCHIE_PLUGINS=https://github.com/...
+# ARCHIE_PLUGINS_BRANCH=main           # Override default branch
+
+# Optional - OAuth-backed MCP servers (required if any oauth records exist)
+# ARCHIE_SECRETS_KEY=                  # base64(32 bytes); see .env.example
+# ARCHIE_PUBLIC_URL=                   # public HTTPS URL of this daemon
+# ARCHIE_SECRETS_DIR=                  # override secrets dir (default: /app/secrets in Docker, ./secrets locally)
 
 # Optional - Paths
 # ARCHIE_WORKDIR=./workdir             # Default: ./workdir
 # PORT=3000                            # Default: 3000
 ```
+
+See [`.env.example`](../../.env.example) for the full list, including per-MCP plugin tokens (Atlassian, Bugsnag, TeamCity, Firebase, Rollbar) that get substituted into `plugins/.mcp.json`.
 
 Without Slack credentials, the server runs in **CLI-only mode**.
 Without GitHub App credentials, **PR tools are disabled** but agents can still read/write code, commit, and push via SSH.
@@ -183,9 +209,12 @@ ngrok http 3000
 
 ```bash
 npm install
-npm run dev          # Development with hot reload
-npm run build        # TypeScript compilation
-npm run typecheck    # Type checking only
+npm run dev          # Development with hot reload (tsx watch)
+npm run build        # TypeScript compilation (tsc)
+npm run typecheck    # Type checking only (tsc --noEmit)
+npm run lint         # ESLint
+npm test             # Run vitest suite
+npm run test:watch   # vitest in watch mode
 ```
 
 The server starts on `http://localhost:3000` with:
@@ -221,18 +250,22 @@ archie-hq/
 │   ├── connectors/       # External integrations
 │   │   ├── slack/        # Slack Bolt app, client, events
 │   │   ├── github/       # GitHub App, webhooks, merge
+│   │   ├── oauth/        # OAuth callback route for MCP servers
 │   │   └── api/          # REST API + SSE for CLI
 │   ├── agents/           # Agent spawn logic, tools, registry
 │   ├── tasks/            # Task class, persistence, recovery
-│   ├── system/           # Logger, plugin loader, triage, workdir
-│   ├── cli/              # Interactive terminal UI (Ink/React)
+│   ├── system/           # Logger, plugin loader, workdir, secrets vault, OAuth
+│   │                     # (triage agent file is present but currently disabled)
+│   ├── cli/              # Interactive terminal UI (Ink/React) + oauth CLI
 │   ├── mcp/              # Research tools pipeline
 │   ├── types/            # TypeScript types
 │   └── utils/            # Utilities
 ├── prompts/              # Agent system prompts
+├── secrets/              # Local secrets dir (GitHub App key, OAuth vault)
 ├── workdir/              # Runtime state (gitignored)
-│   ├── plugins/          # Symlink to archie-plugins (or auto-cloned)
-│   ├── repos/            # Pre-cloned with SSH (or auto-cloned)
-│   └── sessions/         # Task persistence
+│   ├── plugins/          # Symlink to archie-plugins (or auto-cloned via ARCHIE_PLUGINS)
+│   ├── plugins-data/     # Persistent per-plugin data
+│   ├── repos/            # Auto-cloned (or pre-cloned with SSH)
+│   └── sessions/         # Task persistence (shared/metadata.json, shared/knowledge.log)
 └── docs/                 # Documentation
 ```

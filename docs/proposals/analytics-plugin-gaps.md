@@ -1,6 +1,6 @@
 # Proposal: Analytics Plugin — Gap Analysis & Roadmap
 
-> **Status:** MVP implemented — gaps documented for future iterations
+> **Status:** MVP implemented; partially advanced since — per-plugin persistent data directory (`workdir/plugins-data/<plugin>/`) is mounted read-only into plugin agents, and PM can now upload files to Slack via `post_files_to_user`. Remaining gaps documented below for future iterations.
 
 ## Summary
 
@@ -42,12 +42,14 @@ The analytics plugin (3-agent system: analyst orchestrator, context-analyst, dat
 
 ### 1. Cross-task persistent memory — Priority: HIGH
 
-**Gap:** sweat-researcher has `memory/findings/` that persists across sessions — accumulated research findings, data corrections, known gotchas. Archie sessions are ephemeral (`sessions/task-{id}/`), so every task starts from scratch.
+**Status update:** A persistent per-plugin data directory now exists at `workdir/plugins-data/<plugin>/` and is exposed to plugin agents as a readable path (`pluginDataPath` in `AgentDef`). Today it is read-only from the agent's perspective — no write tool, no `save_finding` API. So infrastructure is partially in place; the read/write memory layer is still unbuilt.
 
-**Impact:** Without memory, agents will re-discover the same data quirks, re-learn table locations, and repeat prior research. This is the single highest-value gap.
+**Gap:** sweat-researcher has `memory/findings/` that persists across sessions — accumulated research findings, data corrections, known gotchas. Archie task sessions remain ephemeral (`sessions/task-{id}/`), and agents cannot write to the persistent plugin data directory, so every task still starts from scratch in practice.
+
+**Impact:** Without writable memory, agents will re-discover the same data quirks, re-learn table locations, and repeat prior research. This is the single highest-value gap.
 
 **Proposed solution:** Implement a memory layer at the Archie level (not per-plugin). Options:
-- Plugin-level `memory/` directory that agents read/write across tasks
+- Allow agents to write to the existing per-plugin data directory
 - New `save_finding(topic, content)` tool scoped to plugin memory directory
 - Archie-wide memory system that all agents can query
 
@@ -105,18 +107,20 @@ The analytics plugin (3-agent system: analyst orchestrator, context-analyst, dat
 
 **Proposed solution options:**
 1. External cron (GitHub Actions) creates a task via Archie's API
-2. Slack scheduled message triggers triage → PM → analyst
+2. Slack scheduled message routes directly to PM → analyst (triage agent is currently disabled)
 3. New `CronTask` capability in Archie core
 
 **Decision:** Parked. Revisit when the interactive flow is proven.
 
 ### 7. Slack file uploads from agents — Priority: LOW
 
-**Gap:** sweat-researcher agents can upload files (CSV, PDF) directly to Slack threads via a custom Slack MCP server. Archie's PM posts text to Slack but can't upload files.
+**Status update:** PM now has a `post_files_to_user` tool that uploads files (from readable sandbox paths) as Slack attachments to existing linked threads. The remaining gap is exposing this capability to plugin agents directly (today they must hand artifacts to PM).
 
-**Impact:** Text answers are sufficient initially. File uploads become important when generating reports or exporting data.
+**Gap:** sweat-researcher agents can upload files (CSV, PDF) directly to Slack threads via a custom Slack MCP server. In Archie, only PM can attach files, and only to threads already linked to the task.
 
-**Proposed solution:** Add file upload capability to PM's `post_to_slack` tool or add a dedicated `upload_file` tool. The file would come from the agent's workspace directory.
+**Impact:** Text answers are sufficient initially. Direct uploads from plugin agents become important when generating reports or exporting data without round-tripping through PM.
+
+**Proposed solution:** Either let plugin agents share artifacts that PM uploads, or add a sandboxed `post_files_to_user` equivalent for plugin agents. The file would come from the agent's workspace directory.
 
 ### 8. Output formats (PDF, HTML dashboards) — Priority: LOW
 
@@ -145,8 +149,8 @@ The analytics plugin (3-agent system: analyst orchestrator, context-analyst, dat
 | **Communication** | Direct Slack MCP | PM mediates all Slack comms |
 | **Data access** | Custom BigQuery MCP + Lightdash + GrowthBook | Generic BigQuery MCP + Lightdash |
 | **Context files** | Bundled in repo, auto-refreshed daily | Bundled in plugin, manually maintained |
-| **Memory** | Persistent `memory/findings/` | None (ephemeral per task) |
-| **Output** | PDF, HTML dashboards, Slack | Text via Slack (through PM) |
+| **Memory** | Persistent `memory/findings/` | Per-plugin data dir mounted read-only (no write API yet) |
+| **Output** | PDF, HTML dashboards, Slack | Text + file attachments via Slack (through PM's `post_files_to_user`) |
 | **Parallelism** | Multiple agent instances | One instance per agent type |
 | **Hooks** | Custom stop hook (stop_assess.py) | Plugin-defined hooks via hooks/hooks.json |
 | **Scheduling** | Daily monitor cron | None |
