@@ -8,3 +8,9 @@ else
     echo 'PORT={{ branch | hash_port }}' >> .env
 fi
 """
+# If base worktree has a workdir/plugins symlink (local plugins dev), recreate it here
+plugins-link = """
+target=$(readlink "{{ base_worktree_path }}/workdir/plugins" 2>/dev/null) && \
+    mkdir -p workdir && \
+    ln -sfn "$target" workdir/plugins || true
+"""
