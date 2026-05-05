@@ -7,7 +7,7 @@
 
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
-const { App, ExpressReceiver } = require('@slack/bolt');
+const { App, ExpressReceiver, SocketModeReceiver } = require('@slack/bolt');
 
 import type { Application } from 'express';
 import type { App as AppType } from '@slack/bolt';
@@ -39,10 +39,16 @@ import type { SlackThread } from '../../types/task.js';
 
 /**
  * Slack configuration
+ *
+ * If `slackAppToken` is set, the Bolt app runs in Socket Mode (outbound
+ * WebSocket, no webhook URL). Otherwise it mounts an HTTP receiver on the
+ * shared Express app at `/webhooks/slack` and uses `slackSigningSecret` to
+ * verify inbound requests.
  */
 export interface SlackConfig {
   slackBotToken: string;
-  slackSigningSecret: string;
+  slackSigningSecret?: string;
+  slackAppToken?: string;
   dryRun?: boolean;
 }
 
@@ -58,13 +64,16 @@ export async function mountSlackApp(
   expressApp: Application,
   config: SlackConfig
 ): Promise<void> {
-  const receiver = new ExpressReceiver({
-    signingSecret: config.slackSigningSecret,
-    endpoints: '/webhooks/slack',
-    app: expressApp,
-  });
+  const useSocketMode = !!config.slackAppToken;
 
-  logger.plain('Slack webhook: POST /webhooks/slack');
+  if (useSocketMode) {
+    logger.plain('Slack: Socket Mode (outbound WebSocket, no webhook URL)');
+  } else {
+    if (!config.slackSigningSecret) {
+      throw new Error('SLACK_SIGNING_SECRET is required when SLACK_APP_TOKEN is not set');
+    }
+    logger.plain('Slack webhook: POST /webhooks/slack');
+  }
 
   // Enable dry-run mode (receive events, suppress outgoing messages)
   if (config.dryRun) {
@@ -75,7 +84,15 @@ export async function mountSlackApp(
   // Initialize Slack client for outgoing messages
   await initSlackClient(config.slackBotToken);
 
-  // Create Bolt app with the shared receiver
+  // Create Bolt app with the appropriate receiver
+  const receiver = useSocketMode
+    ? new SocketModeReceiver({ appToken: config.slackAppToken })
+    : new ExpressReceiver({
+        signingSecret: config.slackSigningSecret!,
+        endpoints: '/webhooks/slack',
+        app: expressApp,
+      });
+
   app = new App({
     token: config.slackBotToken,
     receiver,
@@ -249,6 +266,14 @@ export async function mountSlackApp(
       logger.error('Server', 'Error handling research budget denial', error);
     }
   });
+
+  // Socket Mode requires explicit start to open the WebSocket.
+  // ExpressReceiver is driven by the shared HTTP server in src/index.ts and
+  // does not need this call.
+  if (useSocketMode) {
+    await app!.start();
+    logger.plain('Slack: Socket Mode connected');
+  }
 }
 
 

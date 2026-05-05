@@ -36,6 +36,7 @@ import { initReminderScheduler } from './system/reminder-scheduler.js';
 interface AppConfig {
   slackBotToken?: string;
   slackSigningSecret?: string;
+  slackAppToken?: string;
   port: number;
   githubWebhookSecret?: string;
 }
@@ -46,6 +47,7 @@ interface AppConfig {
 function loadConfig(): AppConfig {
   const slackBotToken = process.env.SLACK_BOT_TOKEN;
   const slackSigningSecret = process.env.SLACK_SIGNING_SECRET;
+  const slackAppToken = process.env.SLACK_APP_TOKEN;
   const port = parseInt(process.env.PORT || '3000', 10);
   const githubWebhookSecret = process.env.GITHUB_WEBHOOK_SECRET;
 
@@ -56,6 +58,7 @@ function loadConfig(): AppConfig {
   return {
     slackBotToken,
     slackSigningSecret,
+    slackAppToken,
     port,
     githubWebhookSecret,
   };
@@ -172,11 +175,15 @@ async function main(): Promise<void> {
       logger.plain('GitHub App not configured — PR tools disabled');
     }
 
-    // Mount Slack Bolt app (if configured)
-    if (config.slackBotToken && config.slackSigningSecret) {
+    // Mount Slack Bolt app (if configured).
+    // Two modes: HTTP (bot token + signing secret) or Socket Mode (bot token + app token).
+    const slackHttpReady = !!(config.slackBotToken && config.slackSigningSecret);
+    const slackSocketReady = !!(config.slackBotToken && config.slackAppToken);
+    if (slackHttpReady || slackSocketReady) {
       await mountSlackApp(app, {
-        slackBotToken: config.slackBotToken,
+        slackBotToken: config.slackBotToken!,
         slackSigningSecret: config.slackSigningSecret,
+        slackAppToken: config.slackAppToken,
         dryRun: process.env.SLACK_DRY_RUN === 'true',
       });
     } else {
