@@ -7,7 +7,7 @@
 
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
-const { App, ExpressReceiver } = require('@slack/bolt');
+const { App, ExpressReceiver, SocketModeReceiver } = require('@slack/bolt');
 
 import type { Application } from 'express';
 import type { App as AppType } from '@slack/bolt';
@@ -39,11 +39,30 @@ import type { SlackThread } from '../../types/task.js';
 
 /**
  * Slack configuration
+ *
+ * If `slackAppToken` is set, the Bolt app runs in Socket Mode (outbound
+ * WebSocket, no webhook URL). Otherwise it mounts an HTTP receiver on the
+ * shared Express app at `/webhooks/slack` and uses `slackSigningSecret` to
+ * verify inbound requests.
  */
 export interface SlackConfig {
   slackBotToken: string;
-  slackSigningSecret: string;
+  slackSigningSecret?: string;
+  slackAppToken?: string;
   dryRun?: boolean;
+}
+
+/**
+ * Lifecycle handle returned by mountSlackApp.
+ *
+ * Mounting only registers handlers; `start()` opens the Socket Mode
+ * WebSocket (no-op in HTTP mode, which is driven by the shared HTTP
+ * server). Callers should defer `start()` until task recovery has
+ * completed so startup-time events cannot race recovery.
+ */
+export interface SlackLifecycle {
+  start: () => Promise<void>;
+  stop: () => Promise<void>;
 }
 
 let app: AppType | null = null;
@@ -51,20 +70,31 @@ let app: AppType | null = null;
 /**
  * Mount Slack Bolt app on an existing Express app
  *
- * Creates an ExpressReceiver internally using the provided Express app,
- * registers Bolt event/action handlers, and initializes the Slack client.
+ * Registers Bolt event/action handlers and initializes the Slack
+ * client. In HTTP mode the ExpressReceiver hooks routes onto the
+ * shared Express app immediately. In Socket Mode the WebSocket is
+ * NOT opened here — call `start()` on the returned lifecycle once
+ * the rest of bootstrap (task recovery, scheduler) is ready.
  */
 export async function mountSlackApp(
   expressApp: Application,
   config: SlackConfig
-): Promise<void> {
-  const receiver = new ExpressReceiver({
-    signingSecret: config.slackSigningSecret,
-    endpoints: '/webhooks/slack',
-    app: expressApp,
-  });
+): Promise<SlackLifecycle> {
+  const useSocketMode = !!config.slackAppToken;
 
-  logger.plain('Slack webhook: POST /webhooks/slack');
+  if (useSocketMode) {
+    if (!config.slackAppToken!.startsWith('xapp-')) {
+      throw new Error(
+        'SLACK_APP_TOKEN must start with "xapp-" (app-level token with connections:write scope)'
+      );
+    }
+    logger.plain('Slack: Socket Mode (outbound WebSocket, no webhook URL)');
+  } else {
+    if (!config.slackSigningSecret) {
+      throw new Error('SLACK_SIGNING_SECRET is required when SLACK_APP_TOKEN is not set');
+    }
+    logger.plain('Slack webhook: POST /webhooks/slack');
+  }
 
   // Enable dry-run mode (receive events, suppress outgoing messages)
   if (config.dryRun) {
@@ -75,7 +105,15 @@ export async function mountSlackApp(
   // Initialize Slack client for outgoing messages
   await initSlackClient(config.slackBotToken);
 
-  // Create Bolt app with the shared receiver
+  // Create Bolt app with the appropriate receiver
+  const receiver = useSocketMode
+    ? new SocketModeReceiver({ appToken: config.slackAppToken })
+    : new ExpressReceiver({
+        signingSecret: config.slackSigningSecret!,
+        endpoints: '/webhooks/slack',
+        app: expressApp,
+      });
+
   app = new App({
     token: config.slackBotToken,
     receiver,
@@ -249,6 +287,23 @@ export async function mountSlackApp(
       logger.error('Server', 'Error handling research budget denial', error);
     }
   });
+
+  // Return a lifecycle handle. start()/stop() are no-ops in HTTP mode —
+  // the shared HTTP server in src/index.ts drives the ExpressReceiver.
+  return {
+    async start() {
+      if (useSocketMode) {
+        await app!.start();
+        logger.plain('Slack: Socket Mode connected');
+      }
+    },
+    async stop() {
+      if (useSocketMode && app) {
+        await app.stop();
+        logger.plain('Slack: Socket Mode disconnected');
+      }
+    },
+  };
 }
 
 
