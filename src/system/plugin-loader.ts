@@ -83,6 +83,12 @@ export interface PluginAgentDef {
   effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   /** Maximum agentic turns from frontmatter */
   maxTurns?: number;
+  /**
+   * Visibility from frontmatter (default 'global').
+   * 'local' agents are only addressable by other agents in the same plugin;
+   * external entries (webhooks) still reach repo agents regardless.
+   */
+  visibility?: 'global' | 'local';
   /** Markdown body (domain-specific instructions) */
   prompt: string;
   /** Repo metadata from frontmatter (if present, agent is a repo agent) */
@@ -193,6 +199,7 @@ function scanPlugins(): LoadedPlugin[] {
 
         const effort = ['low', 'medium', 'high', 'xhigh', 'max'].includes(data.effort) ? data.effort : undefined;
         const maxTurns = typeof data.maxTurns === 'number' && data.maxTurns > 0 ? data.maxTurns : undefined;
+        const visibility: 'global' | 'local' = data.visibility === 'local' ? 'local' : 'global';
 
         const agentDef: PluginAgentDef = {
           key,
@@ -201,6 +208,7 @@ function scanPlugins(): LoadedPlugin[] {
           model: data.model || undefined,
           effort,
           maxTurns,
+          visibility,
           prompt: substitutePluginVars(content.trim()),
         };
 

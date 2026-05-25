@@ -21,7 +21,7 @@ import {
 } from './tools.js';
 import { hydrateBranchState } from '../connectors/github/branch-state.js';
 import { createResearchMcpServer, createResearchPostToolHook, createResearchDefenseTagHook } from '../mcp/research-tools.js';
-import { buildPeerList } from './registry.js';
+import { buildPeerListForSender } from './registry.js';
 import {
   getSharedPath,
   getTaskPath,
@@ -50,7 +50,7 @@ async function generatePMPrompt(task: Task): Promise<string> {
 
 async function generateRepoAgentPrompt(agent: Agent): Promise<string> {
   const def = agent.def;
-  const peerList = buildPeerList(def.id);
+  const peerList = buildPeerListForSender(def);
 
   const corePrompt = await loadPrompt('agent-core', {
     AGENT_ID: def.id,
@@ -71,7 +71,7 @@ async function generateRepoAgentPrompt(agent: Agent): Promise<string> {
 
 async function generatePluginAgentPrompt(agent: Agent): Promise<string> {
   const def = agent.def;
-  const peerList = buildPeerList(def.id);
+  const peerList = buildPeerListForSender(def);
 
   const corePrompt = await loadPrompt('agent-core', {
     AGENT_ID: def.id,

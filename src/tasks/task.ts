@@ -52,7 +52,7 @@ import {
 } from './persistence.js';
 import { getIsShuttingDown } from '../system/shutdown.js';
 import { scheduleIdleCheck } from './recovery.js';
-import { scanAgentDefs } from '../agents/registry.js';
+import { scanAgentDefs, getVisiblePeerIdsForSender } from '../agents/registry.js';
 import { refreshPlugins } from '../system/workdir.js';
 import { postSlackMessage, postSlackFiles, postInteractiveToThreads, removeReaction, buildThreadUrl, openDMChannel, getChannelInfo, getUserInfo, isExternalUser, formatSlackChannelRef, formatSlackChannelDisplay } from '../connectors/slack/client.js';
 import { basename } from 'path';
@@ -617,6 +617,18 @@ export class Task {
    * Stays on Task because it involves lazy spawn + budget tracking + queue routing.
    */
   async toolSendMessage(fromAgent: AgentName, target: AgentName, message: string): Promise<string> {
+    // Defensive visibility gate — Zod enum on the tool already filters the targets,
+    // but if the agent constructs a call outside that enum (jailbreak / fuzz),
+    // reject the message and surface the visible set so it can recover.
+    const senderDef = this.team.find((d) => d.id === fromAgent);
+    if (senderDef && target !== 'pm-agent') {
+      const visible = new Set(getVisiblePeerIdsForSender(senderDef));
+      if (!visible.has(target)) {
+        const list = Array.from(visible).sort().join(', ') || '(none)';
+        return `Error: ${target} is not addressable from ${fromAgent} (visibility rules). Visible peers: ${list}, pm-agent`;
+      }
+    }
+
     logger.agentMessage(fromAgent, target, message, { truncate: 100 });
     this.lastActivity = new Date();
 
