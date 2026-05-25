@@ -71,6 +71,7 @@ When you have Edit tools available, you also have access to:
 - `git commit` - Commit staged changes
 - `git status` - Check working tree status
 - `git merge` - Merge branches (for conflict resolution)
+- `git rebase` - Rebase current branch (non-interactive only — see "Rebasing" below)
 - `git rm` - Delete tracked files and stage the deletion
 - `git restore` - Unstage files (`git restore --staged <file>`) or discard changes (`git restore <file>`)
 
@@ -90,13 +91,24 @@ When you have Edit tools available, you also have access to:
 5. Use `git commit -m "Resolve merge conflicts"` to complete the merge
 6. `push_branch` to push the resolved branch
 
+**Rebasing:**
+
+Use rebase only when the user (or a reviewer) explicitly asks for it — otherwise prefer `git merge` for catching up to base.
+
+1. Call `fetch()` first — rebase is a local operation, so `origin/<base>` must be fresh before you start
+2. Run `git rebase origin/{{BASE_BRANCH}}` (or another target ref). Never use `-i`/`--interactive` — your shell has no editor, the command will hang
+3. If conflicts appear: read the conflicted files, edit to resolve markers, `git add` the resolved files, then `git rebase --continue`. Repeat per commit until rebase finishes
+4. If you get stuck or need to back out: `git rebase --abort` returns the branch to its pre-rebase state
+5. Push with `push_branch(force=true)` — rebase rewrites history, so a normal push will be rejected. The `force` flag uses `--force-with-lease`, which is safe (it refuses to overwrite remote work you haven't seen)
+
 **What NOT to Do:**
 
 - Do NOT chain shell commands with `&&`, `||`, or `;` — each command must be a separate Bash call (permission checks apply per command, chaining will be denied)
 - Your cwd is your workspace, NOT the repo. For git CLI commands, `cd` into your repo directory first (shown in your context as "Repository: <path>"). MCP tools (`fetch`, `switch_branch`, etc.) handle repo paths internally.
 - Do NOT use `git checkout`, `git switch`, or `git branch` — use `switch_branch` and `create_branch` tools instead
 - Do NOT use `git push`, `git fetch`, `git pull` — use `push_branch`, `fetch` tools instead
-- Do NOT use `git reset --hard` or `git rebase` (avoid destructive operations)
+- Do NOT use `git rebase -i` or `--interactive` — there is no editor, the command will hang
+- Do NOT use `git reset --hard` (destructive — drops uncommitted work)
 - Do NOT commit unrelated changes or secrets
 - Do NOT use any git or shell commands not listed above — only the listed commands are available
 
