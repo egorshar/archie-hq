@@ -28,13 +28,21 @@ Each milestone leaves the tree compiling and tests passing.
 ### M1 — Frontmatter + type field (no behavior change)
 
 Files:
-- `src/system/plugin-loader.ts` (parse `visibility` from frontmatter ~line 195; add to `PluginAgentDef` interface ~line 73)
+- `src/system/plugin-loader.ts` (parse `metadata.archie.visibility` from frontmatter ~line 195; add to `PluginAgentDef` interface ~line 73)
 - `src/types/agent.ts` (add `visibility: 'global' | 'local'` to `AgentDef`)
 - `src/agents/registry.ts` (default `visibility = 'global'` in both branches of `scanAgentDefs`)
 
-Parsing pattern matches the existing manual-check style at `plugin-loader.ts:194-195`:
+Archie-specific fields live under `metadata.archie.*` to avoid colliding with the Claude Code subagent frontmatter spec (`name`, `description`, `tools`, `model`, etc. — no `visibility`). Matches the existing `metadata.archie.repo` pattern at `plugin-loader.ts:216`. Frontmatter:
+
+```yaml
+metadata:
+  archie:
+    visibility: local   # or 'global' (default)
 ```
-const visibility = data.visibility === 'local' ? 'local' : 'global';
+
+Parsing:
+```
+const visibility = data.metadata?.archie?.visibility === 'local' ? 'local' : 'global';
 ```
 
 ### M2 — Collision check survives the new field; PM moves to `pm` plugin

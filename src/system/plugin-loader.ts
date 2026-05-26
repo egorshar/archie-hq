@@ -84,9 +84,11 @@ export interface PluginAgentDef {
   /** Maximum agentic turns from frontmatter */
   maxTurns?: number;
   /**
-   * Visibility from frontmatter (default 'global').
+   * Visibility from `metadata.archie.visibility` (default 'global').
    * 'local' agents are only addressable by other agents in the same plugin;
    * external entries (webhooks) still reach repo agents regardless.
+   * Namespaced under metadata.archie because `visibility` isn't part of the
+   * Claude Code subagent frontmatter spec.
    */
   visibility?: 'global' | 'local';
   /** Markdown body (domain-specific instructions) */
@@ -199,7 +201,11 @@ function scanPlugins(): LoadedPlugin[] {
 
         const effort = ['low', 'medium', 'high', 'xhigh', 'max'].includes(data.effort) ? data.effort : undefined;
         const maxTurns = typeof data.maxTurns === 'number' && data.maxTurns > 0 ? data.maxTurns : undefined;
-        const visibility: 'global' | 'local' = data.visibility === 'local' ? 'local' : 'global';
+        // Archie-specific fields are namespaced under metadata.archie to avoid
+        // colliding with the Claude Code subagent frontmatter spec (which has
+        // no `visibility` field). Same pattern as `metadata.archie.repo` below.
+        const visibility: 'global' | 'local' =
+          data.metadata?.archie?.visibility === 'local' ? 'local' : 'global';
 
         const agentDef: PluginAgentDef = {
           key,
