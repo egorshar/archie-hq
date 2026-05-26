@@ -16,7 +16,7 @@ import { z } from 'zod';
 import type { AgentName, FindingType } from '../types/task.js';
 import type { Task } from '../tasks/task.js';
 import type { Agent } from './agent.js';
-import { getAgentIds } from './registry.js';
+import { getAgentIds, getVisiblePeerIdsForSender, getAgentDef } from './registry.js';
 import { getGitHubClient } from '../connectors/github/client.js';
 import { gitExec } from '../connectors/github/repo-clone.js';
 import { mirrorLegacyFields, hydrateBranchState, findBranchStateByPR } from '../connectors/github/branch-state.js';
@@ -154,8 +154,17 @@ export interface PRChecksReport {
 
 // ---- Tool creation helpers ----
 
-function allAgents(): [string, ...string[]] {
-  return ['pm-agent', ...getAgentIds()] as [string, ...string[]];
+/**
+ * Build the enum of agents the given sender can message.
+ * Always includes 'pm-agent' as a fallback target so an isolated local helper
+ * can still escalate. Excludes the sender itself.
+ */
+function visibleTargetsForSender(senderDef: import('../types/agent.js').AgentDef): [string, ...string[]] {
+  const visible = new Set<string>(getVisiblePeerIdsForSender(senderDef));
+  // PM is always reachable (escalation channel), except when the sender is PM itself.
+  if (senderDef.id !== 'pm-agent') visible.add('pm-agent');
+  const list = Array.from(visible);
+  return (list.length > 0 ? list : ['pm-agent']) as [string, ...string[]];
 }
 
 // ---- Base tools (all agents) ----
@@ -165,7 +174,7 @@ function createSendMessageTool(agent: Agent, task: Task) {
     'send_message_to_agent',
     'Send a message to another agent and wait for their response. Use this to coordinate with peer agents.',
     {
-      target: z.enum(allAgents()).describe('The agent to send the message to'),
+      target: z.enum(visibleTargetsForSender(agent.def)).describe('The agent to send the message to'),
       message: z.string().describe('The message content to send'),
     },
     async (args) => {
@@ -357,7 +366,12 @@ function createFindSlackChannelTool(_agent: Agent, _task: Task) {
 }
 
 function createAssignTaskOwnerTool(agent: Agent, task: Task) {
-  const taskOwnerAgents = getAgentIds() as [string, ...string[]];
+  // PM can only assign to agents it can see — globals + same-plugin (pm) locals.
+  const visibleIds = getVisiblePeerIdsForSender(agent.def);
+  // Defensive fallback: if no visible peers (misconfigured deployment), expose
+  // the legacy full list so the tool still type-checks and PM gets a clear
+  // runtime error instead of a Zod construction crash.
+  const taskOwnerAgents = (visibleIds.length > 0 ? visibleIds : getAgentIds()) as [string, ...string[]];
   return tool(
     'assign_task_owner',
     'Assign a task owner who will lead the investigation. Call this before sending the initial assignment message.',

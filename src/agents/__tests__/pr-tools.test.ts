@@ -51,6 +51,8 @@ vi.mock('../../system/logger.js', () => ({
 
 vi.mock('../registry.js', () => ({
   getAgentIds: vi.fn().mockReturnValue(['backend-agent', 'mobile-agent']),
+  getVisiblePeerIdsForSender: vi.fn().mockReturnValue(['backend-agent', 'mobile-agent']),
+  getAgentDef: vi.fn().mockReturnValue(undefined),
 }));
 
 // ---- Helpers ----
@@ -82,6 +84,7 @@ function makeAgent(overrides: Partial<AgentDef> = {}): Agent {
       expertise: 'Node.js',
       track: 'repo',
       pluginName: 'engineering',
+      visibility: 'global',
       repo: {
         githubRepo: 'org/backend',
         repoKey: 'backend',

@@ -119,6 +119,14 @@ export interface AgentDef {
   /** Plugin name this agent belongs to */
   pluginName: string;
 
+  /**
+   * Addressing scope.
+   * - 'global': any agent (in any plugin) can address this agent and PM can dispatch to it.
+   * - 'local': only same-plugin agents can address it via send_message_to_agent.
+   *   Repo agents marked 'local' still receive webhook-routed events (external entry).
+   */
+  visibility: 'global' | 'local';
+
   /** Domain-specific prompt body (Layer 3) from agents/<key>.md */
   agentPrompt?: string;
 

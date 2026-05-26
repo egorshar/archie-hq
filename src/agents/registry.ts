@@ -52,6 +52,8 @@ export function scanAgentDefs(): AgentDef[] {
       // Resolve MCP servers and tool permissions from frontmatter
       const resolvedMcp = resolveAgentMcpServers(agent, rootMcp);
 
+      const visibility: 'global' | 'local' = agent.visibility ?? 'global';
+
       if (agent.repo) {
         // Repo agent — has repo metadata in frontmatter
         defs.push({
@@ -64,6 +66,7 @@ export function scanAgentDefs(): AgentDef[] {
           maxTurns: agent.maxTurns,
           track: 'repo',
           pluginName: plugin.name,
+          visibility,
           agentPrompt: agent.prompt || undefined,
           repo: {
             githubRepo: agent.repo.github,
@@ -88,6 +91,7 @@ export function scanAgentDefs(): AgentDef[] {
           maxTurns: agent.maxTurns,
           track: 'plugin',
           pluginName: plugin.name,
+          visibility,
           agentPrompt: agent.prompt,
           pluginPath: plugin.dir,
           pluginDataPath: join(PLUGINS_DATA_DIR, plugin.name),
@@ -112,6 +116,15 @@ export function scanAgentDefs(): AgentDef[] {
  */
 export function getAllAgentDefs(): AgentDef[] {
   return registry;
+}
+
+/**
+ * Test-only: override the in-memory registry. Used by unit tests that exercise
+ * the pure helpers (visibility filtering, peer-list construction) without
+ * loading plugins from disk. Do not call from production code.
+ */
+export function __setRegistryForTesting(defs: AgentDef[]): void {
+  registry = defs;
 }
 
 /**
@@ -150,16 +163,33 @@ export function getPmDef(): AgentDef | undefined {
 }
 
 /**
- * Build a formatted peer list string for agent prompts.
- * Includes all agents except the excluded one (and PM).
+ * Return the set of agent ids the sender is allowed to address.
+ * Filter rules:
+ *   - Same-plugin peers are always visible (any visibility).
+ *   - Other-plugin peers are visible only if visibility === 'global'.
+ *   - PM is excluded (the send_message_to_agent enum adds it back as a fallback).
+ *   - The sender itself is excluded.
  */
-export function buildPeerList(excludeAgentId: string): string {
+export function getVisiblePeerIdsForSender(senderDef: AgentDef): string[] {
+  return registry
+    .filter((d) => d.track !== 'pm')
+    .filter((d) => d.id !== senderDef.id)
+    .filter((d) => d.pluginName === senderDef.pluginName || d.visibility === 'global')
+    .map((d) => d.id);
+}
+
+/**
+ * Build a formatted peer list for the sender's prompt, applying visibility rules.
+ */
+export function buildPeerListForSender(senderDef: AgentDef): string {
+  const visibleIds = new Set(getVisiblePeerIdsForSender(senderDef));
+
   const repoPeers = registry
-    .filter((d) => d.track === 'repo' && d.id !== excludeAgentId)
+    .filter((d) => d.track === 'repo' && visibleIds.has(d.id))
     .map((d) => `- ${d.id}: ${d.role} (${d.repo!.repoKey} repository)`);
 
   const pluginPeers = registry
-    .filter((d) => d.track === 'plugin' && d.id !== excludeAgentId)
+    .filter((d) => d.track === 'plugin' && visibleIds.has(d.id))
     .map((d) => `- ${d.id}: ${d.role} [${d.pluginName}]`);
 
   return [...repoPeers, ...pluginPeers].join('\n');
@@ -224,11 +254,17 @@ function resolveAgentMcpServers(
 function buildPmDef(teamDefs: AgentDef[], rootMcp: LoadedMcpConfig): AgentDef {
   const pmPlugin = getPlugins().find((p) => p.name === 'pm');
 
-  const teamList = teamDefs
+  // PM belongs to the "pm" plugin for visibility purposes — agents marked `local`
+  // in the pm plugin are addressable by PM, locals elsewhere are not.
+  const visibleTeam = teamDefs.filter(
+    (d) => d.pluginName === 'pm' || d.visibility === 'global',
+  );
+
+  const teamList = visibleTeam
     .map((d) => `- ${d.id}: ${d.role}`)
     .join('\n');
 
-  const teamExpertise = teamDefs
+  const teamExpertise = visibleTeam
     .map((d) => `- ${d.id}: ${d.expertise}`)
     .join('\n');
 
@@ -245,7 +281,8 @@ function buildPmDef(teamDefs: AgentDef[], rootMcp: LoadedMcpConfig): AgentDef {
     effort: overlay?.effort,
     maxTurns: overlay?.maxTurns,
     track: 'pm',
-    pluginName: 'core',
+    pluginName: 'pm',
+    visibility: 'global',
     pluginDataPath: join(PLUGINS_DATA_DIR, 'pm'),
     pmConfig: { teamList, teamExpertise },
     pmOverlayPrompt: overlay?.prompt || undefined,

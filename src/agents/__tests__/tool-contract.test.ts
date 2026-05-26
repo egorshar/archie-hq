@@ -44,6 +44,8 @@ vi.mock('../../system/logger.js', () => ({
 
 vi.mock('../registry.js', () => ({
   getAgentIds: vi.fn().mockReturnValue(['backend-agent', 'mobile-agent']),
+  getVisiblePeerIdsForSender: vi.fn().mockReturnValue(['backend-agent', 'mobile-agent']),
+  getAgentDef: vi.fn().mockReturnValue(undefined),
 }));
 
 vi.mock('../../connectors/slack/client.js', () => ({
@@ -57,7 +59,7 @@ function makeAgent(overrides: Partial<AgentDef> = {}): Agent {
   return {
     def: {
       id: 'backend-agent', key: 'backend', role: 'Backend', expertise: 'Node',
-      track: 'repo', pluginName: 'engineering',
+      track: 'repo', pluginName: 'engineering', visibility: 'global',
       repo: { githubRepo: 'org/backend', repoKey: 'backend', defaultPath: '/repos/backend' },
       ...overrides,
     },

@@ -130,7 +130,7 @@ async function main(): Promise<void> {
       logger.plain(`    overlay: pm plugin`);
     }
     for (const def of repoDefs) {
-      logger.plain(`  [${def.pluginName}] ${def.id} — ${def.role}`);
+      logger.plain(`  [${def.pluginName}] ${def.id} (${def.visibility}) — ${def.role}`);
       const gitName = await configureGitIdentity(def.repo!.defaultPath);
       logger.plain(`    repo: ${def.repo!.defaultPath} (${def.repo!.githubRepo})`);
       if (gitName) {
@@ -141,12 +141,32 @@ async function main(): Promise<void> {
       }
     }
     for (const def of agentDefs.filter((d) => d.track === 'plugin')) {
-      logger.plain(`  [${def.pluginName}] ${def.id} — ${def.role}`);
+      logger.plain(`  [${def.pluginName}] ${def.id} (${def.visibility}) — ${def.role}`);
       if (def.mcpServers) {
         logger.plain(`    mcp: ${Object.keys(def.mcpServers).join(', ')}`);
       }
     }
     logger.plain('');
+
+    // Warn about plugins that have no externally reachable agents.
+    // Repo agents can still be addressed via webhooks even when local, so they
+    // count as external entry points; plugin agents must be `global` for PM
+    // (or another plugin) to dispatch into them.
+    const pluginNames = new Set(plugins.map((p) => p.name));
+    pluginNames.delete('pm');
+    for (const pluginName of pluginNames) {
+      const pluginAgents = agentDefs.filter((d) => d.pluginName === pluginName && d.track !== 'pm');
+      if (pluginAgents.length === 0) continue;
+      const hasEntryPoint = pluginAgents.some(
+        (d) => d.visibility === 'global' || d.track === 'repo',
+      );
+      if (!hasEntryPoint) {
+        logger.warn(
+          'system',
+          `Plugin "${pluginName}" has no externally reachable agents — PM cannot dispatch into it (all agents are local).`,
+        );
+      }
+    }
 
     // ---- HTTP Server Setup ----
 
