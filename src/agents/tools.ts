@@ -564,11 +564,14 @@ function createPushBranchTool(agent: Agent, task: Task) {
   const repoKey = agent.def.repo!.repoKey;
   return tool(
     'push_branch',
-    'Push commits from the local clone to the remote origin.',
-    {},
-    async () => {
+    'Push commits from the local clone to the remote origin. Set force=true after a rebase to force-push with lease (safe against overwriting concurrent updates). Do not use force=true just because a normal push was rejected — investigate why first.',
+    {
+      force: z.boolean().optional().describe('Use --force-with-lease. Required after rebasing a pushed branch.'),
+    },
+    async (args) => {
       const agentName = agent.def.id as AgentName;
-      logger.agentAction(agentName, 'Pushing branch', repoKey);
+      const force = args.force === true;
+      logger.agentAction(agentName, force ? 'Force-pushing branch (with lease)' : 'Pushing branch', repoKey);
 
       const repoInfo = task.metadata.repositories[repoKey];
       if (!repoInfo?.clone_path) {
@@ -583,12 +586,13 @@ function createPushBranchTool(agent: Agent, task: Task) {
       }
 
       try {
-        await execAsync(`git push -u origin HEAD:${branch}`, { cwd: repoInfo.clone_path });
+        const forceFlag = force ? '--force-with-lease ' : '';
+        await execAsync(`git push ${forceFlag}-u origin HEAD:${branch}`, { cwd: repoInfo.clone_path });
 
         mirrorLegacyFields(repoInfo);
         task.debouncedSave();
 
-        const message = `Pushed ${branch} to origin`;
+        const message = `${force ? 'Force-pushed' : 'Pushed'} ${branch} to origin`;
         logger.system(`GitHub: ${message}`);
         return ok(`Successfully pushed: ${message}`);
       } catch (error) {
