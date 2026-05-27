@@ -272,7 +272,6 @@ export async function spawnAgent(agent: Agent, task: Task): Promise<void> {
   const cwd = workspace;
   const model = def.model || (isPmAgent(def) ? 'opus' : 'sonnet');
   const tools = def.tools;
-  const baseDisallowedTools = ['WebSearch', 'WebFetch', ...(def.disallowedTools || [])];
 
   const pluginPaths = def.pluginPath ? [def.pluginPath] : [];
   const pluginReadPaths = [...pluginPaths, ...(def.pluginDataPath ? [def.pluginDataPath] : [])];
@@ -302,7 +301,7 @@ export async function spawnAgent(agent: Agent, task: Task): Promise<void> {
 
   let systemPrompt: string;
   let additionalDirectories: string[] = [sharedPath, ...pluginPaths];
-  let disallowedTools: string[] = baseDisallowedTools;
+  let disallowedTools: string[] = ['WebSearch', 'WebFetch', ...(def.disallowedTools || [])];
   let sandboxOpts: SandboxOptions = {
     cwd,
     denyReadPaths: [WORKDIR],
@@ -414,7 +413,7 @@ Shared folder: ${sharedPath} [READ-ONLY]
     mcpServers['repo-tools'] = createRepoToolsMcpServer(agent, task);
 
     disallowedTools = [
-      ...baseDisallowedTools,
+      ...disallowedTools,
       ...(editAllowed
         ? []
         : [
