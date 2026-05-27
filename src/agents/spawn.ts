@@ -405,7 +405,7 @@ Shared folder: ${sharedPath} [READ-ONLY]
 
     additionalDirectories = [repoPath, ...additionalDirectories];
 
-    mcpServers['repo-agent-tools'] = createBaseAgentMcpServer(agent, task);
+    mcpServers['agent-tools'] = createBaseAgentMcpServer(agent, task);
     mcpServers['repo-tools'] = createRepoToolsMcpServer(agent, task);
 
     disallowedTools = [
@@ -458,7 +458,7 @@ Shared folder: ${sharedPath} [READ-ONLY]
 `;
     systemPrompt = `${systemPrompt}\n\nCurrent Context:\n${context}`;
 
-    mcpServers['repo-agent-tools'] = createBaseAgentMcpServer(agent, task);
+    mcpServers['agent-tools'] = createBaseAgentMcpServer(agent, task);
   }
 
   // Expose the sandbox config on the agent so in-process tools (e.g.

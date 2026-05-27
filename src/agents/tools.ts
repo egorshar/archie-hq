@@ -1466,7 +1466,7 @@ export function createRepoToolsMcpServer(agent: Agent, task: Task) {
  */
 export function createBaseAgentMcpServer(agent: Agent, task: Task) {
   return createSdkMcpServer({
-    name: 'repo-agent-tools',
+    name: 'agent-tools',
     version: '1.0.0',
     tools: [
       createSendMessageTool(agent, task),
