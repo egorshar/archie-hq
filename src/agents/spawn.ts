@@ -161,27 +161,60 @@ export async function spawnAgent(agent: Agent, task: Task): Promise<void> {
   }
   const useClaudeDirs = hasClaudeDirs || !agent.session.session_id;
 
-  // ---- Build track-specific config ----
+  // ---- Shared scaffolding (all agents) ----
+  //
+  // Every agent gets a workspace, the same research-tools server, the same base
+  // tool set, and the same base filesystem boundaries. Repo access and the PM
+  // coordinator role are layered on top of this.
+
+  const workspace = await setupAgentWorkspace(taskId, agent);
+  const cwd = workspace;
+  const model = def.model || (isPmAgent(def) ? 'opus' : 'sonnet');
+  const tools = def.tools;
+  const baseDisallowedTools = ['WebSearch', 'WebFetch', ...(def.disallowedTools || [])];
+
+  const pluginPaths = def.pluginPath ? [def.pluginPath] : [];
+  const pluginReadPaths = [...pluginPaths, ...(def.pluginDataPath ? [def.pluginDataPath] : [])];
+  const claudeReadDirs = useClaudeDirs ? [claudeConfigDir, claudeTmpDir] : [];
+  const claudeWriteDirs = useClaudeDirs ? [claudeTmpDir] : [];
+  const protectedWorkspaceFiles = [
+    join(workspace, '.claude', 'settings.json'),
+    join(workspace, '.claude', 'skills'),
+    join(workspace, '.claude', 'hooks'),
+    join(workspace, 'CLAUDE.md'),
+  ];
+
+  const researchServer = createResearchMcpServer({
+    getTaskId: () => taskId,
+    getResearchesDir: () => join(getTaskPath(taskId), 'researches'),
+    getCallerAgentId: () => def.id,
+    checkResearchBudget: () => task.checkResearchBudget(),
+    incrementResearchCount: () => task.incrementResearchCount(),
+    onResearchBudgetExceeded: () => task.onResearchBudgetExceeded(),
+  });
+
+  // Standard (non-repo) filesystem sandbox — shared by the PM and plugin agents.
+  const standardSandbox: SandboxOptions = {
+    cwd,
+    denyReadPaths: [WORKDIR],
+    allowReadPaths: [workspace, sharedPath, ...claudeReadDirs, ...pluginReadPaths],
+    allowWritePaths: [workspace, ...claudeWriteDirs],
+    denyWritePaths: [sharedPath, ...pluginPaths, ...protectedWorkspaceFiles],
+    allowedNetworkDomains: def.allowedNetworkDomains,
+  };
+
+  // ---- Per-agent layers ----
 
   let systemPrompt: string;
-  let cwd: string;
-  let additionalDirectories: string[] | undefined;
+  let additionalDirectories: string[];
   let mcpServers: Record<string, any>;
-  let disallowedTools: string[] | undefined;
-  let tools: string[] | undefined;
+  let disallowedTools: string[];
   let sandboxOpts: SandboxOptions;
-  let model: string;
 
   if (isPmAgent(def)) {
     // ---- PM coordinator ----
-    const pmWorkspace = await setupAgentWorkspace(taskId, agent);
     systemPrompt = await generatePMPrompt(task);
-    model = (def.model || 'opus') as string;
-    cwd = pmWorkspace;
-    additionalDirectories = [sharedPath];
-    if (def.pluginPath) {
-      additionalDirectories.push(def.pluginPath);
-    }
+    additionalDirectories = [sharedPath, ...pluginPaths];
 
     const channelEntries = Object.entries(metadata.channels);
     const renderChannel = (id: string, ch: typeof metadata.channels[string]): string => {
@@ -230,7 +263,7 @@ export async function spawnAgent(agent: Agent, task: Task): Promise<void> {
     const context = `
 ${contextLines.join('\n')}
 
-Working directory (cwd): ${pmWorkspace} [READ-WRITE]
+Working directory (cwd): ${workspace} [READ-WRITE]
 
 Shared folder: ${sharedPath} [READ-ONLY]
   - knowledge.log — conversation history and agent findings
@@ -249,43 +282,12 @@ Shared folder: ${sharedPath} [READ-ONLY]
     mcpServers = {
       ...(def.mcpServers || {}),
       'pm-agent-tools': createPMAgentMcpServer(agent, task),
-      'research-tools': createResearchMcpServer({
-        getTaskId: () => taskId,
-        getResearchesDir: () => join(getTaskPath(taskId), 'researches'),
-        getCallerAgentId: () => 'pm-agent',
-        checkResearchBudget: () => task.checkResearchBudget(),
-        incrementResearchCount: () => task.incrementResearchCount(),
-        onResearchBudgetExceeded: () => task.onResearchBudgetExceeded(),
-      }),
+      'research-tools': researchServer,
     };
-
-    tools = def.tools;
-    disallowedTools = [
-      'WebSearch', 'WebFetch',
-      ...(def.disallowedTools || []),
-    ];
-    sandboxOpts = {
-      cwd: pmWorkspace,
-      denyReadPaths: [WORKDIR],
-      allowReadPaths: [
-        pmWorkspace, sharedPath, ...(useClaudeDirs ? [claudeConfigDir, claudeTmpDir] : []),
-        ...(def.pluginPath ? [def.pluginPath] : []),
-        ...(def.pluginDataPath ? [def.pluginDataPath] : []),
-      ],
-      allowWritePaths: [pmWorkspace, ...(useClaudeDirs ? [claudeTmpDir] : [])],
-      denyWritePaths: [
-        sharedPath,
-        ...(def.pluginPath ? [def.pluginPath] : []),
-        join(pmWorkspace, '.claude', 'settings.json'),
-        join(pmWorkspace, '.claude', 'skills'),
-        join(pmWorkspace, '.claude', 'hooks'),
-        join(pmWorkspace, 'CLAUDE.md'),
-      ],
-      allowedNetworkDomains: def.allowedNetworkDomains,
-    };
+    disallowedTools = baseDisallowedTools;
+    sandboxOpts = standardSandbox;
   } else if (isRepoAgent(def)) {
     // ---- Repo access attached ----
-    const repoWorkspace = await setupAgentWorkspace(taskId, agent);
     const repoInfo = metadata.repositories[def.repo!.repoKey];
     const baseRepoPath = repoInfo?.path || def.repo!.defaultPath;
     const editAllowed = metadata.edit_allowed === true;
@@ -360,7 +362,7 @@ Shared folder: ${sharedPath} [READ-ONLY]
     const context = `
 Task: ${taskId}
 
-Working directory (cwd): ${repoWorkspace} [READ-WRITE]
+Working directory (cwd): ${workspace} [READ-WRITE]
 
 Repository: ${repoPath} [${repoMode}]
   - Current branch: ${currentBranch}
@@ -371,40 +373,17 @@ Shared folder: ${sharedPath} [READ-ONLY]
 `;
     systemPrompt = `${systemPrompt}\n\nCurrent Context:\n${context}`;
 
-    cwd = repoWorkspace;
-    model = (def.model || 'sonnet') as string;
-    additionalDirectories = [repoPath, sharedPath];
-    if (def.pluginPath) {
-      additionalDirectories.push(def.pluginPath);
-    }
+    additionalDirectories = [repoPath, sharedPath, ...pluginPaths];
 
     mcpServers = {
       ...(def.mcpServers || {}),
       'repo-agent-tools': createBaseAgentMcpServer(agent, task),
       'repo-tools': createRepoToolsMcpServer(agent, task),
-      'research-tools': createResearchMcpServer({
-        getTaskId: () => taskId,
-        getResearchesDir: () => join(getTaskPath(taskId), 'researches'),
-        getCallerAgentId: () => def.id,
-        checkResearchBudget: () => task.checkResearchBudget(),
-        incrementResearchCount: () => task.incrementResearchCount(),
-        onResearchBudgetExceeded: () => task.onResearchBudgetExceeded(),
-      }),
+      'research-tools': researchServer,
     };
 
-    const denyWriteProtected = [
-      // Protect SDK config in cwd (agent workspace)
-      join(repoWorkspace, '.claude', 'settings.json'),
-      join(repoWorkspace, '.claude', 'skills'),
-      join(repoWorkspace, '.claude', 'hooks'),
-      join(repoWorkspace, 'CLAUDE.md'),
-      // Prevent agent from switching branches (git checkout/switch writes .git/HEAD)
-      join(repoPath, '.git', 'HEAD'),
-    ];
-
-    tools = def.tools;
     disallowedTools = [
-      'WebSearch', 'WebFetch',
+      ...baseDisallowedTools,
       ...(editAllowed
         ? []
         : [
@@ -421,43 +400,32 @@ Shared folder: ${sharedPath} [READ-ONLY]
             'mcp__repo-tools__close_pull_request',
             'mcp__repo-tools__create_branch',
           ]),
-      ...(def.disallowedTools || []),
-    ];
-    const readOnlyPaths = [
-      sharedPath, baseObjectsPath,
-      ...(def.pluginPath ? [def.pluginPath] : []),
-      ...(def.pluginDataPath ? [def.pluginDataPath] : []),
     ];
 
-    if (editAllowed) {
-      sandboxOpts = {
-        cwd,
-        denyReadPaths: [WORKDIR],
-        allowReadPaths: [repoWorkspace, repoPath, ...(useClaudeDirs ? [claudeConfigDir, claudeTmpDir] : []), ...readOnlyPaths],
-        allowWritePaths: [repoWorkspace, repoPath, ...(useClaudeDirs ? [claudeTmpDir] : [])],
-        denyWritePaths: [...readOnlyPaths, ...denyWriteProtected],
-        allowedNetworkDomains: def.allowedNetworkDomains,
-      };
-    } else {
-      sandboxOpts = {
-        cwd,
-        denyReadPaths: [WORKDIR],
-        allowReadPaths: [repoWorkspace, repoPath, ...(useClaudeDirs ? [claudeConfigDir, claudeTmpDir] : []), ...readOnlyPaths],
-        allowWritePaths: [repoWorkspace, ...(useClaudeDirs ? [claudeTmpDir] : [])],
-        denyWritePaths: [repoPath, ...readOnlyPaths],
-        allowedNetworkDomains: def.allowedNetworkDomains,
-      };
-    }
+    // Repo agents extend the base sandbox with the clone (RW in edit mode) and
+    // a few repo-specific read-only/protected paths.
+    const readOnlyPaths = [sharedPath, baseObjectsPath, ...pluginReadPaths];
+    sandboxOpts = {
+      cwd,
+      denyReadPaths: [WORKDIR],
+      allowReadPaths: [workspace, repoPath, ...claudeReadDirs, ...readOnlyPaths],
+      allowWritePaths: editAllowed
+        ? [workspace, repoPath, ...claudeWriteDirs]
+        : [workspace, ...claudeWriteDirs],
+      denyWritePaths: editAllowed
+        ? [...readOnlyPaths, ...protectedWorkspaceFiles, join(repoPath, '.git', 'HEAD')]
+        : [repoPath, ...readOnlyPaths],
+      allowedNetworkDomains: def.allowedNetworkDomains,
+    };
   } else {
     // ---- Plain plugin agent ----
-    const agentWorkspace = await setupAgentWorkspace(taskId, agent);
-
     systemPrompt = await generatePluginAgentPrompt(agent);
+    additionalDirectories = [sharedPath, ...pluginPaths];
     const context = `
 Task: ${taskId}
 Plugin: ${def.pluginName}
 
-Working directory (cwd): ${agentWorkspace} [READ-WRITE]
+Working directory (cwd): ${workspace} [READ-WRITE]
 
 Shared folder: ${sharedPath} [READ-ONLY]
   - knowledge.log — conversation history and agent findings (read ONCE per message, don't poll)
@@ -465,50 +433,13 @@ Shared folder: ${sharedPath} [READ-ONLY]
 `;
     systemPrompt = `${systemPrompt}\n\nCurrent Context:\n${context}`;
 
-    cwd = agentWorkspace;
-    additionalDirectories = [sharedPath];
-    if (def.pluginPath) {
-      additionalDirectories.push(def.pluginPath);
-    }
-    model = (def.model || 'sonnet') as string;
-
     mcpServers = {
       ...(def.mcpServers || {}),
       'repo-agent-tools': createBaseAgentMcpServer(agent, task),
-      'research-tools': createResearchMcpServer({
-        getTaskId: () => taskId,
-        getResearchesDir: () => join(getTaskPath(taskId), 'researches'),
-        getCallerAgentId: () => def.id,
-        checkResearchBudget: () => task.checkResearchBudget(),
-        incrementResearchCount: () => task.incrementResearchCount(),
-        onResearchBudgetExceeded: () => task.onResearchBudgetExceeded(),
-      }),
+      'research-tools': researchServer,
     };
-
-    tools = def.tools;
-    disallowedTools = [
-      'WebSearch', 'WebFetch',
-      ...(def.disallowedTools || []),
-    ];
-    sandboxOpts = {
-      cwd: agentWorkspace,
-      denyReadPaths: [WORKDIR],
-      allowReadPaths: [
-        agentWorkspace, sharedPath, ...(useClaudeDirs ? [claudeConfigDir, claudeTmpDir] : []),
-        ...(def.pluginPath ? [def.pluginPath] : []),
-        ...(def.pluginDataPath ? [def.pluginDataPath] : []),
-      ],
-      allowWritePaths: [agentWorkspace, ...(useClaudeDirs ? [claudeTmpDir] : [])],
-      denyWritePaths: [
-        sharedPath,
-        ...(def.pluginPath ? [def.pluginPath] : []),
-        join(agentWorkspace, '.claude', 'settings.json'),
-        join(agentWorkspace, '.claude', 'skills'),
-        join(agentWorkspace, '.claude', 'hooks'),
-        join(agentWorkspace, 'CLAUDE.md'),
-      ],
-      allowedNetworkDomains: def.allowedNetworkDomains,
-    };
+    disallowedTools = baseDisallowedTools;
+    sandboxOpts = standardSandbox;
   }
 
   // Expose the sandbox config on the agent so in-process tools (e.g.
