@@ -311,9 +311,11 @@ export async function spawnAgent(agent: Agent, task: Task): Promise<void> {
     denyWritePaths: [sharedPath, ...pluginPaths, ...protectedWorkspaceFiles],
     allowedNetworkDomains: def.allowedNetworkDomains,
   };
-  // Common to all agents; each branch adds its own agent-tools server.
+  // Base servers every agent gets; branches add their own (repo-tools, the PM
+  // coordinator servers, etc.) on top.
   const mcpServers: Record<string, any> = {
     ...(def.mcpServers || {}),
+    'agent-tools': createBaseAgentMcpServer(agent, task),
     'research-tools': researchServer,
   };
 
@@ -384,7 +386,6 @@ Shared folder: ${sharedPath} [READ-ONLY]
       systemPrompt = `${systemPrompt}\n\n${def.pmOverlayPrompt}`;
     }
 
-    mcpServers['agent-tools'] = createBaseAgentMcpServer(agent, task);
     mcpServers['comms-tools'] = createCommsMcpServer(agent, task);
     mcpServers['orchestration-tools'] = createOrchestrationMcpServer(agent, task);
     mcpServers['scheduling-tools'] = createSchedulingMcpServer(agent, task);
@@ -410,7 +411,6 @@ Shared folder: ${sharedPath} [READ-ONLY]
 
     additionalDirectories = [repoPath, ...additionalDirectories];
 
-    mcpServers['agent-tools'] = createBaseAgentMcpServer(agent, task);
     mcpServers['repo-tools'] = createRepoToolsMcpServer(agent, task);
 
     disallowedTools = [
@@ -463,7 +463,6 @@ Shared folder: ${sharedPath} [READ-ONLY]
 `;
     systemPrompt = `${systemPrompt}\n\nCurrent Context:\n${context}`;
 
-    mcpServers['agent-tools'] = createBaseAgentMcpServer(agent, task);
   }
 
   // Expose the sandbox config on the agent so in-process tools (e.g.
