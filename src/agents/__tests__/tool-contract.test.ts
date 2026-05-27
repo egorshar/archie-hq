@@ -59,7 +59,7 @@ function makeAgent(overrides: Partial<AgentDef> = {}): Agent {
   return {
     def: {
       id: 'backend-agent', key: 'backend', role: 'Backend', expertise: 'Node',
-      track: 'repo', pluginName: 'engineering', visibility: 'global',
+      pluginName: 'engineering', visibility: 'global',
       repo: { githubRepo: 'org/backend', repoKey: 'backend', defaultPath: '/repos/backend' },
       ...overrides,
     },
@@ -163,7 +163,7 @@ describe('repo-tools MCP server contract', () => {
 
 describe('pm-agent-tools MCP server contract', () => {
   it('registers exactly the tools listed in spawn.ts allowedTools', () => {
-    const agent = makeAgent({ track: 'pm', repo: undefined, id: 'pm-agent' });
+    const agent = makeAgent({ isPm: true, repo: undefined, id: 'pm-agent' });
     const server = createPMAgentMcpServer(agent, makeTask());
     const registered = getRegisteredToolNames(server).map((n) => `mcp__pm-agent-tools__${n}`);
 

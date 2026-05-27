@@ -2,8 +2,10 @@
  * Unified Agent Spawner
  *
  * Single spawnAgent(agent, task) function replaces three separate spawners
- * (pm.ts, repo-agent.ts, plugin-agent.ts). Branches on agent.def.track for
- * model, CWD, prompt, tools, edit mode, and skills.
+ * (pm.ts, repo-agent.ts, plugin-agent.ts). One agent model: a plain plugin
+ * agent gains repo access when it has `repo` attached, and the PM coordinator
+ * is the one agent with `isPm`. Branches on those capabilities for model, CWD,
+ * prompt, tools, edit mode, and skills.
  *
  * Session recovery pattern (try with session → reset → retry → give up) written once.
  */
@@ -14,6 +16,7 @@ import { existsSync } from 'fs';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { Agent } from './agent.js';
 import type { Task } from '../tasks/task.js';
+import { isRepoAgent, isPmAgent } from '../types/agent.js';
 import {
   createPMAgentMcpServer,
   createBaseAgentMcpServer,
@@ -38,10 +41,10 @@ import { processAgentEventForLogging, logger } from '../system/logger.js';
 import { buildSandboxConfig, createFilesystemGuardHooks, type SandboxOptions } from './sandbox.js';
 import { applyOAuthBindings } from '../system/oauth/inject.js';
 
-// ---- Prompt generation (per track) ----
+// ---- Prompt generation (per agent kind) ----
 
 async function generatePMPrompt(task: Task): Promise<string> {
-  const pmDef = task.team.find((d) => d.track === 'pm');
+  const pmDef = task.team.find(isPmAgent);
   return loadPrompt('pm-agent', {
     TEAM_LIST: pmDef?.pmConfig?.teamList ?? '',
     TEAM_EXPERTISE: pmDef?.pmConfig?.teamExpertise ?? '',
@@ -130,8 +133,8 @@ async function setupAgentWorkspace(taskId: string, agent: Agent): Promise<string
 // ---- Main spawner ----
 
 /**
- * Spawn an agent. Branches on agent.def.track for all track-specific behavior.
- * Sets agent.handle on success.
+ * Spawn an agent. Branches on the agent's capabilities (PM coordinator vs. repo
+ * access vs. plain plugin) for all behavior. Sets agent.handle on success.
  */
 export async function spawnAgent(agent: Agent, task: Task): Promise<void> {
   const { def } = agent;
@@ -169,8 +172,8 @@ export async function spawnAgent(agent: Agent, task: Task): Promise<void> {
   let sandboxOpts: SandboxOptions;
   let model: string;
 
-  if (def.track === 'pm') {
-    // ---- PM track ----
+  if (isPmAgent(def)) {
+    // ---- PM coordinator ----
     const pmWorkspace = await setupAgentWorkspace(taskId, agent);
     systemPrompt = await generatePMPrompt(task);
     model = (def.model || 'opus') as string;
@@ -280,8 +283,8 @@ Shared folder: ${sharedPath} [READ-ONLY]
       ],
       allowedNetworkDomains: def.allowedNetworkDomains,
     };
-  } else if (def.track === 'repo') {
-    // ---- Repo track ----
+  } else if (isRepoAgent(def)) {
+    // ---- Repo access attached ----
     const repoWorkspace = await setupAgentWorkspace(taskId, agent);
     const repoInfo = metadata.repositories[def.repo!.repoKey];
     const baseRepoPath = repoInfo?.path || def.repo!.defaultPath;
@@ -446,7 +449,7 @@ Shared folder: ${sharedPath} [READ-ONLY]
       };
     }
   } else {
-    // ---- Plugin track ----
+    // ---- Plain plugin agent ----
     const agentWorkspace = await setupAgentWorkspace(taskId, agent);
 
     systemPrompt = await generatePluginAgentPrompt(agent);
@@ -608,7 +611,7 @@ Shared folder: ${sharedPath} [READ-ONLY]
               event,
               def.id,
               additionalDirectories || [cwd],
-              def.track === 'repo' && metadata.edit_allowed === true,
+              isRepoAgent(def) && metadata.edit_allowed === true,
             );
           }
 

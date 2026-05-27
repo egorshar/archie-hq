@@ -89,7 +89,6 @@ function makeAgent(overrides: Partial<AgentDef> = {}): Agent {
       key: 'backend',
       role: 'Backend engineer',
       expertise: 'Node.js',
-      track: 'repo',
       pluginName: 'engineering',
       visibility: 'global',
       repo: {
@@ -369,7 +368,7 @@ describe('get_check_run', () => {
 
 describe('PM agent tools', () => {
   it('does not include any PR tools', () => {
-    const agent = makeAgent({ track: 'pm', repo: undefined, id: 'pm-agent' });
+    const agent = makeAgent({ isPm: true, repo: undefined, id: 'pm-agent' });
     const task = makeTask();
     const server = createPMAgentMcpServer(agent, task);
 
