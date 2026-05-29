@@ -443,35 +443,35 @@ export class Task {
   }
 
   /**
-   * Acknowledge a message on a Slack channel, moving the acknowledgment to it.
+   * Ack a message on a Slack channel, moving the acknowledgment to it.
    *
    * The visual indicator (an `:eyes:` reaction) is already added to `messageTs`
    * by the event handler for instant feedback; this records which message holds
-   * it and clears the acknowledgment from the previously-acked message (so only
-   * one indicator is live per thread). We track `acknowledged_ts` separately
-   * from `last_processed_ts` because the latter advances on every processed
-   * message — including plain thread replies we never acknowledge — which would
-   * otherwise orphan the indicator.
+   * it and clears the ack from the previously-acked message (so only one
+   * indicator is live per thread). We track `ack_ts` separately from
+   * `last_processed_ts` because the latter advances on every processed message
+   * — including plain thread replies we never ack — which would otherwise
+   * orphan the indicator.
    */
-  acknowledgeMessage(channelKey: string, messageTs: string): void {
+  ackMessage(channelKey: string, messageTs: string): void {
     const ch = this.metadata.channels[channelKey];
     if (ch?.type !== 'slack') return;
-    if (ch.acknowledged_ts && ch.acknowledged_ts !== messageTs) {
-      removeReaction(ch.channel_id, ch.acknowledged_ts, 'eyes');
+    if (ch.ack_ts && ch.ack_ts !== messageTs) {
+      removeReaction(ch.channel_id, ch.ack_ts, 'eyes');
     }
-    ch.acknowledged_ts = messageTs;
+    ch.ack_ts = messageTs;
     this.debouncedSave();
   }
 
   /**
-   * Clear the acknowledgment indicator from whichever message currently holds it
-   * on each Slack channel. Called on task stop/complete to clean up indicators.
+   * Clear the ack indicator from whichever message currently holds it on each
+   * Slack channel. Called on task stop/complete to clean up indicators.
    */
-  private clearAcknowledgments(): void {
+  private clearAcks(): void {
     for (const ch of Object.values(this.metadata.channels)) {
-      if (ch.type === 'slack' && ch.acknowledged_ts) {
-        removeReaction(ch.channel_id, ch.acknowledged_ts, 'eyes');
-        ch.acknowledged_ts = undefined;
+      if (ch.type === 'slack' && ch.ack_ts) {
+        removeReaction(ch.channel_id, ch.ack_ts, 'eyes');
+        ch.ack_ts = undefined;
       }
     }
   }
@@ -585,7 +585,7 @@ export class Task {
       await this.cleanupClones();
     }
 
-    this.clearAcknowledgments();
+    this.clearAcks();
 
     this.metadata.status = 'stopped';
     await this.save(true);
@@ -618,7 +618,7 @@ export class Task {
       await this.cleanupClones();
     }
 
-    this.clearAcknowledgments();
+    this.clearAcks();
 
     this.metadata.status = 'completed';
     await this.save(true);

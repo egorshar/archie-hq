@@ -386,10 +386,10 @@ async function handleSlackEvent(event: {
 
   // Instant acknowledgment — react before any LLM processing. Only @mentions
   // and DM messages are acknowledged; plain thread replies in an engaged channel
-  // are not. Moving the acknowledgment (clearing it from the previously-acked
-  // message) and recording which message holds it is done via
-  // `task.acknowledgeMessage` once we have a task in hand — see below — so the
-  // bookkeeping survives follow-up messages.
+  // are not. Moving the ack (clearing it from the previously-acked message)
+  // and recording which message holds it is done via `task.ackMessage` once we
+  // have a task in hand — see below — so the bookkeeping survives follow-up
+  // messages.
   const isAckable = event.type === 'app_mention' || event.channel.startsWith('D');
   if (isAckable) {
     addReaction(event.channel, event.ts, 'eyes');
@@ -455,7 +455,7 @@ async function handleSlackEvent(event: {
 
     // Thread reply to an existing task — route to it
     await task.append(thread);
-    if (isAckable) task.acknowledgeMessage(channelId, event.ts);
+    if (isAckable) task.ackMessage(channelId, event.ts);
     if (!task.metadata.title) {
       generateTitleAndSync(task, thread).catch((err) =>
         logger.warn('title-generator', `pipeline failed: ${err}`),
@@ -469,7 +469,7 @@ async function handleSlackEvent(event: {
     // Bot was @mentioned, or this is a DM — start a new task
     const task = await Task.create();
     await task.append(thread);
-    if (isAckable) task.acknowledgeMessage(`slack:${event.channel}:${threadId}`, event.ts);
+    if (isAckable) task.ackMessage(`slack:${event.channel}:${threadId}`, event.ts);
     if (!task.metadata.title) {
       generateTitleAndSync(task, thread).catch((err) =>
         logger.warn('title-generator', `pipeline failed: ${err}`),

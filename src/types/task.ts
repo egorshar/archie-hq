@@ -90,13 +90,13 @@ export interface SlackChannel extends ChannelBase {
   url?: string;     // Full Slack URL to the thread (e.g. https://workspace.slack.com/archives/C.../p...)
   muted?: boolean;  // When true, messages are not routed to task until next @mention
   /**
-   * Timestamp of the message we've currently acknowledged, if any (surfaced to
-   * the user as an `:eyes:` reaction). Tracked separately from
-   * `last_processed_ts` because the latter advances on every processed message
-   * (including non-mention thread replies we never acknowledge), which would
-   * otherwise orphan the indicator. Cleared when the acknowledgment is removed.
+   * Timestamp of the message we've currently acked, if any (surfaced to the
+   * user as an `:eyes:` reaction). Tracked separately from `last_processed_ts`
+   * because the latter advances on every processed message (including
+   * non-mention thread replies we never ack), which would otherwise orphan the
+   * indicator. Cleared when the ack is removed.
    */
-  acknowledged_ts?: string;
+  ack_ts?: string;
   /** Snapshot of last observed Slack-Connect / shared-channel state for this channel. */
   isShared?: boolean;
   /** User IDs already shown the shared-channel ephemeral warning in this thread. */
