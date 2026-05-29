@@ -35,6 +35,20 @@ export interface SlackAuthor {
   isUltraRestricted?: boolean;
 }
 
+/** An emoji reaction present on a Slack message (snapshot at fetch time). */
+export interface SlackReaction {
+  /** Emoji shortcode without colons (e.g. "thumbsup", "eyes"). */
+  name: string;
+  /** Number of users who reacted with this emoji. */
+  count: number;
+  /**
+   * Display names of the users who reacted, when known. Populated by live reads
+   * (`getMessageReactions`); omitted from the ingest snapshot, which only knows
+   * counts.
+   */
+  users?: string[];
+}
+
 /** A fully-resolved message from a Slack thread */
 export interface SlackThreadMessage {
   user: SlackAuthor;
@@ -44,6 +58,8 @@ export interface SlackThreadMessage {
   files?: SlackFile[];    // raw file metadata (not yet downloaded)
   /** Forwarded / unfurled message attachments — each carries its author and text. */
   attachments?: SlackAttachment[];
+  /** Emoji reactions present on this message at fetch time. Omitted when none. */
+  reactions?: SlackReaction[];
 }
 
 /**
@@ -79,6 +95,14 @@ export interface SlackChannel extends ChannelBase {
   last_processed_ts: string;
   url?: string;     // Full Slack URL to the thread (e.g. https://workspace.slack.com/archives/C.../p...)
   muted?: boolean;  // When true, messages are not routed to task until next @mention
+  /**
+   * Timestamp of the message we've currently acked, if any (surfaced to the
+   * user as an `:eyes:` reaction). Tracked separately from `last_processed_ts`
+   * because the latter advances on every processed message (including
+   * non-mention thread replies we never ack), which would otherwise orphan the
+   * indicator. Cleared when the ack is removed.
+   */
+  ack_ts?: string;
   /** Snapshot of last observed Slack-Connect / shared-channel state for this channel. */
   isShared?: boolean;
   /** User IDs already shown the shared-channel ephemeral warning in this thread. */

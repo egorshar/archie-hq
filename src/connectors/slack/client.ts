@@ -6,7 +6,7 @@
  */
 
 import { WebClient } from '@slack/web-api';
-import type { SlackThreadRef, SlackFile, SlackThread, SlackThreadMessage, SlackAuthor, SlackAttachment } from '../../types/index.js';
+import type { SlackThreadRef, SlackFile, SlackThread, SlackThreadMessage, SlackAuthor, SlackAttachment, SlackReaction } from '../../types/index.js';
 
 /**
  * Internal raw shape produced by `fetchThreadHistory`. Carries the unresolved
@@ -27,6 +27,8 @@ interface RawSlackMessage {
   botName?: string;
   /** Workspace (team) the message originated from. Used for external-bot filtering. */
   teamId?: string;
+  /** Emoji reactions present on the message at fetch time. */
+  reactions?: SlackReaction[];
 }
 import { logger } from '../../system/logger.js';
 
@@ -299,6 +301,40 @@ export async function removeReaction(channel: string, timestamp: string, emoji: 
     await client.reactions.remove({ channel, timestamp, name: emoji });
   } catch {
     // Silently ignore — not_reacted, missing scope, etc.
+  }
+}
+
+/**
+ * Read the current emoji reactions on a single message. Requires the
+ * `reactions:read` scope. Returns the live state (unlike the snapshot captured
+ * during thread ingest). Returns an empty array on failure or in dry-run.
+ */
+export async function getMessageReactions(channel: string, timestamp: string): Promise<SlackReaction[]> {
+  if (dryRun) return [];
+  try {
+    const client = getSlackClient();
+    // `full: true` returns the complete user list per reaction (not truncated).
+    const result = await client.reactions.get({ channel, timestamp, full: true });
+    const message = result.message as { reactions?: Array<{ name?: string; count?: number; users?: string[] }> } | undefined;
+    const raw = message?.reactions;
+    if (!raw || !Array.isArray(raw)) return [];
+
+    // Resolve reacting user IDs to names so the agent knows WHO reacted —
+    // identity is the point when a reaction is a signal/vote. We use the cached
+    // workspace user list: it covers everyone we care about (the internal team).
+    // External/Connect users, bots, and deactivated accounts aren't listed and
+    // surface as their raw ID — fine here, and consistent with how we leave
+    // external participants unresolved elsewhere.
+    const nameById = new Map((await listWorkspaceUsers()).map((u) => [u.id, u.realName]));
+    return raw
+      .filter((r): r is { name: string; count?: number; users?: string[] } => typeof r.name === 'string')
+      .map((r) => {
+        const users = (r.users ?? []).map((uid) => nameById.get(uid) ?? uid);
+        return { name: r.name, count: r.count ?? 0, ...(users.length > 0 ? { users } : {}) };
+      });
+  } catch {
+    // Silently ignore — message not found, missing scope, etc.
+    return [];
   }
 }
 
@@ -775,6 +811,16 @@ async function fetchThreadHistory(
     return allFiles.length > 0 ? allFiles : undefined;
   };
 
+  // Extract emoji reactions Slack attaches to each message. Slack delivers them
+  // as `{ name, count, users }`; we keep just name + count for the snapshot.
+  const extractReactions = (msg: typeof result.messages[0]): SlackReaction[] => {
+    const raw = (msg as { reactions?: Array<{ name?: string; count?: number }> }).reactions;
+    if (!raw || !Array.isArray(raw)) return [];
+    return raw
+      .filter((r): r is { name: string; count?: number } => typeof r.name === 'string')
+      .map((r) => ({ name: r.name, count: r.count ?? 0 }));
+  };
+
   // Resolve attachment authors to SlackAuthor objects up-front so each
   // attachment carries its full author info (name, team, restriction flags).
   const extractedPerMessage = result.messages.map((m) => extractMessageParts(m));
@@ -822,6 +868,7 @@ async function fetchThreadHistory(
     const botId = rawMsg.bot_id;
     const botName = rawMsg.bot_profile?.name;
     const teamId = rawMsg.bot_profile?.team_id || rawMsg.team;
+    const reactions = extractReactions(msg);
     return {
       user: msg.user || '',
       text: applyMentionReplacements(ownText, userInfoMap, groupInfoMap, channelInfoMap),
@@ -831,6 +878,7 @@ async function fetchThreadHistory(
       ...(botId ? { botId } : {}),
       ...(botName ? { botName } : {}),
       ...(teamId ? { teamId } : {}),
+      ...(reactions.length > 0 ? { reactions } : {}),
     };
   });
 }
@@ -1172,6 +1220,7 @@ export async function fetchSlackThread(
       ts: msg.ts,
       ...(msg.files && msg.files.length > 0 ? { files: msg.files } : {}),
       ...(msg.attachments && msg.attachments.length > 0 ? { attachments: msg.attachments } : {}),
+      ...(msg.reactions && msg.reactions.length > 0 ? { reactions: msg.reactions } : {}),
     };
   });
 

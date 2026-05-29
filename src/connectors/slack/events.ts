@@ -19,7 +19,6 @@ import {
   fetchSlackThread,
   getBotId,
   addReaction,
-  removeReaction,
   setSlackDryRun,
   getUserInfo,
   isExternalUser,
@@ -366,6 +365,8 @@ async function handleSlackEvent(event: {
   thread_ts?: string;
 }): Promise<void> {
   const threadId = event.thread_ts || event.ts;
+  // Key under which this thread is (or will be) linked in task.metadata.channels.
+  const channelKey = `slack:${event.channel}:${threadId}`;
 
   // ---- External-author bail-out --------------------------------------------
   // Resolve the event author and bail if external (different team, or guest).
@@ -385,18 +386,14 @@ async function handleSlackEvent(event: {
     }
   }
 
-  // Instant acknowledgment — react before any LLM processing.
-  // Remove eyes from the previous message first (only one message should have eyes at a time).
-  if (event.type === 'app_mention' || event.channel.startsWith('D')) {
-    const prevTaskId = await findTaskByThread(threadId);
-    if (prevTaskId) {
-      const prevTask = await Task.get(prevTaskId);
-      const chKey = `slack:${event.channel}:${threadId}`;
-      const prevCh = prevTask.metadata.channels[chKey];
-      if (prevCh?.type === 'slack' && prevCh.last_processed_ts !== event.ts) {
-        removeReaction(event.channel, prevCh.last_processed_ts, 'eyes');
-      }
-    }
+  // Instant acknowledgment — react before any LLM processing. Only @mentions
+  // and DM messages are acknowledged; plain thread replies in an engaged channel
+  // are not. Moving the ack (clearing it from the previously-acked message)
+  // and recording which message holds it is done via `task.ackMessage` once we
+  // have a task in hand — see below — so the bookkeeping survives follow-up
+  // messages.
+  const isAckable = event.type === 'app_mention' || event.channel.startsWith('D');
+  if (isAckable) {
     addReaction(event.channel, event.ts, 'eyes');
   }
 
@@ -441,8 +438,7 @@ async function handleSlackEvent(event: {
     const task = await Task.get(taskId);
 
     // Check if channel is muted
-    const channelId = `slack:${event.channel}:${threadId}`;
-    const channel = task.metadata.channels[channelId];
+    const channel = task.metadata.channels[channelKey];
     if (channel?.type === 'slack' && channel.muted) {
       const isDm = event.channel.startsWith('D');
       if (event.type === 'app_mention' || isDm) {
@@ -460,6 +456,7 @@ async function handleSlackEvent(event: {
 
     // Thread reply to an existing task — route to it
     await task.append(thread);
+    if (isAckable) task.ackMessage(channelKey, event.ts);
     if (!task.metadata.title) {
       generateTitleAndSync(task, thread).catch((err) =>
         logger.warn('title-generator', `pipeline failed: ${err}`),
@@ -473,6 +470,7 @@ async function handleSlackEvent(event: {
     // Bot was @mentioned, or this is a DM — start a new task
     const task = await Task.create();
     await task.append(thread);
+    if (isAckable) task.ackMessage(channelKey, event.ts);
     if (!task.metadata.title) {
       generateTitleAndSync(task, thread).catch((err) =>
         logger.warn('title-generator', `pipeline failed: ${err}`),
