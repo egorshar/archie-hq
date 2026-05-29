@@ -887,17 +887,53 @@ async function fetchThreadHistory(
   });
 }
 
-/**
- * Get user info
- */
-export async function getUserInfo(userId: string): Promise<{
+interface UserInfo {
   name: string;
   realName: string;
   tz?: string;
   teamId?: string;
   isRestricted?: boolean;
   isUltraRestricted?: boolean;
-}> {
+}
+
+// Per-user info cache with a 10-minute TTL (matches the workspace users.list
+// cache). `getUserInfo` is called per author/mention/reactor across thread
+// ingest, mention resolution, and reaction reads — without this every call
+// would hit `users.info`. Only successful lookups are cached.
+const userInfoCache = new Map<string, { info: UserInfo; fetchedAt: number }>();
+const USER_INFO_TTL_MS = 10 * 60 * 1000;
+
+/**
+ * Get user info. Served from the per-user cache, then the warm workspace
+ * users.list cache, falling back to a `users.info` call (cached for 10 min).
+ */
+export async function getUserInfo(userId: string): Promise<UserInfo> {
+  const cached = userInfoCache.get(userId);
+  if (cached && Date.now() - cached.fetchedAt < USER_INFO_TTL_MS) {
+    return cached.info;
+  }
+
+  // Fast path: reuse the workspace users.list cache when it's already warm,
+  // avoiding a per-user `users.info` call. We never trigger a cold full-list
+  // fetch here. External/Connect users, bots, and deactivated accounts aren't
+  // in that list (and external classification needs the live flags), so they
+  // fall through to `users.info` below.
+  if (userCache.length > 0 && Date.now() - userCacheTimestamp < USER_CACHE_TTL) {
+    const fromList = userCache.find((u) => u.id === userId);
+    if (fromList) {
+      const info: UserInfo = {
+        name: fromList.name,
+        realName: fromList.realName,
+        tz: fromList.tz || undefined,
+        teamId: fromList.teamId,
+        isRestricted: fromList.isRestricted,
+        isUltraRestricted: fromList.isUltraRestricted,
+      };
+      userInfoCache.set(userId, { info, fetchedAt: Date.now() });
+      return info;
+    }
+  }
+
   const client = getSlackClient();
 
   const result = await client.users.info({ user: userId });
@@ -921,7 +957,7 @@ export async function getUserInfo(userId: string): Promise<{
     user?.name ||
     userId;
 
-  return {
+  const info: UserInfo = {
     name: user?.name || userId,
     realName,
     tz: user?.tz,
@@ -929,6 +965,8 @@ export async function getUserInfo(userId: string): Promise<{
     isRestricted: user?.is_restricted,
     isUltraRestricted: user?.is_ultra_restricted,
   };
+  userInfoCache.set(userId, { info, fetchedAt: Date.now() });
+  return info;
 }
 
 /**
