@@ -7,7 +7,18 @@
 
 import { readFile, writeFile, mkdir } from 'fs/promises';
 import { dirname } from 'path';
-import { getOrgPath, getUserPath, getUsersDir } from './paths.js';
+import {
+  getOrgPath,
+  getUserPath,
+  getUsersDir,
+  getOrgCap,
+  getUserCap,
+  getSectionCap,
+  isHousekeepingEnabled,
+} from './paths.js';
+import { sanitizeUpdate } from './sanitize.js';
+import { appendLastTouched, stripLastTouched } from './annotations.js';
+import { logger } from '../system/logger.js';
 import type { MemoryUpdate } from './types.js';
 
 // ---- Org ----
@@ -41,10 +52,73 @@ export async function readUser(username: string): Promise<string> {
   }
 }
 
-/** Write a user's memory file, creating users/ directory if needed */
+/** Write a user's memory file, creating users/ directory if needed. */
 export async function writeUser(username: string, content: string): Promise<void> {
   await mkdir(getUsersDir(), { recursive: true });
   await writeFile(getUserPath(username), content, 'utf-8');
+}
+
+/**
+ * Apply a list of updates to a user's memory file. If the file does not exist,
+ * create it with YAML frontmatter (`slack_user_id`, `display_name`, `aliases`).
+ * Returns true if a soft cap was exceeded after the write.
+ */
+export async function applyUserUpdatesWithIdentity(
+  userId: string,
+  displayName: string,
+  updates: MemoryUpdate[]
+): Promise<boolean> {
+  let content = await readUser(userId);
+  if (!content) {
+    content = buildUserFrontmatter(userId, displayName);
+  }
+  for (const update of updates) {
+    const clean = sanitizeUpdate(update);
+    if (!clean) {
+      logger.warn('memory', `dropped user update for ${userId} (sanitizer rejected): ${JSON.stringify(update).slice(0, 120)}`);
+      continue;
+    }
+    content = applyUpdate(content, clean);
+  }
+  await writeUser(userId, content);
+  return softCapExceeded(content, getUserCap(), getSectionCap());
+}
+
+/**
+ * Count bullets per section and total. Returns true if either threshold exceeds the cap.
+ * Pure function — used by callers to decide whether to schedule a housekeeping pass.
+ */
+export function softCapExceeded(content: string, totalCap: number, sectionCap: number): boolean {
+  if (!isHousekeepingEnabled()) return false;
+  const bulletsBySection = new Map<string, number>();
+  let currentSection = '';
+  let total = 0;
+  for (const raw of content.split('\n')) {
+    const sectionMatch = /^##\s+(.+?)\s*$/.exec(raw);
+    if (sectionMatch && !raw.startsWith('### ')) {
+      currentSection = sectionMatch[1];
+      continue;
+    }
+    if (/^-\s+/.test(raw)) {
+      total++;
+      bulletsBySection.set(currentSection, (bulletsBySection.get(currentSection) ?? 0) + 1);
+    }
+  }
+  if (total > totalCap) return true;
+  for (const n of bulletsBySection.values()) if (n > sectionCap) return true;
+  return false;
+}
+
+function buildUserFrontmatter(userId: string, displayName: string): string {
+  const safeDisplay = displayName.replace(/"/g, '\\"');
+  return [
+    '---',
+    `slack_user_id: ${userId}`,
+    `display_name: "${safeDisplay}"`,
+    'aliases: []',
+    '---',
+    '',
+  ].join('\n');
 }
 
 // ---- Update application ----
@@ -57,19 +131,26 @@ export async function writeUser(username: string, content: string): Promise<void
  *           If section missing, append it at end of file
  */
 export function applyUpdate(content: string, update: MemoryUpdate): string {
-  if (update.action === 'update' && update.old !== undefined) {
+  if (update.action === 'update') {
+    if (update.old === undefined) {
+      logger.warn('memory', 'applyUpdate: update action without `old` field — skipped');
+      return content;
+    }
     const lines = content.split('\n');
-    const idx = lines.findIndex((line) => line.includes(update.old!));
+    const idx = lines.findIndex((line) => stripLastTouched(line).includes(update.old!));
     if (idx !== -1) {
-      lines[idx] = `- ${update.content}`;
+      // Refresh the touched annotation on update
+      lines[idx] = appendLastTouched(`- ${update.content}`);
       return lines.join('\n');
     }
-    // old text not found — fall through to append as add
+    // old text not found — skip + warn rather than silently appending
+    logger.warn('memory', `applyUpdate: \`old\` text not found, skipped: ${update.old.slice(0, 80)}`);
+    return content;
   }
 
-  // 'add' action (or 'update' with no match — treat as add)
+  // 'add' action only — annotate with today's date
   const section = update.section;
-  const newItem = `- ${update.content}`;
+  const newItem = appendLastTouched(`- ${update.content}`);
 
   if (!section) {
     // No section — append to end
@@ -108,20 +189,31 @@ export function applyUpdate(content: string, update: MemoryUpdate): string {
   return lines.join('\n');
 }
 
-/** Apply a list of updates to org.md */
-export async function applyOrgUpdates(updates: MemoryUpdate[]): Promise<void> {
+/** Apply a list of updates to org.md, sanitizing each before write. Returns true if a soft cap was exceeded after the write. */
+export async function applyOrgUpdates(updates: MemoryUpdate[]): Promise<boolean> {
   let content = await readOrg();
   for (const update of updates) {
-    content = applyUpdate(content, update);
+    const clean = sanitizeUpdate(update);
+    if (!clean) {
+      logger.warn('memory', `dropped org update (sanitizer rejected): ${JSON.stringify(update).slice(0, 120)}`);
+      continue;
+    }
+    content = applyUpdate(content, clean);
   }
   await writeOrg(content);
+  return softCapExceeded(content, getOrgCap(), getSectionCap());
 }
 
-/** Apply a list of updates to a user's memory file */
+/** Apply a list of updates to a user's memory file, sanitizing each before write. */
 export async function applyUserUpdates(username: string, updates: MemoryUpdate[]): Promise<void> {
   let content = await readUser(username);
   for (const update of updates) {
-    content = applyUpdate(content, update);
+    const clean = sanitizeUpdate(update);
+    if (!clean) {
+      logger.warn('memory', `dropped user update for ${username} (sanitizer rejected): ${JSON.stringify(update).slice(0, 120)}`);
+      continue;
+    }
+    content = applyUpdate(content, clean);
   }
   await writeUser(username, content);
 }

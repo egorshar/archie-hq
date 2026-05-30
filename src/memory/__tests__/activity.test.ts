@@ -45,7 +45,7 @@ describe('recent activity', () => {
         '| Date | Task ID | Summary | Domain | User |',
         '|------|---------|---------|--------|------|',
         '| 2026-04-10 | task-001 | Fixed bug | engineering | egor |',
-        '| 2026-04-09 | task-002 | Added feature | mobile | alice |',
+        '| 2026-04-09 | task-002 | Added feature | product | alice |',
       ].join('\n');
       await writeFile(activityPath, content, 'utf-8');
 
@@ -62,7 +62,7 @@ describe('recent activity', () => {
         date: '2026-04-09',
         taskId: 'task-002',
         summary: 'Added feature',
-        domain: 'mobile',
+        domain: 'product',
         user: 'alice',
       });
     });
@@ -117,7 +117,7 @@ describe('recent activity', () => {
         date: '2026-04-10',
         taskId: 'task-002',
         summary: 'New task',
-        domain: 'mobile',
+        domain: 'product',
         user: 'alice',
       };
 
@@ -127,6 +127,29 @@ describe('recent activity', () => {
       const newEntryPos = content.indexOf('task-002');
       const oldEntryPos = content.indexOf('task-001');
       expect(newEntryPos).toBeLessThan(oldEntryPos);
+    });
+
+    it('dedupes by taskId — re-appending the same task replaces the prior row (last-write-wins)', async () => {
+      const first: ActivityEntry = {
+        date: '2026-04-10',
+        taskId: 'task-dup-001',
+        summary: 'First summary',
+        domain: 'engineering',
+        user: 'U07ABC123',
+      };
+      const second: ActivityEntry = {
+        date: '2026-04-10',
+        taskId: 'task-dup-001',
+        summary: 'Revised summary',
+        domain: 'engineering',
+        user: 'U07ABC123',
+      };
+      await appendActivity(first);
+      await appendActivity(second);
+
+      const entries = await readActivity();
+      expect(entries).toHaveLength(1);
+      expect(entries[0].summary).toBe('Revised summary');
     });
 
     it('verifies the inserted row format', async () => {
@@ -143,7 +166,7 @@ describe('recent activity', () => {
         date: '2026-04-10',
         taskId: 'task-002',
         summary: 'New task',
-        domain: 'mobile',
+        domain: 'product',
         user: 'alice',
       };
 
@@ -171,7 +194,7 @@ describe('recent activity', () => {
         '| Date | Task ID | Summary | Domain | User |',
         '|------|---------|---------|--------|------|',
         '| 2026-04-10 | task-001 | Task one | engineering | egor |',
-        '| 2026-04-09 | task-002 | Task two | mobile | alice |',
+        '| 2026-04-09 | task-002 | Task two | product | alice |',
       ].join('\n');
       await writeFile(activityPath, content, 'utf-8');
 
@@ -188,7 +211,7 @@ describe('recent activity', () => {
         '| Date | Task ID | Summary | Domain | User |',
         '|------|---------|---------|--------|------|',
         '| 2026-04-10 | task-001 | Newest | engineering | egor |',
-        '| 2026-04-09 | task-002 | Middle | mobile | alice |',
+        '| 2026-04-09 | task-002 | Middle | product | alice |',
         '| 2026-04-08 | task-003 | Oldest | operations | bob |',
       ].join('\n');
       await writeFile(activityPath, content, 'utf-8');

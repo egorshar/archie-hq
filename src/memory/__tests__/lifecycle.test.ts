@@ -3,7 +3,7 @@
  *
  * End-to-end test for the full extraction pipeline with a mocked extraction API.
  * Verifies that handleTaskCompleted() correctly writes all memory artifacts
- * and posts learnings to Slack.
+ * to the new memory-dir paths and does NOT post to Slack (post was removed).
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -21,6 +21,7 @@ let memoryDir: string;
 let orgPath: string;
 let usersDir: string;
 let activityPath: string;
+let summariesDir: string;
 let sessionsDir: string;
 
 // ============================================================================
@@ -29,14 +30,27 @@ let sessionsDir: string;
 
 vi.mock('../paths.js', () => ({
   isMemoryEnabled: () => true,
+  isHousekeepingEnabled: () => true,
   getMemoryDir: () => memoryDir,
   getOrgPath: () => orgPath,
   getUsersDir: () => usersDir,
-  getUserPath: (username: string) => {
-    const safe = username.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-');
+  getUserPath: (id: string) => {
+    const safe = id.includes(':') ? id.replace(':', '__') : id;
     return join(usersDir, `${safe}.md`);
   },
   getRecentActivityPath: () => activityPath,
+  getSummariesDir: () => summariesDir,
+  getSummaryPath: (taskId: string) => join(summariesDir, `${taskId}.md`),
+  getPendingPath: () => join(memoryDir, 'pending-extractions.md'),
+  isAllowedUserId: (id: string) =>
+    /^(U|W|B|T)[A-Z0-9]{6,}$/.test(id) || /^(cli|local):[A-Za-z0-9_\-]+$/.test(id),
+  isSlackUserId: (id: string) => /^(U|W|B|T)[A-Z0-9]{6,}$/.test(id),
+  isFallbackUserId: (id: string) => /^(cli|local):[A-Za-z0-9_\-]+$/.test(id),
+  isAllowedTaskId: (id: string) => /^[A-Za-z0-9._\-]+$/.test(id),
+  getOrgCap: () => 200,
+  getUserCap: () => 100,
+  getSectionCap: () => 30,
+  getStalenessDays: () => 180,
   getTaskSummaryPath: (taskId: string) => join(sessionsDir, taskId, 'shared', 'summary.md'),
 }));
 
@@ -59,7 +73,8 @@ vi.mock('../../tasks/persistence.js', () => ({
 }));
 
 // ============================================================================
-// Mock slack/client.js — spy on postSlackMessage
+// Mock slack/client.js — must remain a stub even though no test asserts on it,
+// because lifecycle.ts no longer imports it (test only verifies non-call).
 // ============================================================================
 
 vi.mock('../../connectors/slack/client.js', () => ({
@@ -90,19 +105,7 @@ vi.mock('../extractor.js', async (importOriginal) => {
   const real = await importOriginal<typeof import('../extractor.js')>();
   return {
     ...real,
-    runExtraction: vi.fn().mockResolvedValue({
-      org_updates: [
-        { action: 'add', section: 'Engineering', content: 'Uses NestJS with PostgreSQL' },
-      ],
-      user_updates: {
-        egor: [
-          { action: 'add', section: 'Work Style', content: 'Prefers direct communication' },
-        ],
-      },
-      task_summary: 'Investigated and fixed the login bug.',
-      activity_summary: 'Fixed login validation bug',
-      domain: 'engineering',
-    }),
+    runExtraction: vi.fn(),
   };
 });
 
@@ -110,7 +113,9 @@ vi.mock('../extractor.js', async (importOriginal) => {
 // Import the module under test and mocked modules (after mocks are set up)
 // ============================================================================
 
-import { handleTaskCompleted } from '../lifecycle.js';
+import { handleTaskCompleted, rescheduleTaskCompleted, extractUsernames } from '../lifecycle.js';
+import { enqueuePending, readPending } from '../pending-queue.js';
+import { runExtraction } from '../extractor.js';
 import { postSlackMessage } from '../../connectors/slack/client.js';
 
 // ============================================================================
@@ -118,6 +123,9 @@ import { postSlackMessage } from '../../connectors/slack/client.js';
 // ============================================================================
 
 const TASK_ID = 'task-20260410-1000-abc123';
+const USER_EGOR = 'U07EGOR001';
+const USER_ALICE = 'U07ALIC002';
+const USER_BOB = 'U07BOB0003';
 
 const METADATA = {
   task_id: TASK_ID,
@@ -141,10 +149,13 @@ const METADATA = {
 };
 
 const KNOWLEDGE_LOG = [
-  '[2026-04-10T10:00:00Z] [slack:#<C1:general>:1234] [@<U1:Egor Khmelev>] Fix the login bug',
+  `[2026-04-10T10:00:00Z] [slack:#<C1:general>:1234] [@<${USER_EGOR}:Egor Khmelev>] Fix the login bug`,
   '[2026-04-10T10:01:00Z] [pm-agent] [decision] Assigned backend-agent',
   '[2026-04-10T10:05:00Z] [backend-agent] [discovery] Missing validation in auth handler',
 ].join('\n');
+
+// Helper: wait for the in-process sequential extraction queue to drain.
+const drain = () => new Promise((resolve) => setTimeout(resolve, 200));
 
 // ============================================================================
 // Test suite
@@ -152,20 +163,19 @@ const KNOWLEDGE_LOG = [
 
 describe('handleTaskCompleted() — end-to-end integration', () => {
   beforeEach(async () => {
-    // Create fresh temp directories for each test
     tempDir = await mkdtemp(join(tmpdir(), 'archie-lifecycle-test-'));
     memoryDir = join(tempDir, 'memory');
     orgPath = join(memoryDir, 'org.md');
     usersDir = join(memoryDir, 'users');
     activityPath = join(memoryDir, 'recent-activity.md');
+    summariesDir = join(memoryDir, 'summaries');
     sessionsDir = join(tempDir, 'sessions');
 
-    // Create required directories
     await mkdir(join(sessionsDir, TASK_ID, 'shared'), { recursive: true });
     await mkdir(usersDir, { recursive: true });
+    await mkdir(summariesDir, { recursive: true });
     await mkdir(memoryDir, { recursive: true });
 
-    // Write task metadata and knowledge.log
     await writeFile(
       join(sessionsDir, TASK_ID, 'shared', 'metadata.json'),
       JSON.stringify(METADATA, null, 2),
@@ -177,8 +187,21 @@ describe('handleTaskCompleted() — end-to-end integration', () => {
       'utf-8'
     );
 
-    // Reset mocks between tests
     vi.mocked(postSlackMessage).mockClear();
+    vi.mocked(runExtraction).mockClear();
+    vi.mocked(runExtraction).mockResolvedValue({
+      org_updates: [
+        { action: 'add', section: 'Engineering', content: 'Uses NestJS with PostgreSQL' },
+      ],
+      user_updates: {
+        [USER_EGOR]: [
+          { action: 'add', section: 'Work Style', content: 'Prefers direct communication' },
+        ],
+      },
+      task_summary: 'Investigated and fixed the login bug.',
+      activity_summary: 'Fixed login validation bug',
+      domain: 'engineering',
+    });
   });
 
   afterEach(async () => {
@@ -187,59 +210,198 @@ describe('handleTaskCompleted() — end-to-end integration', () => {
 
   it('writes org.md with extracted org knowledge', async () => {
     handleTaskCompleted(TASK_ID);
-
-    // Wait for async queue to drain
-    await new Promise(resolve => setTimeout(resolve, 200));
+    await drain();
 
     expect(existsSync(orgPath)).toBe(true);
     const content = await readFile(orgPath, 'utf-8');
     expect(content).toContain('Uses NestJS with PostgreSQL');
   });
 
-  it('writes users/egor.md with extracted user knowledge', async () => {
+  it('writes users/<U…>.md keyed by raw Slack ID with frontmatter', async () => {
     handleTaskCompleted(TASK_ID);
+    await drain();
 
-    await new Promise(resolve => setTimeout(resolve, 200));
-
-    const egorPath = join(usersDir, 'egor.md');
-    expect(existsSync(egorPath)).toBe(true);
-    const content = await readFile(egorPath, 'utf-8');
+    const userPath = join(usersDir, `${USER_EGOR}.md`);
+    expect(existsSync(userPath)).toBe(true);
+    const content = await readFile(userPath, 'utf-8');
+    expect(content).toContain(`slack_user_id: ${USER_EGOR}`);
+    expect(content).toContain('display_name: "Egor Khmelev"');
     expect(content).toContain('Prefers direct communication');
   });
 
-  it('writes summary.md in the session shared directory', async () => {
+  it('writes summary.md under workdir/memory/summaries/ (not session dir)', async () => {
     handleTaskCompleted(TASK_ID);
+    await drain();
 
-    await new Promise(resolve => setTimeout(resolve, 200));
-
-    const summaryPath = join(sessionsDir, TASK_ID, 'shared', 'summary.md');
-    expect(existsSync(summaryPath)).toBe(true);
-    const content = await readFile(summaryPath, 'utf-8');
+    const newSummaryPath = join(summariesDir, `${TASK_ID}.md`);
+    const oldSummaryPath = join(sessionsDir, TASK_ID, 'shared', 'summary.md');
+    expect(existsSync(newSummaryPath)).toBe(true);
+    expect(existsSync(oldSummaryPath)).toBe(false);
+    const content = await readFile(newSummaryPath, 'utf-8');
+    expect(content).toContain('task_id: ' + TASK_ID);
+    expect(content).toContain('domain: engineering');
     expect(content).toContain('Investigated and fixed the login bug.');
-    expect(content).toContain(TASK_ID);
+  });
+
+  it('summary contains Memory Updates section with per-file bullets', async () => {
+    handleTaskCompleted(TASK_ID);
+    await drain();
+    const content = await readFile(join(summariesDir, `${TASK_ID}.md`), 'utf-8');
+    expect(content).toContain('## Memory Updates');
+    expect(content).toContain('### org.md');
+    expect(content).toContain('**added** `## Engineering` › Uses NestJS with PostgreSQL');
+    expect(content).toContain(`### users/${USER_EGOR}.md`);
+    expect(content).toContain('**added** `## Work Style` › Prefers direct communication');
+  });
+
+  it('summary marks empty extraction as _no durable learnings_', async () => {
+    vi.mocked(runExtraction).mockResolvedValue({
+      org_updates: [],
+      user_updates: {},
+      task_summary: 'Nothing to learn.',
+      activity_summary: 'Routine task',
+      domain: 'engineering',
+    });
+    handleTaskCompleted(TASK_ID);
+    await drain();
+    const content = await readFile(join(summariesDir, `${TASK_ID}.md`), 'utf-8');
+    expect(content).toContain('## Memory Updates');
+    expect(content).toContain('_no durable learnings_');
+  });
+
+  it('summary contains Related Tasks section with placeholder when activity index is empty', async () => {
+    handleTaskCompleted(TASK_ID);
+    await drain();
+    const content = await readFile(join(summariesDir, `${TASK_ID}.md`), 'utf-8');
+    expect(content).toContain('## Related Tasks');
+    expect(content).toContain('_no related tasks found_');
+  });
+
+  it('summary includes Slack thread link in frontmatter', async () => {
+    handleTaskCompleted(TASK_ID);
+    await drain();
+    const content = await readFile(join(summariesDir, `${TASK_ID}.md`), 'utf-8');
+    expect(content).toContain('links:');
+    expect(content).toContain('channel_id: C1');
+    expect(content).toContain('thread_id: "1234"');
   });
 
   it('creates recent-activity.md with the activity summary', async () => {
     handleTaskCompleted(TASK_ID);
-
-    await new Promise(resolve => setTimeout(resolve, 200));
+    await drain();
 
     expect(existsSync(activityPath)).toBe(true);
     const content = await readFile(activityPath, 'utf-8');
     expect(content).toContain('Fixed login validation bug');
+    expect(content).toContain(USER_EGOR); // user column is the raw Slack ID
   });
 
-  it('calls postSlackMessage with the learnings message', async () => {
+  it('does NOT post any "Learned from this task" Slack message (post was removed)', async () => {
     handleTaskCompleted(TASK_ID);
+    await drain();
 
-    await new Promise(resolve => setTimeout(resolve, 200));
+    expect(vi.mocked(postSlackMessage)).not.toHaveBeenCalled();
+  });
 
-    const postSlackMessageMocked = vi.mocked(postSlackMessage);
-    expect(postSlackMessageMocked).toHaveBeenCalledOnce();
+  it('enqueues then dequeues the pending entry on a successful extraction', async () => {
+    handleTaskCompleted(TASK_ID);
+    await drain();
+    // After a clean run the queue should be empty
+    expect(await readPending()).toEqual([]);
+  });
 
-    const [args] = postSlackMessageMocked.mock.calls[0];
-    expect(args.channel).toBe('C1');
-    expect(args.threadTs).toBe('1234');
-    expect(args.text).toContain('Fixed login validation bug');
+  it('replays a pending task left over from a previous run', async () => {
+    // Simulate a crash: queue file has the task ID but extraction never ran.
+    await enqueuePending(TASK_ID);
+    expect(await readPending()).toEqual([TASK_ID]);
+
+    rescheduleTaskCompleted(TASK_ID);
+    await drain();
+
+    // Reschedule should have completed extraction and removed the entry
+    expect(existsSync(orgPath)).toBe(true);
+    expect(await readPending()).toEqual([]);
+  });
+
+  it('passes all involved-user IDs to the extractor and drops updates for unknown users', async () => {
+    // Knowledge log mentions both alice and bob; extractor returns an update for
+    // a third (charlie) which must be dropped.
+    const log = [
+      `[2026-04-10T10:00:00Z] [@<${USER_ALICE}:Alice Smith>] Look at this`,
+      `[2026-04-10T10:01:00Z] [@<${USER_BOB}:Bob Jones>] Joining`,
+    ].join('\n');
+    await writeFile(join(sessionsDir, TASK_ID, 'shared', 'knowledge.log'), log, 'utf-8');
+
+    vi.mocked(runExtraction).mockResolvedValue({
+      org_updates: [],
+      user_updates: {
+        [USER_ALICE]: [{ action: 'add', section: 'Work Style', content: 'Likes lists' }],
+        [USER_BOB]: [{ action: 'add', section: 'Work Style', content: 'Prefers concise' }],
+        // The extractor mock returns updates for the allowed set — the *parser*
+        // (not mocked here) is what drops unknown users at runtime. This test
+        // confirms the lifecycle passes the right allowedUserIds set.
+      },
+      task_summary: 'Talked to alice and bob.',
+      activity_summary: 'Discussion with alice and bob',
+      domain: 'engineering',
+    });
+
+    handleTaskCompleted(TASK_ID);
+    await drain();
+
+    expect(vi.mocked(runExtraction)).toHaveBeenCalledOnce();
+    const allowedSet = vi.mocked(runExtraction).mock.calls[0][1];
+    expect(allowedSet).toBeInstanceOf(Set);
+    expect(Array.from(allowedSet as Set<string>).sort()).toEqual([USER_ALICE, USER_BOB].sort());
+
+    expect(existsSync(join(usersDir, `${USER_ALICE}.md`))).toBe(true);
+    expect(existsSync(join(usersDir, `${USER_BOB}.md`))).toBe(true);
+  });
+});
+
+// ============================================================================
+// extractUsernames unit tests
+// ============================================================================
+
+describe('extractUsernames(transcript)', () => {
+  it('returns raw Slack IDs with display names', () => {
+    const log = `[@<${USER_EGOR}:Egor Khmelev>] hello\n[@<${USER_ALICE}:Alice Smith>] hi`;
+    const refs = extractUsernames(log);
+    expect(refs).toHaveLength(2);
+    expect(refs[0]).toEqual({ userId: USER_EGOR, displayName: 'Egor Khmelev' });
+    expect(refs[1]).toEqual({ userId: USER_ALICE, displayName: 'Alice Smith' });
+  });
+
+  it('matches the production log format with channel context after the mention', () => {
+    // Real-world log lines have additional context between the mention's `>`
+    // and the outer bracket's `]`, e.g.:
+    //   `[@<U03RQQTE1EF:Igor Sova> in slack:#<D0AUZLR6ZJQ:DM with Igor Sova>:179...]`
+    const log =
+      '[2026-05-28T17:18:38.189Z] [@<U03RQQTE1EF:Igor Sova> in slack:#<D0AUZLR6ZJQ:DM with Igor Sova>:1779988687.863119] Hey Archie';
+    const refs = extractUsernames(log);
+    expect(refs).toHaveLength(1);
+    expect(refs[0]).toEqual({ userId: 'U03RQQTE1EF', displayName: 'Igor Sova' });
+  });
+
+  it('does not treat channel references (#<…:…>) as user mentions', () => {
+    // The `#<D…:…>` channel reference uses the same UID:Name shape but lacks
+    // the `@` prefix, so it must not be picked up as a user mention.
+    const log = '[@<U07ABC123:Alex> in slack:#<D0AUZLR6ZJQ:DM with Igor>:1779988687] msg';
+    const refs = extractUsernames(log);
+    expect(refs).toHaveLength(1);
+    expect(refs[0].userId).toBe('U07ABC123');
+  });
+
+  it('deduplicates by user ID', () => {
+    const log = `[@<${USER_EGOR}:Egor Khmelev>] one\n[@<${USER_EGOR}:Egor K.>] two`;
+    const refs = extractUsernames(log);
+    expect(refs).toHaveLength(1);
+    expect(refs[0].userId).toBe(USER_EGOR);
+  });
+
+  it('ignores malformed mentions', () => {
+    const log = '[@<u1:Egor>] short ID\n[@<NOTAVALID:Bob>] non-Slack prefix';
+    const refs = extractUsernames(log);
+    expect(refs).toHaveLength(0);
   });
 });

@@ -9,17 +9,22 @@ import { readFile } from 'fs/promises';
 import { existsSync } from 'fs';
 import { readOrg, readUser } from './store.js';
 import { isMemoryEnabled, getRecentActivityPath } from './paths.js';
+import type { UserRef } from './types.js';
 
 /**
  * Build an XML-tagged memory context string from available memory artifacts.
  *
  * - org.md → <organizational_knowledge> block
- * - per-user files → <user_preferences user="..."> blocks
+ * - per-user files → <user_preferences user_id="..." display_name="..."> blocks
  * - recent-activity.md → <recent_activity> block
+ *
+ * `users` is the set of users involved in the current task; if empty, no
+ * per-user blocks are emitted. The legacy string-array shape is also accepted
+ * for callers that haven't been migrated yet.
  *
  * Blocks are joined with double newlines. Returns '' when nothing is available.
  */
-export async function buildMemoryContext(usernames: string[]): Promise<string> {
+export async function buildMemoryContext(users: UserRef[] | string[]): Promise<string> {
   const blocks: string[] = [];
 
   // Org knowledge
@@ -29,10 +34,22 @@ export async function buildMemoryContext(usernames: string[]): Promise<string> {
   }
 
   // Per-user preferences
-  for (const username of usernames) {
-    const userContent = await readUser(username);
+  const refs: UserRef[] = users.map((u) =>
+    typeof u === 'string' ? { userId: u, displayName: u } : u
+  );
+  for (const ref of refs) {
+    let userContent: string;
+    try {
+      userContent = await readUser(ref.userId);
+    } catch {
+      // Invalid ID shape — skip rather than crash the prompt build
+      continue;
+    }
     if (userContent.trim()) {
-      blocks.push(`<user_preferences user="${username}">\n${userContent.trimEnd()}\n</user_preferences>`);
+      const display = ref.displayName !== ref.userId ? ` display_name="${escapeAttr(ref.displayName)}"` : '';
+      blocks.push(
+        `<user_preferences user_id="${escapeAttr(ref.userId)}"${display}>\n${userContent.trimEnd()}\n</user_preferences>`
+      );
     }
   }
 
@@ -56,16 +73,20 @@ export async function buildMemoryContext(usernames: string[]): Promise<string> {
  */
 export async function enrichPromptWithMemory(
   systemPrompt: string,
-  usernames: string[],
+  users: UserRef[] | string[],
 ): Promise<string> {
   if (!isMemoryEnabled()) {
     return systemPrompt;
   }
 
-  const memoryContext = await buildMemoryContext(usernames);
+  const memoryContext = await buildMemoryContext(users);
   if (!memoryContext) {
     return systemPrompt;
   }
 
   return `${systemPrompt}\n\n## Organizational Memory\n\nThe following is what you know from previous tasks. Use this to inform your work.\n\n${memoryContext}`;
+}
+
+function escapeAttr(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
 }

@@ -122,10 +122,18 @@ function isValidUpdate(u: unknown): u is MemoryUpdate {
 
 /**
  * Parse and validate the Sonnet side-agent response.
- * Strips markdown code fences if present.
- * Returns null on any parse or validation failure.
+ *
+ * - Strips markdown code fences.
+ * - Returns null on any structural failure.
+ * - When `allowedUserIds` is provided, any `user_updates` keyed by a user
+ *   outside the allowed set is dropped (with a warning) rather than failing
+ *   the whole result. This constrains the extractor to only modify memory
+ *   for users whose existing memory was loaded into the prompt.
  */
-export function parseExtractionResponse(response: string): ExtractionResult | null {
+export function parseExtractionResponse(
+  response: string,
+  allowedUserIds?: Set<string>
+): ExtractionResult | null {
   // Strip markdown code fences (```json ... ``` or ``` ... ```)
   const stripped = response
     .trim()
@@ -157,17 +165,23 @@ export function parseExtractionResponse(response: string): ExtractionResult | nu
   // Validate user_updates is a plain object (not array, not null)
   if (typeof obj.user_updates !== 'object' || obj.user_updates === null || Array.isArray(obj.user_updates)) return null;
   const userUpdates = obj.user_updates as Record<string, unknown>;
+  const filteredUserUpdates: Record<string, MemoryUpdate[]> = {};
   for (const username of Object.keys(userUpdates)) {
     const updates = userUpdates[username];
     if (!Array.isArray(updates)) return null;
     for (const u of updates) {
       if (!isValidUpdate(u)) return null;
     }
+    if (allowedUserIds && !allowedUserIds.has(username)) {
+      logger.warn('memory', `parseExtractionResponse: dropping ${updates.length} update(s) for unknown user "${username}"`);
+      continue;
+    }
+    filteredUserUpdates[username] = updates as MemoryUpdate[];
   }
 
   return {
     org_updates: obj.org_updates as MemoryUpdate[],
-    user_updates: userUpdates as Record<string, MemoryUpdate[]>,
+    user_updates: filteredUserUpdates,
     task_summary: obj.task_summary,
     activity_summary: obj.activity_summary,
     domain: obj.domain,
@@ -183,8 +197,14 @@ export function parseExtractionResponse(response: string): ExtractionResult | nu
  * Builds prompt, calls Claude Agent SDK query() with sonnet + maxTurns 1,
  * collects text output, parses result.
  * Returns null on any error.
+ *
+ * @param input  - extraction context (memory + transcript + metadata)
+ * @param allowedUserIds - if provided, user_updates keyed outside this set are dropped
  */
-export async function runExtraction(input: ExtractionInput): Promise<ExtractionResult | null> {
+export async function runExtraction(
+  input: ExtractionInput,
+  allowedUserIds?: Set<string>
+): Promise<ExtractionResult | null> {
   let prompt: string;
   try {
     prompt = await buildExtractionPrompt(input);
@@ -199,13 +219,15 @@ export async function runExtraction(input: ExtractionInput): Promise<ExtractionR
       options: {
         model: 'sonnet' as any,
         maxTurns: 1,
-        allowedTools: [],
+        tools: [],
         executable: 'node',
-        pathToClaudeCodeExecutable: process.env.CLAUDE_PATH || 'claude',
         env: {
           NODE_ENV: process.env.NODE_ENV || 'development',
           ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
           PATH: process.env.PATH,
+        },
+        stderr: (data: string) => {
+          logger.debug('memory', `extraction stderr: ${data.trim()}`);
         },
       },
     });
@@ -223,10 +245,15 @@ export async function runExtraction(input: ExtractionInput): Promise<ExtractionR
           }
         }
       }
-      if (event.type === 'result' && event.subtype === 'success') {
-        const resultText = (event as any).result;
-        if (typeof resultText === 'string' && resultText.trim()) {
-          responseText = resultText;
+      if (event.type === 'result') {
+        if (event.subtype === 'success') {
+          const resultText = (event as any).result;
+          if (typeof resultText === 'string' && resultText.trim()) {
+            responseText = resultText;
+          }
+        } else {
+          const errs = ((event as any).errors as string[] | undefined)?.join('; ') ?? '';
+          logger.warn('memory', `Extraction agent for task ${input.taskId} ended with subtype=${event.subtype}${errs ? `: ${errs}` : ''}`);
         }
       }
     }
@@ -236,7 +263,7 @@ export async function runExtraction(input: ExtractionInput): Promise<ExtractionR
       return null;
     }
 
-    const result = parseExtractionResponse(responseText);
+    const result = parseExtractionResponse(responseText, allowedUserIds);
     if (!result) {
       logger.warn('memory', `Extraction agent for task ${input.taskId} returned unparseable response`);
     }

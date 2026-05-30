@@ -16,12 +16,20 @@ let usersDir: string;
 
 vi.mock('../paths.js', () => ({
   getOrgPath: () => orgPath,
-  getUserPath: (username: string) => {
-    const safe = username.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-');
+  getUserPath: (id: string) => {
+    const safe = id.includes(':') ? id.replace(':', '__') : id;
     return join(usersDir, `${safe}.md`);
   },
   getUsersDir: () => usersDir,
   getMemoryDir: () => tempDir,
+  getOrgCap: () => 200,
+  getUserCap: () => 100,
+  getSectionCap: () => 30,
+  isHousekeepingEnabled: () => false,
+}));
+
+vi.mock('../../system/logger.js', () => ({
+  logger: { warn: vi.fn(), system: vi.fn(), debug: vi.fn(), info: vi.fn(), error: vi.fn() },
 }));
 
 import {
@@ -94,12 +102,15 @@ describe('memory store', () => {
       expect(result).toBe(content);
     });
 
-    it('sanitizes username for path resolution', async () => {
+    // Note: identifier-guard rejection of invalid IDs (e.g. 'John Doe') is
+    // covered in paths.test.ts. This test file mocks paths.js to a permissive
+    // implementation so it can focus on store semantics.
+
+    it('reads a file keyed by raw Slack ID', async () => {
       await mkdir(usersDir, { recursive: true });
       const content = '## Notes\n- Developer\n';
-      // Username with special chars → sanitized to "john-doe"
-      await writeFile(join(usersDir, 'john-doe.md'), content, 'utf-8');
-      const result = await readUser('John Doe');
+      await writeFile(join(usersDir, 'U07ABC123.md'), content, 'utf-8');
+      const result = await readUser('U07ABC123');
       expect(result).toBe(content);
     });
   });
@@ -167,6 +178,24 @@ describe('memory store', () => {
       expect(saved).toContain('- Uses Node.js v20');
       expect(saved).not.toContain('- Uses Node.js\n');
       expect(saved).toContain('- Uses TypeScript');
+    });
+
+    it('skips update when `old` text is not found (no silent append)', async () => {
+      await writeFile(orgPath, '## Engineering\n- Uses TypeScript\n', 'utf-8');
+      const before = await readFile(orgPath, 'utf-8');
+      await applyOrgUpdates([{ action: 'update', content: 'Uses TypeScript v5', old: 'Uses JavaScript' }]);
+      const after = await readFile(orgPath, 'utf-8');
+      expect(after).toBe(before);
+    });
+
+    it('skips update when `old` is missing entirely', async () => {
+      await writeFile(orgPath, '## Engineering\n- Uses TypeScript\n', 'utf-8');
+      const before = await readFile(orgPath, 'utf-8');
+      // sanitizeUpdate would normally reject this; testing applyUpdate directly via applyOrgUpdates
+      // The sanitizer catches it first — verifying the file is unchanged either way.
+      await applyOrgUpdates([{ action: 'update', content: 'orphan content' } as any]);
+      const after = await readFile(orgPath, 'utf-8');
+      expect(after).toBe(before);
     });
 
     it('applies multiple updates sequentially', async () => {

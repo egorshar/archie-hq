@@ -19,8 +19,8 @@ let memoryEnabled = true;
 vi.mock('../paths.js', () => ({
   isMemoryEnabled: () => memoryEnabled,
   getOrgPath: () => orgPath,
-  getUserPath: (username: string) => {
-    const safe = username.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-');
+  getUserPath: (id: string) => {
+    const safe = id.includes(':') ? id.replace(':', '__') : id;
     return join(usersDir, `${safe}.md`);
   },
   getUsersDir: () => usersDir,
@@ -59,17 +59,37 @@ describe('memory context builder', () => {
       expect(result).toContain('- Uses TypeScript');
     });
 
-    it('includes <user_preferences user="egor"> block when user file exists', async () => {
+    it('includes <user_preferences user_id="..."> block when user file exists', async () => {
       await mkdir(usersDir, { recursive: true });
       const userContent = '## Communication\n- Prefers async\n';
-      await writeFile(join(usersDir, 'egor.md'), userContent, 'utf-8');
+      await writeFile(join(usersDir, 'U07EGOR001.md'), userContent, 'utf-8');
 
-      const result = await buildMemoryContext(['egor']);
+      const result = await buildMemoryContext([{ userId: 'U07EGOR001', displayName: 'Egor K' }]);
 
-      expect(result).toContain('<user_preferences user="egor">');
+      expect(result).toContain('<user_preferences user_id="U07EGOR001"');
+      expect(result).toContain('display_name="Egor K"');
       expect(result).toContain('</user_preferences>');
       expect(result).toContain('## Communication');
       expect(result).toContain('- Prefers async');
+    });
+
+    it('omits display_name attribute when it equals the user_id', async () => {
+      await mkdir(usersDir, { recursive: true });
+      await writeFile(join(usersDir, 'U07EGOR001.md'), '- fact\n', 'utf-8');
+
+      const result = await buildMemoryContext([{ userId: 'U07EGOR001', displayName: 'U07EGOR001' }]);
+
+      expect(result).toContain('<user_preferences user_id="U07EGOR001">');
+      expect(result).not.toContain('display_name=');
+    });
+
+    it('accepts legacy string array for backward compatibility', async () => {
+      await mkdir(usersDir, { recursive: true });
+      await writeFile(join(usersDir, 'U07EGOR001.md'), '- fact\n', 'utf-8');
+
+      const result = await buildMemoryContext(['U07EGOR001']);
+
+      expect(result).toContain('<user_preferences user_id="U07EGOR001">');
     });
 
     it('includes <recent_activity> block when recent-activity.md has content', async () => {
@@ -84,8 +104,8 @@ describe('memory context builder', () => {
     });
 
     it('skips users with no memory file (no user_preferences tag)', async () => {
-      // Do not create any user file for 'unknown-user'
-      const result = await buildMemoryContext(['unknown-user']);
+      // Do not create any user file for U07UNKNOWN
+      const result = await buildMemoryContext([{ userId: 'U07UNKNOWN', displayName: 'Unknown' }]);
 
       expect(result).not.toContain('<user_preferences');
     });
@@ -102,14 +122,12 @@ describe('memory context builder', () => {
 
       await mkdir(usersDir, { recursive: true });
       const userContent = '## Communication\n- Prefers async\n';
-      await writeFile(join(usersDir, 'egor.md'), userContent, 'utf-8');
+      await writeFile(join(usersDir, 'U07EGOR001.md'), userContent, 'utf-8');
 
-      const result = await buildMemoryContext(['egor']);
+      const result = await buildMemoryContext([{ userId: 'U07EGOR001', displayName: 'Egor' }]);
 
-      // Both blocks present
       expect(result).toContain('<organizational_knowledge>');
-      expect(result).toContain('<user_preferences user="egor">');
-      // Separated by double newline
+      expect(result).toContain('<user_preferences user_id="U07EGOR001"');
       expect(result).toContain('</organizational_knowledge>\n\n<user_preferences');
     });
   });
