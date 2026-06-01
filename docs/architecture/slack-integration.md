@@ -19,7 +19,9 @@ settings:
       - app_mention
       - assistant_thread_started
       - message.channels
+      - message.groups
       - message.im
+      - message.mpim
   interactivity:
     is_enabled: true
     request_url: https://<host>/webhooks/slack
@@ -40,7 +42,7 @@ To enable Socket Mode end-to-end, also flip `socket_mode_enabled: true` in `slac
 
 ### Bot Scopes
 
-The manifest declares these bot scopes: `app_mentions:read`, `chat:write`, `channels:history`, `channels:read`, `groups:read`, `im:history`, `im:read`, `im:write`, `users:read`, `usergroups:read`, `files:read`, `files:write`, `reactions:read`, `reactions:write`, `assistant:write`. The `im:*` scopes enable DM-originated tasks; `reactions:write` powers the eyes-emoji acknowledgment pattern and the PM's `react_to_message` tool; `reactions:read` backs `get_message_reactions`; `assistant:write` is required to push generated titles to DM-rooted assistant threads via `assistant.threads.setTitle`.
+The manifest declares these bot scopes: `app_mentions:read`, `chat:write`, `channels:history`, `channels:read`, `groups:history`, `groups:read`, `im:history`, `im:read`, `im:write`, `users:read`, `usergroups:read`, `files:read`, `files:write`, `reactions:read`, `reactions:write`, `assistant:write`. The `channels:*` and `groups:*` scopes cover public and private channels respectively (`groups:history` is required to read messages and thread context in private channels); the `im:*` scopes enable DM-originated tasks; `reactions:write` powers the eyes-emoji acknowledgment pattern and the PM's `react_to_message` tool; `reactions:read` backs `get_message_reactions`; `assistant:write` is required to push generated titles to DM-rooted assistant threads via `assistant.threads.setTitle`.
 
 ## Bot Identity Detection
 
@@ -53,9 +55,9 @@ On startup, `initSlackClient()` in `src/connectors/slack/client.ts` calls `auth.
 
 The server registers two Bolt event handlers:
 
-1. **`app_mention`** -- Fires when a user mentions `@Archie` in any channel. This is the primary way users start new tasks in channels.
+1. **`app_mention`** -- Fires when a user mentions `@Archie` in any channel Archie is a member of (public or private). This is the primary way users start new tasks in channels.
 
-2. **`message`** -- Fires for thread replies and DM messages. The handler accepts an event when it is either a thread reply (`event.thread_ts && event.thread_ts !== event.ts`) or a DM (channel ID starting with `D`), and the subtype is empty / `file_share` / `thread_broadcast`. In channels, messages containing a bot mention are skipped here because `app_mention` already handles them; in DMs, mention-containing messages are processed here because `app_mention` does not fire for DMs.
+2. **`message`** -- Fires for thread replies and DM messages. Slack delivers these via four subscribed event types — `message.channels` (public channels), `message.groups` (private channels), `message.im` (DMs), and `message.mpim` (group DMs) — all of which Bolt surfaces as a single `message` event. The handler accepts an event when it is either a thread reply (`event.thread_ts && event.thread_ts !== event.ts`) or a DM (channel ID starting with `D`), and the subtype is empty / `file_share` / `thread_broadcast`. In channels, messages containing a bot mention are skipped here because `app_mention` already handles them; in DMs, mention-containing messages are processed here because `app_mention` does not fire for DMs. Note that Archie only receives private-channel events for channels it has been invited to.
 
 Both handlers run the same pipeline:
 
