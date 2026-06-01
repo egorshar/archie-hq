@@ -28,6 +28,7 @@ oauth_config:
       - chat:write
       - channels:history
       - channels:read
+      - groups:history
       - groups:read
       - im:history
       - im:read
@@ -49,7 +50,9 @@ settings:
       - app_mention
       - assistant_thread_started
       - message.channels
+      - message.groups
       - message.im
+      - message.mpim
   org_deploy_enabled: false
   socket_mode_enabled: false
   token_rotation_enabled: false
