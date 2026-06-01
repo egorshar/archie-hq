@@ -120,7 +120,7 @@ export function mountApiRoutes(app: Application): void {
 
   router.get('/tasks/:id', async (req: Request, res: Response) => {
     try {
-      const taskId = req.params.id;
+      const taskId = req.params.id as string;
       const metadata = await loadMetadata(taskId);
       if (!metadata) {
         res.status(404).json({ error: 'Task not found' });
@@ -159,7 +159,7 @@ export function mountApiRoutes(app: Application): void {
   router.get('/tasks/:id/events', async (req: Request, res: Response) => {
     try {
       const after = req.query.after ? parseInt(req.query.after as string, 10) : undefined;
-      const result = await readEvents(req.params.id, after);
+      const result = await readEvents(req.params.id as string, after);
       res.json(result);
     } catch (error) {
       logger.error('api', 'Failed to read events', error);
@@ -193,7 +193,7 @@ export function mountApiRoutes(app: Application): void {
 
   router.post('/tasks/:id/message', async (req: Request, res: Response) => {
     try {
-      const taskId = req.params.id;
+      const taskId = req.params.id as string;
       const { message } = req.body;
       if (!message || typeof message !== 'string') {
         res.status(400).json({ error: 'message is required' });
@@ -217,7 +217,7 @@ export function mountApiRoutes(app: Application): void {
 
   router.post('/tasks/:id/approve', async (req: Request, res: Response) => {
     try {
-      const taskId = req.params.id;
+      const taskId = req.params.id as string;
       const { type, approve } = req.body as { type: string; approve: boolean };
 
       if (!type || typeof approve !== 'boolean') {
