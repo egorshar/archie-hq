@@ -4,6 +4,7 @@
   "description": "Archie - Autonomous Responsive and Collaborative Hyper Intelligent Employee",
   "type": "module",
   "main": "dist/index.js",
+  "packageManager": "npm@11.16.0",
   "scripts": {
     "build": "tsc",
     "dev": "tsx watch src/index.ts",
@@ -22,11 +23,14 @@
     "test:watch": "vitest"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=20.0.0",
+    "npm": ">=11.0.0"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.2.112",
+    "@anthropic-ai/claude-agent-sdk": "^0.3.156",
+    "@anthropic-ai/sdk": "^0.100.1",
     "@aws-sdk/client-bedrock-runtime": "^3.1020.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@octokit/app": "^16.1.2",
     "@octokit/webhooks": "^14.2.0",
     "@slack/bolt": "^4.6.0",
@@ -45,7 +49,6 @@
     "zod-to-json-schema": "^3.25.0"
   },
   "devDependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.1",
     "@types/node": "^20.10.0",
     "@types/react": "^18.3.28",
     "tsx": "^4.7.0",
