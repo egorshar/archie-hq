@@ -58,6 +58,8 @@ The server registers two Bolt event handlers:
 
 2. **`message`** -- Fires for thread replies and DM messages. Slack delivers these via three subscribed event types — `message.channels` (public channels), `message.groups` (private channels), and `message.im` (DMs) — all of which Bolt surfaces as a single `message` event. The handler accepts an event when it is either a thread reply (`event.thread_ts && event.thread_ts !== event.ts`) or a DM (channel ID starting with `D`), and the subtype is empty / `file_share` / `thread_broadcast`. In channels, messages containing a bot mention are skipped here because `app_mention` already handles them; in DMs, mention-containing messages are processed here because `app_mention` does not fire for DMs. Note that Archie only receives private-channel events for channels it has been invited to.
 
+   The `message` handler also branches on the **`message_changed`** subtype (a user editing a message) and routes it to `handleSlackEdit` — see [Message Edits](#message-edits) below.
+
 Both handlers run the same pipeline:
 
 ```
@@ -67,6 +69,28 @@ Slack webhook
 ```
 
 Events are processed inline with no queue — the Bolt receiver acknowledges the webhook immediately and processing continues asynchronously. The shutdown flag short-circuits handlers during graceful shutdown. See `src/connectors/slack/events.ts`.
+
+## Message Edits
+
+When a user edits a message, Slack delivers a `message` event with subtype `message_changed`, carrying both the new (`message`) and prior (`previous_message`) versions. The `message` handler routes these to `handleSlackEdit`, which treats a substantive edit like any other new input: it records the change and wakes the owning task. This matters because an edit can alter the *meaning* of an instruction (e.g. "deploy to staging" → "deploy to prod") that Archie would otherwise act on from stale text.
+
+`handleSlackEdit` only acts when **all** of these hold, otherwise it returns silently:
+
+- **The text actually changed.** Slack fires `message_changed` for link unfurls and attachment re-renders too, where `message.text === previous_message.text`. These are dropped up front — they're the dominant source of edit-event noise.
+- **The edit is not bot-authored.** Edits carrying a `bot_id`, a `bot_message` subtype, or authored by Archie's own user are skipped.
+- **A task already follows the thread.** Resolved via `findTaskByThread(message.thread_ts || message.ts)`; edits in threads the bot was never part of are ignored, mirroring plain-reply handling.
+- **The editor is internal.** The same external/guest bail-out (`isExternalUser`) used by `handleSlackEvent` applies, and a muted channel is not woken.
+
+When they hold, mentions in the new text are resolved to the `@<ID:Name>` form (`cleanSlackText`) and `task.appendSlackEdit` writes a **fresh** knowledge-log entry — the log is append-only, so edits are never mutations of the original line. The entry reuses the original message's `msg:<ts>` id and its body, built by the pure `renderEditForContext`, is just the new text tagged as an edit:
+
+```
+@<U123:Egor> in slack:#<C456:deploys>:1700000000.000100 | msg:1700000000.000100
+  [edited] deploy to prod
+```
+
+The pre-edit text is deliberately **not** duplicated — the original message already sits in the log under the same `msg:<ts>` id, so the agent correlates the edit to it by id rather than us re-logging now-stale text.
+
+Crucially, `appendSlackEdit` does **not** advance `last_processed_ts`: an edit reuses the original message's `ts`, so touching the watermark would cause genuinely new replies to be skipped. After logging, the task is woken with the standard `AGENT_PROMPTS.existingTask` ("new input received") prompt — the agent reads the edit from the log and decides whether the change is material, taking no action when it is merely cosmetic.
 
 ## Triage Agent (Disabled)
 

@@ -34,7 +34,7 @@ vi.mock('./task.js', () => ({
   activeTasks: new Map(),
 }));
 
-import { renderMessageForContext } from '../persistence.js';
+import { renderMessageForContext, renderEditForContext } from '../persistence.js';
 
 describe('renderMessageForContext', () => {
   it('renders plain message text with no attachments', () => {
@@ -165,5 +165,17 @@ describe('renderMessageForContext', () => {
       { redacted: false },
     );
     expect(out).toBe('top\n[forwarded from @<UG:G> — external]\nguest content');
+  });
+});
+
+describe('renderEditForContext', () => {
+  it('tags the new text as an edit and omits the previous text', () => {
+    const out = renderEditForContext('deploy to prod');
+    expect(out).toBe('[edited] deploy to prod');
+  });
+
+  it('preserves multi-line new text verbatim', () => {
+    const out = renderEditForContext('line one\nline two');
+    expect(out).toBe('[edited] line one\nline two');
   });
 });
