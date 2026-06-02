@@ -301,6 +301,50 @@ export async function appendSlackMessage(
 }
 
 /**
+ * Render the body of a message-edit log entry: the new text, with the prior
+ * text recorded underneath so an agent can see exactly what changed. Pure —
+ * no I/O — so it can be unit tested directly (see persistence.test.ts).
+ */
+export function renderEditForContext(oldText: string, newText: string): string {
+  return `[edited] ${newText}\n  [previous text: ${JSON.stringify(oldText)}]`;
+}
+
+/**
+ * Append a message-edit notice to the knowledge log.
+ *
+ * Records that a Slack message previously ingested into this task (identified by
+ * `editedTs`) was edited, capturing both the new and previous text so an agent
+ * can judge whether the change is material. Written as a fresh entry rather than
+ * mutating the original line — the log stays append-only and the edit auditable.
+ * The `msg:<ts>` suffix matches the id stamped by `appendSlackMessage`, so the
+ * edit correlates to the original message.
+ */
+export async function appendSlackEdit(
+  taskId: string,
+  channelInfo: { id: string; name: string },
+  threadId: string,
+  userInfo: SlackAuthor,
+  editedTs: string,
+  oldText: string,
+  newText: string,
+): Promise<void> {
+  const body = renderEditForContext(oldText, newText);
+  const entry: LogEntry = {
+    timestamp: new Date().toISOString(),
+    source: `@<${userInfo.id}:${userInfo.realName}> in ${formatSlackChannelRef(channelInfo.id, channelInfo.name, threadId)} | msg:${editedTs}`,
+    message: body,
+  };
+
+  await appendFile(getKnowledgeLogPath(taskId), formatLogEntry(entry));
+  emitEvent('message', taskId, {
+    from: userInfo.realName,
+    to: 'pm-agent',
+    destination: formatSlackChannelDisplay(channelInfo.name),
+    message: body,
+  });
+}
+
+/**
  * Append an agent finding to the knowledge log
  */
 export async function appendAgentFinding(

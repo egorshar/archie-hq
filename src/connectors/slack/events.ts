@@ -25,6 +25,7 @@ import {
   isChannelShared,
   postEphemeral,
   getSlackClient,
+  cleanSlackText,
 } from './client.js';
 import { Task } from '../../tasks/task.js';
 import { AGENT_PROMPTS } from '../../agents/prompts.js';
@@ -33,7 +34,7 @@ import { getIsShuttingDown } from '../../system/shutdown.js';
 import { findTaskByThread } from '../../tasks/persistence.js';
 import { generateTaskTitle } from '../../tasks/title-generator.js';
 import { setAssistantThreadTitle } from './title.js';
-import type { SlackThread } from '../../types/task.js';
+import type { SlackThread, SlackAuthor } from '../../types/task.js';
 // import { triageSlackMessage } from '../../system/triage.js';
 
 /**
@@ -143,6 +144,22 @@ export async function mountSlackApp(
   // Handle thread messages (replies without @mention) and DM messages
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   app!.event('message', async ({ event }: { event: any }) => {
+    // Message edits arrive as a `message_changed` subtype carrying both the new
+    // (`message`) and prior (`previous_message`) versions. Handle these on a
+    // dedicated path: we log the edit and wake the owning task so the agent can
+    // reassess if the change is material. (Slack also fires `message_changed`
+    // for link unfurls and attachment re-renders with unchanged text — those are
+    // filtered out inside `handleSlackEdit`.)
+    if (event.subtype === 'message_changed') {
+      if (getIsShuttingDown()) {
+        logger.system('Ignoring Slack edit during shutdown');
+        return;
+      }
+      handleSlackEdit(event).catch((err: unknown) =>
+        logger.error('Server', 'Error processing Slack message edit', err));
+      return;
+    }
+
     const isDm = event.channel?.startsWith('D');
     const isThreadReply = event.thread_ts && event.thread_ts !== event.ts;
     if (
@@ -480,6 +497,89 @@ async function handleSlackEvent(event: {
     await task.sendMessage(AGENT_PROMPTS.newTask);
   }
   // Otherwise: thread reply in a thread the bot was never part of — ignore
+}
+
+/**
+ * Handle a `message_changed` event — a user edited a previously sent message.
+ *
+ * We only act when all of these hold:
+ *  - the text actually changed (Slack also fires this subtype for link unfurls
+ *    and attachment re-renders, where new and previous text are identical),
+ *  - the edit isn't bot-authored (our own posts or other integrations),
+ *  - a task already follows this thread (mirrors plain-reply handling — we never
+ *    engage a thread the bot wasn't invited to), and
+ *  - the editor is an internal (non-external/guest) user.
+ *
+ * When they hold we append an edit notice to the task's knowledge log and wake
+ * the task with the standard "new input" prompt. The agent decides whether the
+ * change is material; a cosmetic edit can simply be a no-op on its end.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function handleSlackEdit(event: any): Promise<void> {
+  const msg = event.message;
+  const prev = event.previous_message;
+  if (!msg || !msg.ts) return;
+
+  // Skip bot-authored edits (our own messages or other integrations).
+  if (msg.bot_id || msg.subtype === 'bot_message' || msg.user === getBotUserId()) return;
+
+  const oldRaw: string = prev?.text ?? '';
+  const newRaw: string = msg.text ?? '';
+  // Unchanged text = an unfurl/attachment re-render, not a human edit. Drop it.
+  if (newRaw === oldRaw) return;
+
+  const channelId: string = event.channel;
+  const editedTs: string = msg.ts;
+  const threadId: string = msg.thread_ts || msg.ts;
+
+  // Only act on threads a task already follows — same rule as plain replies.
+  const taskId = await findTaskByThread(threadId);
+  if (!taskId) return;
+
+  // External-author bail-out + author resolution in one (cached) lookup.
+  let authorInfo: Awaited<ReturnType<typeof getUserInfo>> | undefined;
+  try {
+    authorInfo = await getUserInfo(msg.user);
+    if (isExternalUser(authorInfo)) {
+      logger.system(`Skipping edit from external/guest user ${msg.user}`);
+      return;
+    }
+  } catch (error) {
+    // Fail open — if we can't classify, don't silently drop the edit.
+    logger.warn('Slack', `Failed to classify edit author ${msg.user}`, error);
+  }
+
+  const task = await Task.get(taskId);
+  const channelKey = `slack:${channelId}:${threadId}`;
+  const channel = task.metadata.channels[channelKey];
+
+  // Respect mute — a muted channel isn't woken by edits either.
+  if (channel?.type === 'slack' && channel.muted) {
+    logger.system(`Skipping edit in muted channel ${threadId}`);
+    return;
+  }
+
+  // Resolve <@U…>/<#C…> mentions in both versions to the @<ID:Name> form used
+  // throughout the knowledge log.
+  const [newText, oldText] = await Promise.all([
+    cleanSlackText(newRaw, channelId),
+    cleanSlackText(oldRaw, channelId),
+  ]);
+  const author: SlackAuthor = {
+    id: msg.user,
+    username: authorInfo?.name ?? msg.user,
+    realName: authorInfo?.realName ?? msg.user,
+    teamId: authorInfo?.teamId,
+    isRestricted: authorInfo?.isRestricted,
+    isUltraRestricted: authorInfo?.isUltraRestricted,
+  };
+
+  const recorded = await task.appendSlackEdit(channelKey, author, editedTs, oldText, newText);
+  if (!recorded) return;
+
+  const channelLabel = channel?.type === 'slack' ? channel.channel_name : channelId;
+  logger.system(`Processing edit in #${channelLabel} (msg: ${editedTs})`);
+  await task.sendMessage(AGENT_PROMPTS.existingTask);
 }
 
 const SHARED_CHANNEL_WARNING_TEXT =

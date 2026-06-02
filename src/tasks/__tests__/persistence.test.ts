@@ -34,7 +34,7 @@ vi.mock('./task.js', () => ({
   activeTasks: new Map(),
 }));
 
-import { renderMessageForContext } from '../persistence.js';
+import { renderMessageForContext, renderEditForContext } from '../persistence.js';
 
 describe('renderMessageForContext', () => {
   it('renders plain message text with no attachments', () => {
@@ -165,5 +165,22 @@ describe('renderMessageForContext', () => {
       { redacted: false },
     );
     expect(out).toBe('top\n[forwarded from @<UG:G> — external]\nguest content');
+  });
+});
+
+describe('renderEditForContext', () => {
+  it('shows the new text and records the previous text underneath', () => {
+    const out = renderEditForContext('deploy to staging', 'deploy to prod');
+    expect(out).toBe('[edited] deploy to prod\n  [previous text: "deploy to staging"]');
+  });
+
+  it('quotes the previous text so an empty prior message is unambiguous', () => {
+    const out = renderEditForContext('', 'added later');
+    expect(out).toBe('[edited] added later\n  [previous text: ""]');
+  });
+
+  it('escapes quotes/newlines in the previous text via JSON encoding', () => {
+    const out = renderEditForContext('a\n"b"', 'c');
+    expect(out).toBe('[edited] c\n  [previous text: "a\\n\\"b\\""]');
   });
 });

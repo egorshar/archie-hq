@@ -6,7 +6,7 @@
  */
 
 import { mkdir, writeFile } from 'fs/promises';
-import type { AgentName, SlackChannel, SlackThread, SlackReaction, TaskMetadata } from '../types/task.js';
+import type { AgentName, SlackAuthor, SlackChannel, SlackThread, SlackReaction, TaskMetadata } from '../types/task.js';
 import { CLI_CHANNEL_KEY } from '../types/task.js';
 import type { AgentDef } from '../types/agent.js';
 
@@ -42,6 +42,7 @@ import {
   appendAgentMessage,
   appendMessageToUser,
   appendSlackMessage,
+  appendSlackEdit,
   renderAttachmentsSuffix,
   downloadMessageFiles,
   ensureSessionsDir,
@@ -268,6 +269,36 @@ export class Task {
     existing.last_processed_ts = thread.currentMessageTs;
     this.debouncedSave();
     return { linkedNewThread: false };
+  }
+
+  /**
+   * Record that a Slack message previously ingested into this task was edited.
+   *
+   * Writes a fresh knowledge-log entry (we never mutate prior entries) keyed to
+   * the original message via `msg:<ts>`, capturing the new and previous text.
+   * Deliberately does NOT advance `last_processed_ts` — an edit reuses the
+   * original message's `ts`, so touching the watermark would skip genuinely new
+   * replies. Returns false when the thread isn't a linked Slack channel.
+   */
+  async appendSlackEdit(
+    channelKey: string,
+    author: SlackAuthor,
+    editedTs: string,
+    oldText: string,
+    newText: string,
+  ): Promise<boolean> {
+    const ch = this.metadata.channels[channelKey];
+    if (ch?.type !== 'slack') return false;
+    await appendSlackEdit(
+      this.taskId,
+      { id: ch.channel_id, name: ch.channel_name },
+      ch.thread_id,
+      author,
+      editedTs,
+      oldText,
+      newText,
+    );
+    return true;
   }
 
   /**
