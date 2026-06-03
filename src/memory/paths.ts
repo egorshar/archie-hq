@@ -20,6 +20,19 @@ export function isHousekeepingEnabled(): boolean {
   return process.env.ARCHIE_MEMORY_HOUSEKEEPING !== 'false';
 }
 
+/**
+ * Injection flag: gates ONLY the read path (stored memory → agent prompt),
+ * independent of extraction. Defaults OFF — set ARCHIE_MEMORY_INJECT=true to
+ * inject memory into prompts. This deliberately inverts the default-enabled
+ * convention of the other flags so the safe, collect-only posture (facts keep
+ * accumulating for evaluation, but never reach prompts) needs no configuration.
+ * The master flag still wins: when ARCHIE_MEMORY=false, injection is off
+ * regardless of this value. Extraction/storage/housekeeping ignore it.
+ */
+export function isInjectionEnabled(): boolean {
+  return process.env.ARCHIE_MEMORY_INJECT === 'true';
+}
+
 // ---- Configurable caps ----
 
 function envInt(name: string, fallback: number): number {

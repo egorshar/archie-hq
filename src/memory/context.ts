@@ -10,7 +10,7 @@ import { existsSync } from 'fs';
 import { readUser } from './store.js';
 import { listEntities, serializeEntity } from './entities.js';
 import { readIndexMarkdown, renderIndex, selectEntities } from './entity-index.js';
-import { isMemoryEnabled, getRecentActivityPath } from './paths.js';
+import { isMemoryEnabled, isInjectionEnabled, getRecentActivityPath } from './paths.js';
 import { logger } from '../system/logger.js';
 import type { UserRef, EntityRecord } from './types.js';
 
@@ -96,7 +96,13 @@ function renderEntityBlock(rec: EntityRecord): string {
 /**
  * Enrich a system prompt with organizational memory context.
  *
- * If memory is disabled or there is no memory content, returns the prompt unchanged.
+ * Returns the prompt unchanged when:
+ * - memory is disabled (`ARCHIE_MEMORY=false`), or
+ * - injection is disabled (`ARCHIE_MEMORY_INJECT` ≠ `true`, the default) — the
+ *   read path is gated independently of extraction so facts keep accumulating
+ *   for evaluation without steering agents; no store reads are performed, or
+ * - there is no memory content.
+ *
  * Otherwise appends the context under an "Organizational Memory" header.
  */
 export async function enrichPromptWithMemory(
@@ -105,6 +111,13 @@ export async function enrichPromptWithMemory(
   selectors: MemorySelectors = {},
 ): Promise<string> {
   if (!isMemoryEnabled()) {
+    return systemPrompt;
+  }
+
+  // Injection is gated separately from extraction and defaults off. Bail before
+  // any store read or entity selection so disabled injection costs nothing.
+  if (!isInjectionEnabled()) {
+    logger.debug('memory', 'injection disabled (ARCHIE_MEMORY_INJECT≠true) — prompt unchanged; extraction unaffected');
     return systemPrompt;
   }
 

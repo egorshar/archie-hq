@@ -4,7 +4,7 @@
  * Validates user-identifier acceptance rules and filename construction.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import {
   isSlackUserId,
   isFallbackUserId,
@@ -16,6 +16,7 @@ import {
   getEntityPath,
   getEntityCap,
   getEntityInjectMax,
+  isInjectionEnabled,
 } from '../paths.js';
 
 describe('isSlackUserId', () => {
@@ -146,5 +147,30 @@ describe('entity caps', () => {
   it('default entity cap and inject max are positive integers', () => {
     expect(getEntityCap()).toBeGreaterThan(0);
     expect(getEntityInjectMax()).toBeGreaterThan(0);
+  });
+});
+
+describe('isInjectionEnabled', () => {
+  const KEY = 'ARCHIE_MEMORY_INJECT';
+  const original = process.env[KEY];
+
+  afterEach(() => {
+    if (original === undefined) delete process.env[KEY];
+    else process.env[KEY] = original;
+  });
+
+  it('defaults to off when unset (inverts the default-enabled convention)', () => {
+    delete process.env[KEY];
+    expect(isInjectionEnabled()).toBe(false);
+  });
+
+  it('is on only for the exact string "true"', () => {
+    process.env[KEY] = 'true';
+    expect(isInjectionEnabled()).toBe(true);
+  });
+
+  it.each(['false', '1', 'TRUE', 'True', 'yes', ''])('stays off for %j', (v) => {
+    process.env[KEY] = v;
+    expect(isInjectionEnabled()).toBe(false);
   });
 });

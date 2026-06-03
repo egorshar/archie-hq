@@ -90,4 +90,4 @@ async function warnLegacyUserFiles(): Promise<void> {
 }
 
 export { enrichPromptWithMemory } from './context.js';
-export { isMemoryEnabled } from './paths.js';
+export { isMemoryEnabled, isInjectionEnabled } from './paths.js';

@@ -14,11 +14,13 @@ let tempDir: string;
 let usersDir: string;
 let activityPath: string;
 let memoryEnabled = true;
+let injectionEnabled = false;
 
 let entitiesDir: string;
 
 vi.mock('../paths.js', () => ({
   isMemoryEnabled: () => memoryEnabled,
+  isInjectionEnabled: () => injectionEnabled,
   getUserPath: (id: string) => {
     const safe = id.includes(':') ? id.replace(':', '__') : id;
     return join(usersDir, `${safe}.md`);
@@ -36,6 +38,7 @@ vi.mock('../paths.js', () => ({
 
 // store.ts reads from paths.js which we've mocked above
 import { buildMemoryContext, enrichPromptWithMemory } from '../context.js';
+import { logger } from '../../system/logger.js';
 
 describe('memory context builder', () => {
   beforeEach(async () => {
@@ -44,6 +47,7 @@ describe('memory context builder', () => {
     activityPath = join(tempDir, 'recent-activity.md');
     entitiesDir = join(tempDir, 'entities');
     memoryEnabled = true;
+    injectionEnabled = false; // production default; positive tests opt in explicitly
   });
 
   // Helper: write an entity file into the temp entities dir.
@@ -149,7 +153,8 @@ describe('memory context builder', () => {
   // ---- enrichPromptWithMemory ----
 
   describe('enrichPromptWithMemory(systemPrompt, usernames)', () => {
-    it('appends memory context to prompt when memory exists', async () => {
+    it('appends memory context to prompt when injection is enabled and memory exists', async () => {
+      injectionEnabled = true;
       await mkdir(usersDir, { recursive: true });
       await writeFile(join(usersDir, 'U07EGOR001.md'), '## Communication\n- Prefers async\n', 'utf-8');
 
@@ -171,8 +176,36 @@ describe('memory context builder', () => {
       expect(result).toBe('base prompt');
     });
 
-    it('returns systemPrompt unchanged when all memory is empty', async () => {
+    it('returns systemPrompt unchanged when injection is on but all memory is empty', async () => {
+      injectionEnabled = true;
       const result = await enrichPromptWithMemory('base prompt', []);
+
+      expect(result).toBe('base prompt');
+    });
+
+    it('returns systemPrompt unchanged when injection is disabled, even with memory present', async () => {
+      injectionEnabled = false; // production default
+      const debugSpy = vi.spyOn(logger, 'debug').mockImplementation(() => {});
+      await mkdir(usersDir, { recursive: true });
+      await writeFile(join(usersDir, 'U07EGOR001.md'), '## Communication\n- Prefers async\n', 'utf-8');
+
+      const result = await enrichPromptWithMemory('base prompt', [{ userId: 'U07EGOR001', displayName: 'Egor' }]);
+
+      expect(result).toBe('base prompt');
+      expect(result).not.toContain('## Organizational Memory');
+      // Gate fires before any store read and logs exactly one debug line.
+      expect(debugSpy).toHaveBeenCalledTimes(1);
+      expect(debugSpy.mock.calls[0]?.[1]).toMatch(/injection disabled/i);
+      debugSpy.mockRestore();
+    });
+
+    it('master flag wins: ARCHIE_MEMORY=false suppresses injection even when ARCHIE_MEMORY_INJECT=true', async () => {
+      memoryEnabled = false;
+      injectionEnabled = true;
+      await mkdir(usersDir, { recursive: true });
+      await writeFile(join(usersDir, 'U07EGOR001.md'), '- fact\n', 'utf-8');
+
+      const result = await enrichPromptWithMemory('base prompt', [{ userId: 'U07EGOR001', displayName: 'Egor' }]);
 
       expect(result).toBe('base prompt');
     });

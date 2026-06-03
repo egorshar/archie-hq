@@ -147,7 +147,7 @@ The helper `extractTaskUsernames(taskId)` (`spawn.ts:132`) parses the task's `kn
 
 The thin `<entity_index>` is never subject to the page bound — the agent always sees the full catalogue of what exists.
 
-`enrichPromptWithMemory()` appends the block to the prompt under a fixed `## Organizational Memory` header with a short instruction line. If the layer is disabled or no memory exists, the original prompt is returned unchanged.
+`enrichPromptWithMemory()` appends the block to the prompt under a fixed `## Organizational Memory` header with a short instruction line. It returns the prompt unchanged — and performs no store reads — if the layer is disabled (`ARCHIE_MEMORY=false`), if **injection is disabled** (`ARCHIE_MEMORY_INJECT` ≠ `true`, the default — see [Feature Flags](#feature-flags)), or if no memory exists.
 
 ## Write Path — Extraction on Task Completion
 
@@ -376,7 +376,8 @@ Disabled by `ARCHIE_MEMORY_HOUSEKEEPING=false` — overflow is still logged but 
 
 | Flag | Default | Purpose |
 |------|---------|---------|
-| `ARCHIE_MEMORY` | `true` | Master switch. `false` → `initMemory`/`enrichPromptWithMemory`/`handleTaskCompleted` all no-op. |
+| `ARCHIE_MEMORY` | `true` | Master switch. `false` → `initMemory`/`enrichPromptWithMemory`/`handleTaskCompleted` all no-op. Enabling the layer does **not** by itself enable injection — see `ARCHIE_MEMORY_INJECT`. |
+| `ARCHIE_MEMORY_INJECT` | `false` | **Read-path gate, default OFF (inverts the convention).** `true` → stored memory is injected into agent prompts. Unset / anything else → injection off and `enrichPromptWithMemory` does no store reads; extraction still stores facts. `ARCHIE_MEMORY=false` overrides. |
 | `ARCHIE_MEMORY_HOUSEKEEPING` | `true` | Auto + manual housekeeping. `false` → no consolidation runs. |
 | `ARCHIE_MEMORY_USER_CAP` | `100` | Soft cap on total bullets in each user file. |
 | `ARCHIE_MEMORY_SECTION_CAP` | `30` | Soft cap on bullets per `## Section` (org or user). |
@@ -385,6 +386,18 @@ Disabled by `ARCHIE_MEMORY_HOUSEKEEPING=false` — overflow is still logged but 
 | `ARCHIE_MEMORY_ENTITY_INJECT_MAX` | `8` | Max full entity pages pushed into a single agent prompt (the index is always injected in full). |
 
 All variables are documented in `.env.example`.
+
+### Injection vs extraction
+
+`ARCHIE_MEMORY_INJECT` gates only the **read** path (memory → prompt); extraction, storage, and housekeeping are unaffected. This lets the layer run in **collect-only** mode: facts accumulate and can be evaluated (read the files under `workdir/memory/`, or via the `archie-debug` MCP) before they ever steer an agent.
+
+| `ARCHIE_MEMORY` | `ARCHIE_MEMORY_INJECT` | Extraction (write) | Injection (read) |
+|---|---|---|---|
+| `false` | (ignored) | off | off |
+| `true` (default) | unset / not `true` | **on** | **off** (default) |
+| `true` | `true` | on | on |
+
+**Rollout:** deploy with injection unset (collect-only), evaluate the stored facts, then set `ARCHIE_MEMORY_INJECT=true` to enable injection. Rollback is unsetting the flag — the store is untouched.
 
 The "Learned from this task" Slack post does **not** exist — visibility into what was learned comes from structured logs (`logger.system('[memory] Extraction complete for ...')`) and the per-task summary file in `workdir/memory/summaries/`.
 
