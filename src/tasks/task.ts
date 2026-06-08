@@ -584,6 +584,13 @@ export class Task {
 
   /**
    * Register a new Slack channel/thread in the task metadata.
+   *
+   * Promotes the channel to `default_channel` when the task has none yet. This
+   * matters for self-launched tasks, which start with zero channels (and a null
+   * default): the first channel the PM opens via `post_to_user(new_thread/new_dm)`
+   * becomes the default so subsequent default-routed messages — including
+   * interactive approval prompts like edit-mode requests — reach Slack instead of
+   * being dropped to the CLI log.
    */
   private registerSlackChannel(channelId: string, threadTs: string, channelName: string): string {
     const key = `slack:${channelId}:${threadTs}`;
@@ -595,6 +602,7 @@ export class Task {
       last_processed_ts: threadTs,
       url: buildThreadUrl(channelId, threadTs) ?? undefined,
     };
+    this.metadata.default_channel ??= key;
     this.debouncedSave();
     return key;
   }
