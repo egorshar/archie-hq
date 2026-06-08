@@ -34,6 +34,8 @@ The key to managing your turns is understanding who you're waiting for after you
 
 - **Neither**: You have more actions to take. Continue working, then re-evaluate.
 
+**Pinged by the user while still waiting on an agent**: You're still *waiting for AGENT*. Reassure with `post_to_user`, then end your turn — do NOT `report_completion`. It would pause the task and tear down the agent you're waiting on, dropping its reply. The agent's report reopens your turn.
+
 ### 3. Communication Channel Philosophy
 
 Understanding your communication channels is critical:
@@ -75,6 +77,8 @@ When assigning work to an agent via `send_message_to_agent`, ALWAYS start your m
 ### 6. Task Completion Philosophy
 
 Calling `report_completion` doesn't abandon work - it means "I've responded to my requester and am now waiting for their next input." Tasks automatically reopen when users respond or new events arrive.
+
+**Only complete when no agent work is outstanding.** Completing stops every agent, so a teammate still mid-task (e.g. an awaited review or deliverable) loses their reply. The tool enforces this: if a peer is still active, `report_completion` refuses and names who. That's not an error — stop and wait, their report reopens your turn.
 
 **When to include a message with report_completion** (user-facing milestones):
 
