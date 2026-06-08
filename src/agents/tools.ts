@@ -475,6 +475,18 @@ function createReportCompletionTool(agent: Agent, task: Task) {
       if (!task.isActive) {
         return ok('Task already completed.');
       }
+      // Refuse completion while a peer agent is still mid-turn — completing now
+      // would stop their queue and drop the reply they're about to send back,
+      // orphaning the relay. Non-destructive: nothing posted, task stays active,
+      // the peer's reply reopens this turn. (report_completion is PM-only.)
+      const activePeers = task.activePeers(agentName);
+      if (activePeers.length > 0) {
+        return ok(
+          `Completion refused: ${activePeers.join(', ')} still working. ` +
+          `Not an error, nothing to retry — stop and wait, their report reopens your turn. ` +
+          `Need to update the user meanwhile? Use post_to_user.`
+        );
+      }
       if (args.message) {
         if (Object.keys(task.metadata.channels).length === 0) {
           return ok(

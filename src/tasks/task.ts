@@ -711,6 +711,24 @@ export class Task {
   }
 
   /**
+   * Names of spawned agents currently mid-turn (active), excluding `exclude`.
+   *
+   * An agent can only emit inter-agent messages while its turn is running, and a
+   * turn is exactly the window in which `session.active` is true (the `inactive`
+   * marker fires from the Stop hook *after* the turn ends). So "any peer active"
+   * is a reliable signal that a delegated round-trip is still in flight — used by
+   * report_completion to refuse premature completion that would tear down a peer
+   * mid-work and orphan its reply.
+   */
+  activePeers(exclude: AgentName): AgentName[] {
+    const peers: AgentName[] = [];
+    for (const [name, agent] of this.agentProcesses) {
+      if (name !== exclude && agent.session.active) peers.push(name);
+    }
+    return peers;
+  }
+
+  /**
    * Touch — update last activity timestamp.
    */
   touch(): void {
