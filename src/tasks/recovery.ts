@@ -123,23 +123,37 @@ async function triggerRecovery(task: Task): Promise<void> {
     const newTask = await TaskClass.get(task.taskId);
     await recoverTaskAgents(newTask);
   } else {
-    // Reinforcement: nudge the lead agent
-    const target = (task.metadata.task_owner || 'pm-agent') as AgentName;
-    const agent = task.agentProcesses.get(target);
+    // Reinforcement: nudge a *live, idle* agent so it ends its turn properly
+    // (report_completion when waiting on the user, or re-delegate).
+    //
+    // Prefer the task owner, then fall back to the PM. The fallback is the
+    // whole fix: a message-driven resume only spawns the PM (Task.get →
+    // sendMessage(pm)), so a blind nudge at `task_owner` — often a specialist
+    // like ops-agent that was NOT respawned — hit no live process, set
+    // recoveryAttempts=2, and silently stalled (no new agent:inactive event
+    // ever re-arms the idle check). The task then hung until the 30-min
+    // wall-clock. The PM owns the user conversation and is the right agent to
+    // either continue or park. (Playstorm 2026-06-11 stall.)
+    const owner = (task.metadata.task_owner || 'pm-agent') as AgentName;
+    const candidates: AgentName[] =
+      owner === 'pm-agent' ? ['pm-agent'] : [owner, 'pm-agent'];
+    const target = candidates.find((name) => task.agentProcesses.get(name)?.isRunning);
+    const targetAgent = target ? task.agentProcesses.get(target) : undefined;
 
-    // Only nudge if the agent process is actually running (not crashed)
-    if (agent && agent.isRunning) {
+    if (targetAgent) {
       const prompt = target === 'pm-agent'
         ? AGENT_PROMPTS.reinforcePM
         : AGENT_PROMPTS.reinforceAgent;
-      agent.queue.addMessage(prompt);
+      targetAgent.queue.addMessage(prompt);
 
       // Mark agent as active after nudge
-      agent.updateSession(true);
+      targetAgent.updateSession(true);
       task.save();
     } else {
-      // Agent process is dead — skip straight to nuclear on next idle check
-      task.recoveryAttempts = 2;
+      // No live agent to nudge — re-spawn rather than silently stalling.
+      // recoverTaskAgents re-sends the recovery prompt to previously-active
+      // agents, falling back to the PM, which re-arms the lifecycle.
+      await recoverTaskAgents(task);
     }
   }
 }

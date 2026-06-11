@@ -964,16 +964,27 @@ export class Task {
   private startTaskTimeout(): void {
     this.taskTimeoutTimer = setInterval(async () => {
       const elapsed = Date.now() - this.budgets.taskStartTime.getTime();
-      if (elapsed >= this.budgets.taskTimeoutMs) {
-        logger.warn(
-          'budget',
-          `Task ${this.taskId} exceeded wall-clock timeout (${Math.round(elapsed / 60_000)}min)`,
-        );
-        await this.postToUser(
-          `⏱️ Task timed out after ${Math.round(elapsed / 60_000)} minutes. Stopping task.`,
-        ).catch((err: unknown) => logger.error('budget', 'Failed to post timeout message', err));
-        await this.stop();
-      }
+      if (elapsed < this.budgets.taskTimeoutMs) return;
+
+      const mins = Math.round(elapsed / 60_000);
+      // The wall-clock cap is a backstop, not a failure verdict. A task that's
+      // simply waiting on a human reply (all agents idle) must not announce a
+      // scary "timed out" — it was working as intended. Reframe as a pause and
+      // `complete()` (park) so it reopens cleanly on the next reply, rather
+      // than `stop()`. Only when an agent is still mid-turn is this a genuinely
+      // long-running task being capped.
+      const anyAgentActive = [...this.agentProcesses.values()].some((a) => a.session.active);
+      logger.warn(
+        'budget',
+        `Task ${this.taskId} hit wall-clock cap (${mins}min, agents ${anyAgentActive ? 'active' : 'idle'}) — pausing`,
+      );
+      const msg = anyAgentActive
+        ? `⏸️ This task has been running for ${mins} minutes, so I'm pausing it here. Reply in this thread and I'll pick it back up.`
+        : `⏸️ Pausing this task — I'd been waiting on a reply for a while. Just respond in this thread whenever you're ready and I'll continue.`;
+      await this.postToUser(msg).catch((err: unknown) =>
+        logger.error('budget', 'Failed to post pause message', err),
+      );
+      await this.complete();
     }, 60_000);
   }
 
