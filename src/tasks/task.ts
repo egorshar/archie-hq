@@ -54,7 +54,7 @@ import {
 } from './persistence.js';
 import { getIsShuttingDown } from '../system/shutdown.js';
 import { scheduleIdleCheck } from './recovery.js';
-import { scanAgentDefs, getAgentDef, getVisiblePeerIdsForSender } from '../agents/registry.js';
+import { scanAgentDefs, getAgentDef, getVisiblePeerIdsForSender, synthesizeDynamicAgentDef } from '../agents/registry.js';
 import type { AttachedRepo } from '../types/task.js';
 import { syncPlugins } from '../system/plugin-sync.js';
 import { postSlackMessage, postSlackFiles, postInteractiveToThreads, addReaction, removeReaction, getMessageReactions, buildThreadUrl, openDMChannel, getChannelInfo, getUserInfo, isExternalUser, formatSlackChannelRef, formatSlackChannelDisplay } from '../connectors/slack/client.js';
@@ -195,6 +195,12 @@ export class Task {
     migrateRepositoriesShape(metadata);
 
     const team = scanAgentDefs();
+    // Rehydrate PM-spawned repo agents from their persisted specs and merge
+    // them into the team, so peer lists, messaging, and ensureAgentSpawned all
+    // see them on a reloaded task (and after a process restart).
+    for (const spec of metadata.dynamic_agents ?? []) {
+      team.push(synthesizeDynamicAgentDef(spec));
+    }
     return new Task(taskId, metadata, team);
   }
 
