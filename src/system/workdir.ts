@@ -178,6 +178,9 @@ export async function refreshPlugins(): Promise<boolean> {
         await execAsync('git fetch --all --prune', { cwd: PLUGINS_DIR });
         await execAsync(`git checkout "${branch}"`, { cwd: PLUGINS_DIR });
         await execAsync(`git reset --hard "origin/${branch}"`, { cwd: PLUGINS_DIR });
+        // `reset --hard` moves the gitlink but not submodule working trees, so sync
+        // submodules onto their recorded commits (and init any newly added ones).
+        await execAsync('git submodule update --init --recursive', { cwd: PLUGINS_DIR });
         logger.system('Plugins refreshed from remote');
         // Re-scan plugin definitions (picks up new/changed agents, prompts, etc.)
         initPlugins();
