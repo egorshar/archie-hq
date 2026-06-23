@@ -142,8 +142,9 @@ async function callPerplexity(preset: string, input: string): Promise<Perplexity
       // Anthropic models proxied through Perplexity require an explicit output
       // cap — without it the backend rejects the request with
       // "max_output_tokens is required when using Anthropic models" and returns
-      // an empty report. Overridable via env for deep-research headroom.
-      max_output_tokens: Number(process.env.PERPLEXITY_MAX_OUTPUT_TOKENS) || 8192,
+      // an empty report. Set to the Sonnet output ceiling so we don't truncate
+      // long deep-research reports; overridable via env.
+      max_output_tokens: Number(process.env.PERPLEXITY_MAX_OUTPUT_TOKENS) || 64000,
     }),
   });
 
