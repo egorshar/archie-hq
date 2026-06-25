@@ -88,7 +88,7 @@ export class Task {
   private constructor(taskId: string, metadata: TaskMetadata, team: AgentDef[]) {
     this.taskId = taskId;
     this.team = team;
-    this.statusController = new TaskStatusController((status) => this.pushSlackStatus(status));
+    this.statusController = new TaskStatusController((status) => this.onStatusRendered(status));
     this.budgets = {
       researchRequestCount: metadata.research_request_count ?? 0,
       researchRequestLimit: 5 + (metadata.research_budget_extra ?? 0),
@@ -541,13 +541,28 @@ export class Task {
   }
 
   /**
+   * Single sink for a rendered status line ('' clears it). Delivers it to every
+   * surface so the indicator can be observed without Slack:
+   *   - a `status` event on the bus → SSE → the CLI shows the same line live
+   *   - the unified logger → visible in headless / dry-run / `npm run dev` output
+   *   - the Slack assistant-thread indicator (best-effort)
+   * Gated as a whole by ARCHIE_SLACK_STATUS so the feature has one off switch.
+   */
+  private onStatusRendered(status: string): void {
+    if (!isSlackStatusEnabled()) return;
+    emitEvent('status', this.taskId, { status });
+    logger.slack(status ? `status [${this.taskId}]: Archie ${status}` : `status [${this.taskId}]: cleared`);
+    this.pushSlackStatus(status);
+  }
+
+  /**
    * Push (or clear, with an empty string) the "Archie is …" loading indicator
    * on every linked Slack thread. Fire-and-forget and best-effort — each call
    * swallows its own errors. Muted channels are skipped so a thread the PM has
-   * gone quiet in doesn't keep shimmering.
+   * gone quiet in doesn't keep shimmering. No-op when there are no Slack
+   * channels (e.g. CLI-only tasks), where the CLI shows the status instead.
    */
   private pushSlackStatus(status: string): void {
-    if (!isSlackStatusEnabled()) return;
     for (const ch of Object.values(this.metadata.channels)) {
       if (ch.type !== 'slack' || ch.muted) continue;
       void setSlackThreadStatus(ch.channel_id, ch.thread_id, status);
