@@ -16,7 +16,7 @@ import { z } from 'zod';
 import type { AgentName, FindingType, AttachedRepo } from '../types/task.js';
 import type { Task } from '../tasks/task.js';
 import type { Agent } from './agent.js';
-import { getVisiblePeerIdsForSender, getAgentIds, findAgentDefsContainingRepo, synthesizeDynamicAgentDef } from './registry.js';
+import { getVisiblePeerIdsForSender, findAgentDefsContainingRepo, synthesizeDynamicAgentDef } from './registry.js';
 import { getGitHubClient, parseCheckRef } from '../connectors/github/client.js';
 import { gitExec } from '../connectors/github/repo-clone.js';
 import { hydrateBranchState, findBranchStateByPR } from '../connectors/github/branch-state.js';
@@ -238,10 +238,23 @@ function createSendMessageTool(agent: Agent, task: Task) {
     'send_message_to_agent',
     'Send a message to another agent and wait for their response. Use this to coordinate with peer agents.',
     {
-      target: z.enum(visibleTargetsForSender(agent.def, task)).describe('The agent to send the message to'),
+      // Free-form string (validated at runtime against the live task team) so a
+      // dynamic agent spawned mid-session is immediately addressable — a static
+      // enum would freeze the peer set at MCP-server creation time.
+      target: z.string().describe(
+        'The agent id to send the message to. Visible peers right now: ' +
+        visibleTargetsForSender(agent.def, task).join(', ') +
+        '. PM-spawned dynamic agents added during this session are also valid targets.',
+      ),
       message: z.string().describe('The message content to send'),
     },
     async (args) => {
+      const allowed = new Set(visibleTargetsForSender(agent.def, task));
+      if (!allowed.has(args.target)) {
+        return err(
+          `"${args.target}" is not a visible peer. Allowed: ${Array.from(allowed).join(', ')}.`,
+        );
+      }
       const response = await task.toolSendMessage(agent.def.id as AgentName, args.target as AgentName, args.message);
       return { content: [{ type: 'text' as const, text: response }] };
     },
@@ -432,21 +445,27 @@ function createFindSlackChannelTool(_agent: Agent, _task: Task) {
 }
 
 function createAssignTaskOwnerTool(agent: Agent, task: Task) {
-  // PM can assign to any agent it can see — globals + same-plugin locals —
-  // across the task team, so PM-spawned dynamic agents are valid owners.
-  const visibleIds = getVisiblePeerIdsForSender(agent.def, task.team);
-  // Defensive fallback: if no visible peers (misconfigured deployment), expose
-  // the full registry list so Zod construction doesn't crash on an empty enum;
-  // PM will get a clearer runtime error from the actual delegation attempt.
-  const taskOwnerAgents = (visibleIds.length > 0 ? visibleIds : getAgentIds()) as [string, ...string[]];
   return tool(
     'assign_task_owner',
     'Assign a task owner who will lead the investigation. Call this before sending the initial assignment message.',
     {
-      agent: z.enum(taskOwnerAgents).describe('The agent to assign as task owner'),
+      // Free-form string (validated at runtime against the live task team) so a
+      // PM-spawned dynamic agent can be made owner in the same session — a
+      // static enum would freeze the set at MCP-server creation time.
+      agent: z.string().describe(
+        'The agent id to assign as task owner. Visible candidates right now: ' +
+        getVisiblePeerIdsForSender(agent.def, task.team).join(', ') +
+        '. PM-spawned dynamic agents added during this session are also valid.',
+      ),
     },
     async (args) => {
       const agentName = agent.def.id as AgentName;
+      const allowed = new Set(getVisiblePeerIdsForSender(agent.def, task.team));
+      if (allowed.size > 0 && !allowed.has(args.agent)) {
+        return err(
+          `"${args.agent}" is not a visible candidate. Allowed: ${Array.from(allowed).join(', ')}.`,
+        );
+      }
       const targetAgent = args.agent as AgentName;
       logger.agentAction(agentName, 'Assigning task owner', targetAgent);
       task.touch();

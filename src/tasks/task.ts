@@ -841,12 +841,14 @@ export class Task {
    * Stays on Task because it involves lazy spawn + budget tracking + queue routing.
    */
   async toolSendMessage(fromAgent: AgentName, target: AgentName, message: string): Promise<string> {
-    // Defensive visibility gate — Zod enum on the tool already filters the targets,
-    // but if the agent constructs a call outside that enum (jailbreak / fuzz),
-    // reject the message and surface the visible set so it can recover.
+    // Defensive visibility gate — Zod on the tool already filters the targets,
+    // but if the agent constructs a call outside that allowlist (jailbreak /
+    // fuzz), reject the message and surface the visible set so it can recover.
+    // Scope to the task team (registry + PM-spawned dynamic agents), so a
+    // dynamic agent created mid-session is reachable from same-session peers.
     const senderDef = this.team.find((d) => d.id === fromAgent);
     if (senderDef && target !== 'pm-agent') {
-      const visible = new Set(getVisiblePeerIdsForSender(senderDef));
+      const visible = new Set(getVisiblePeerIdsForSender(senderDef, this.team));
       if (!visible.has(target)) {
         const list = Array.from(visible).sort().join(', ') || '(none)';
         return `Error: ${target} is not addressable from ${fromAgent} (visibility rules). Visible peers: ${list}, pm-agent`;
