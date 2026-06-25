@@ -62,11 +62,23 @@ describe('deriveActivity', () => {
     expect(deriveActivity('Write', {}, sub)).toBe('making changes to the backend');
   });
 
-  it('maps repo / PR tools', () => {
-    expect(deriveActivity('mcp__repo-tools__create_pull_request', {}, sub)).toBe('opening a pull request');
-    expect(deriveActivity('mcp__repo-tools__push_branch', {}, sub)).toBe('pushing the changes');
+  it('keeps Bash domain-aware for specialists; bare only for the PM', () => {
+    expect(deriveActivity('Bash', {}, { isPm: false, editMode: false, domain: 'backend' })).toBe('running some checks on the backend');
+    expect(deriveActivity('Bash', {}, sub)).toBe('working on the backend'); // edit mode
+    expect(deriveActivity('Bash', {}, pm)).toBe('running some checks');
+  });
+
+  it('maps repo / PR tools, domain-aware', () => {
+    expect(deriveActivity('mcp__repo-tools__create_pull_request', {}, sub)).toBe('opening a backend pull request');
+    expect(deriveActivity('mcp__repo-tools__push_branch', {}, sub)).toBe('pushing the backend changes');
     expect(deriveActivity('mcp__repo-tools__get_pr', {}, sub)).toBe('reviewing the backend PR');
-    expect(deriveActivity('mcp__repo-tools__merge_pull_request', {}, sub)).toBe('merging the changes');
+    expect(deriveActivity('mcp__repo-tools__merge_pull_request', {}, sub)).toBe('merging the backend changes');
+    expect(deriveActivity('mcp__repo-tools__update_pr', {}, sub)).toBe('updating the backend pull request');
+  });
+
+  it('keeps Skill domain-aware for specialists', () => {
+    expect(deriveActivity('Skill', {}, sub)).toBe('getting up to speed on the backend');
+    expect(deriveActivity('Skill', {}, pm)).toBe('getting up to speed');
   });
 
   it('phrases external integrations from the .mcp.json description, no map', () => {
@@ -106,10 +118,12 @@ describe('deriveActivity', () => {
     expect(deriveActivity('mcp__n8n-context-grabber__pull', {}, sub)).toBe('checking n8n');
   });
 
-  it('surfaces inter-agent coordination + shared-log activity, generically', () => {
+  it('surfaces inter-agent coordination + shared-log activity (domain-aware for specialists)', () => {
     expect(deriveActivity('mcp__agent-tools__send_message_to_agent', {}, pm)).toBe('coordinating');
-    expect(deriveActivity('mcp__agent-tools__log_finding', {}, sub)).toBe('making a note');
-    expect(deriveActivity('mcp__agent-tools__share_artifact', {}, sub)).toBe('writing things up');
+    expect(deriveActivity('mcp__agent-tools__log_finding', {}, sub)).toBe('making a note on the backend');
+    expect(deriveActivity('mcp__agent-tools__share_artifact', {}, sub)).toBe('writing up the backend');
+    // PM (no domain) stays generic
+    expect(deriveActivity('mcp__agent-tools__log_finding', {}, pm)).toBe('making a note');
   });
 
   it('reflects the delegation target by domain, single-persona', () => {
@@ -165,7 +179,7 @@ describe('deriveActivityFromEvent', () => {
         ],
       },
     };
-    expect(deriveActivityFromEvent(event, sub)).toBe('opening a pull request');
+    expect(deriveActivityFromEvent(event, sub)).toBe('opening a mobile pull request');
   });
 
   it('returns null for non-assistant events and plain-string content', () => {

@@ -100,9 +100,11 @@ export function deriveActivity(
     case 'NotebookEdit':
       return ctx.domain ? `making changes to the ${ctx.domain}` : 'drafting changes';
     case 'Bash':
-      return ctx.editMode && ctx.domain ? `working on the ${ctx.domain}` : 'running some checks';
+      // Always say *where* for a specialist; only the PM (no domain) is vague.
+      if (ctx.domain) return ctx.editMode ? `working on the ${ctx.domain}` : `running some checks on the ${ctx.domain}`;
+      return 'running some checks';
     case 'Skill':
-      return 'getting up to speed';
+      return ctx.domain ? `getting up to speed on the ${ctx.domain}` : 'getting up to speed';
     case 'Task':
       return ctx.domain ? `working on the ${ctx.domain}` : 'working through this';
     case 'TodoWrite':
@@ -182,8 +184,8 @@ function agentToolPhrase(tool: string, input: unknown, ctx: ActivityContext): st
       const domain = typeof target === 'string' ? ctx.resolveAgentDomain?.(target) : undefined;
       return domain ? `looking into the ${domain}` : 'coordinating';
     }
-    case 'log_finding': return 'making a note';
-    case 'share_artifact': return 'writing things up';
+    case 'log_finding': return ctx.domain ? `making a note on the ${ctx.domain}` : 'making a note';
+    case 'share_artifact': return ctx.domain ? `writing up the ${ctx.domain}` : 'writing things up';
     default: return null;
   }
 }
@@ -217,17 +219,17 @@ function schedulingToolPhrase(tool: string): string | null {
 
 function repoToolPhrase(tool: string, domain: string): string {
   switch (tool) {
-    case 'push_branch': return 'pushing the changes';
-    case 'create_pull_request': return 'opening a pull request';
-    case 'merge_pull_request': return 'merging the changes';
-    case 'close_pull_request': return 'wrapping up the pull request';
+    case 'push_branch': return domain ? `pushing the ${domain} changes` : 'pushing the changes';
+    case 'create_pull_request': return domain ? `opening a ${domain} pull request` : 'opening a pull request';
+    case 'merge_pull_request': return domain ? `merging the ${domain} changes` : 'merging the changes';
+    case 'close_pull_request': return domain ? `wrapping up the ${domain} pull request` : 'wrapping up the pull request';
     case 'update_pr':
     case 'add_pr_comment':
     case 'add_review_comment':
     case 'reply_to_review_comment':
     case 'resolve_review_thread':
     case 'request_re_review':
-      return 'updating the pull request';
+      return domain ? `updating the ${domain} pull request` : 'updating the pull request';
     case 'list_prs':
     case 'get_pr':
     case 'get_pr_status':
