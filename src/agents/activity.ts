@@ -35,6 +35,13 @@ export interface ActivityContext {
    * label fallback.
    */
   mcpTools?: Map<string, McpToolMeta>;
+  /**
+   * Resolves a target agent id (e.g. from `send_message_to_agent`) to its domain
+   * noun, so a delegation reads as the single persona turning to that area
+   * ("looking into the backend") rather than naming an agent. Returns '' for the
+   * PM (no domain) and undefined for an unknown id.
+   */
+  resolveAgentDomain?: (agentId: string) => string | undefined;
 }
 
 /**
@@ -79,7 +86,6 @@ export function deriveActivity(
   input: unknown,
   ctx: ActivityContext,
 ): string | null {
-  void input; // reserved for future, more specific phrasing
   const here = ctx.domain ? `the ${ctx.domain}` : 'this';
 
   // ---- Built-in SDK tools (bare names) ----
@@ -116,17 +122,16 @@ export function deriveActivity(
   // Repo / git / PR tools (engineering & other repo agents).
   if (server === 'repo-tools') return repoToolPhrase(tool, ctx.domain);
 
-  // Internal coordination + user comms — deliberately invisible in status text.
-  // Delegating, posting to the user, assigning owners and logging findings are
-  // bookkeeping; the indicator should reflect the *work*, not the plumbing.
-  if (
-    server === 'comms-tools' ||
-    server === 'agent-tools' ||
-    server === 'orchestration-tools' ||
-    server === 'scheduling-tools'
-  ) {
-    return null;
-  }
+  // Inter-agent coordination + shared-log activity — surfaced, but phrased
+  // generically so the single-persona voice never names another agent.
+  if (server === 'agent-tools') return agentToolPhrase(tool, input, ctx);
+
+  // PM comms / orchestration / scheduling — surface the user-meaningful actions;
+  // the rest (post_to_user, owner assignment, completion, reactions, …) is
+  // plumbing and stays hidden.
+  if (server === 'comms-tools') return commsToolPhrase(tool);
+  if (server === 'orchestration-tools') return orchestrationToolPhrase(tool);
+  if (server === 'scheduling-tools') return schedulingToolPhrase(tool);
 
   // External integrations (plugin MCP servers) — phrase from metadata, no map.
   return integrationPhrase(toolName, server, here, ctx);
@@ -162,6 +167,52 @@ function parseMcpTool(toolName: string): { server: string; tool: string } | null
   const idx = rest.indexOf('__');
   if (idx === -1) return { server: rest, tool: '' };
   return { server: rest.slice(0, idx), tool: rest.slice(idx + 2) };
+}
+
+/**
+ * Base agent-tools (every agent): inter-agent messaging, shared-log findings,
+ * and artifact publishing. Never names another agent — a message to a domain
+ * specialist reads as the single persona turning to that area ("looking into the
+ * backend"); a message to the coordinator (or an unknown target) stays generic.
+ */
+function agentToolPhrase(tool: string, input: unknown, ctx: ActivityContext): string | null {
+  switch (tool) {
+    case 'send_message_to_agent': {
+      const target = (input as { target?: unknown } | null)?.target;
+      const domain = typeof target === 'string' ? ctx.resolveAgentDomain?.(target) : undefined;
+      return domain ? `looking into the ${domain}` : 'coordinating';
+    }
+    case 'log_finding': return 'making a note';
+    case 'share_artifact': return 'writing things up';
+    default: return null;
+  }
+}
+
+/** PM Slack lookups — other comms tools (post_to_user, reactions, mute) stay hidden. */
+function commsToolPhrase(tool: string): string | null {
+  switch (tool) {
+    case 'find_slack_user': return 'looking someone up';
+    case 'find_slack_channel': return 'finding the right channel';
+    default: return null;
+  }
+}
+
+/** PM orchestration — surface progress checks and task launches; hide the rest. */
+function orchestrationToolPhrase(tool: string): string | null {
+  switch (tool) {
+    case 'get_agents_status': return 'checking on progress';
+    case 'launch_task': return 'kicking off a task';
+    default: return null;
+  }
+}
+
+/** PM scheduling — reminders are user-meaningful; datetime parsing is not. */
+function schedulingToolPhrase(tool: string): string | null {
+  switch (tool) {
+    case 'set_reminder': return 'setting a reminder';
+    case 'cancel_reminder': return 'clearing a reminder';
+    default: return null;
+  }
 }
 
 function repoToolPhrase(tool: string, domain: string): string {

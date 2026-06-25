@@ -106,11 +106,43 @@ describe('deriveActivity', () => {
     expect(deriveActivity('mcp__n8n-context-grabber__pull', {}, sub)).toBe('checking n8n');
   });
 
-  it('hides internal coordination + user comms (those are plumbing, not work)', () => {
+  it('surfaces inter-agent coordination + shared-log activity, generically', () => {
+    expect(deriveActivity('mcp__agent-tools__send_message_to_agent', {}, pm)).toBe('coordinating');
+    expect(deriveActivity('mcp__agent-tools__log_finding', {}, sub)).toBe('making a note');
+    expect(deriveActivity('mcp__agent-tools__share_artifact', {}, sub)).toBe('writing things up');
+  });
+
+  it('reflects the delegation target by domain, single-persona', () => {
+    const resolveAgentDomain = (id: string) =>
+      ({ 'backend-agent': 'backend', 'pm-agent': '' } as Record<string, string>)[id];
+    // PM delegates to a specialist → "turning to that area", never naming the agent
+    expect(
+      deriveActivity('mcp__agent-tools__send_message_to_agent', { target: 'backend-agent' }, { ...pm, resolveAgentDomain }),
+    ).toBe('looking into the backend');
+    // Reporting back to the coordinator (no domain) → generic
+    expect(
+      deriveActivity('mcp__agent-tools__send_message_to_agent', { target: 'pm-agent' }, { ...sub, resolveAgentDomain }),
+    ).toBe('coordinating');
+    // Unknown target → generic
+    expect(
+      deriveActivity('mcp__agent-tools__send_message_to_agent', { target: 'who-agent' }, { ...pm, resolveAgentDomain }),
+    ).toBe('coordinating');
+  });
+
+  it('surfaces the user-meaningful PM comms / orchestration / scheduling actions', () => {
+    expect(deriveActivity('mcp__comms-tools__find_slack_user', {}, pm)).toBe('looking someone up');
+    expect(deriveActivity('mcp__comms-tools__find_slack_channel', {}, pm)).toBe('finding the right channel');
+    expect(deriveActivity('mcp__orchestration-tools__get_agents_status', {}, pm)).toBe('checking on progress');
+    expect(deriveActivity('mcp__orchestration-tools__launch_task', {}, pm)).toBe('kicking off a task');
+    expect(deriveActivity('mcp__scheduling-tools__set_reminder', {}, pm)).toBe('setting a reminder');
+  });
+
+  it('hides the remaining plumbing', () => {
     expect(deriveActivity('mcp__comms-tools__post_to_user', {}, pm)).toBeNull();
-    expect(deriveActivity('mcp__agent-tools__send_message_to_agent', {}, pm)).toBeNull();
+    expect(deriveActivity('mcp__comms-tools__mute_channel', {}, pm)).toBeNull();
     expect(deriveActivity('mcp__orchestration-tools__assign_task_owner', {}, pm)).toBeNull();
-    expect(deriveActivity('mcp__scheduling-tools__set_reminder', {}, pm)).toBeNull();
+    expect(deriveActivity('mcp__orchestration-tools__report_completion', {}, pm)).toBeNull();
+    expect(deriveActivity('mcp__scheduling-tools__parse_datetime', {}, pm)).toBeNull();
   });
 
   it('gives the PM domain-free phrasing', () => {

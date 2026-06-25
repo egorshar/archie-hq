@@ -1,8 +1,8 @@
 /**
  * Task status controller — composes the single first-person "Archie is …" line
  * shown while a task is working. The line is surface-agnostic: the same string
- * is rendered to Slack (assistant-thread status), the CLI (live indicator), and
- * the logs. This module owns the *composition*; renderers live elsewhere.
+ * is rendered to Slack (assistant-thread status) and the CLI (live indicator).
+ * This module owns the *composition*; renderers live elsewhere.
  *
  * It tracks which agents are active and what each is currently doing (fed from
  * the SDK tool-call stream and the agent active/idle transitions) and renders

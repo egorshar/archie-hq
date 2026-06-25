@@ -544,14 +544,12 @@ export class Task {
    * Single sink for a rendered status line ('' clears it). Delivers it to every
    * surface so the indicator can be observed without Slack:
    *   - a `status` event on the bus → SSE → the CLI shows the same line live
-   *   - the unified logger → visible in headless / dry-run / `npm run dev` output
    *   - the Slack assistant-thread indicator (best-effort)
    * Gated as a whole by ARCHIE_LIVE_STATUS so the feature has one off switch.
    */
   private onStatusRendered(status: string): void {
     if (!isStatusEnabled()) return;
     emitEvent('status', this.taskId, { status });
-    logger.system(status ? `status [${this.taskId}]: Archie ${status}` : `status [${this.taskId}]: cleared`);
     this.pushSlackStatus(status);
   }
 
@@ -588,6 +586,10 @@ export class Task {
       domain,
       mcpDescriptions: def.mcpDescriptions,
       mcpTools: agent.mcpTools,
+      resolveAgentDomain: (id) => {
+        const d = this.team.find((x) => x.id === id);
+        return d ? agentDomainLabel(d) : undefined;
+      },
     });
     if (phrase) this.statusController.note(agentId, isPm, domain, phrase);
   }
