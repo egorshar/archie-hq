@@ -20,11 +20,13 @@ import {
   formatGitHubContext,
   formatGitHubEvent,
   verifyWebhookSignature,
+  extractBranchFromPayload,
 } from './webhooks.js';
 import { Task } from '../../tasks/task.js';
-import { appendGitHubEvent } from '../../tasks/persistence.js';
+import { appendGitHubEvent, findTaskByPRNumber } from '../../tasks/persistence.js';
 import { AGENT_PROMPTS } from '../../agents/prompts.js';
 import { findBranchStateByPR } from './branch-state.js';
+import { extractTaskIdFromBranch } from './branch-naming.js';
 import { logger } from '../../system/logger.js';
 import { getIsShuttingDown } from '../../system/shutdown.js';
 import { WORKDIR } from '../../system/workdir.js';
@@ -115,6 +117,10 @@ async function handleGitHubWebhook(
       (context.state ? ` state=${context.state}` : '')
   );
 
+  // Keep PR cards fresh on CI completion and PR close, independent of the
+  // merge/checks routing decision (CI-success check_suites route to noop).
+  await maybeRefreshPrCards(eventType, payload, context);
+
   const route = await routeGitHubEvent(eventType, payload);
 
   if (route.action === 'discard') {
@@ -130,6 +136,49 @@ async function handleGitHubWebhook(
     } else if (route.handler === 'checks_ready') {
       handleChecksReadyDirect(route.taskId, route.githubRepo, route.prNumber);
     }
+  }
+}
+
+/**
+ * Update PR cards in place for events that change a card without an accompanying
+ * PM message: CI completion (check_suite/workflow_run completed) and PR
+ * close/merge. No-ops unless the task already has a posted card for that PR (the
+ * first card is posted at the next PM turn-end). Routing-independent so it also
+ * catches CI *successes*, which route to noop.
+ */
+async function maybeRefreshPrCards(
+  eventType: string,
+  payload: Record<string, unknown>,
+  context: ReturnType<typeof formatGitHubContext>
+): Promise<void> {
+  const isCiDone =
+    (eventType === 'check_suite' || eventType === 'workflow_run') && context.action === 'completed';
+  const isPrClosed = eventType === 'pull_request' && context.action === 'closed';
+  if (!isCiDone && !isPrClosed) return;
+
+  const branch = extractBranchFromPayload(eventType, payload);
+  let taskId = extractTaskIdFromBranch(branch);
+  if (!taskId && context.prNumber) {
+    taskId = (await findTaskByPRNumber(context.githubRepo, context.prNumber)) ?? undefined;
+  }
+  if (!taskId) return;
+
+  let task: Task;
+  try {
+    task = await Task.get(taskId);
+  } catch {
+    return; // task not found / unreadable
+  }
+
+  try {
+    if (isPrClosed && context.prNumber) {
+      await task.refreshPrCardInPlace(context.githubRepo, context.prNumber);
+    } else {
+      // CI completed — refresh whichever of the task's PRs already have a card.
+      await task.refreshAllPrCards();
+    }
+  } catch (error) {
+    logger.warn('Server', `PR card refresh failed for task ${taskId}`, error);
   }
 }
 

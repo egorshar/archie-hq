@@ -19,6 +19,8 @@ import type {
   PRChecksReport,
   PRCheckEntry,
 } from '../../agents/tools.js';
+import type { PrCardData } from '../../types/task.js';
+import { rollupCi } from '../../system/pr-card-format.js';
 import { logger } from '../../system/logger.js';
 
 const execAsync = promisify(exec);
@@ -414,6 +416,45 @@ export class GitHubClient {
       base: pr.base.ref,
       diff: String(diffResponse.data),
       url: pr.html_url,
+    };
+  }
+
+  /**
+   * Fetch the compact data shown on a PR card: state, diff stats, head sha, and
+   * a rolled-up CI verdict. Lean by design — uses the PR endpoint (which carries
+   * additions/deletions/changed_files) plus `listPRChecks` for CI, and avoids
+   * `getPRDetails` (which downloads the full diff).
+   */
+  async getPRCardData(githubRepo: string, prNumber: number): Promise<PrCardData> {
+    const octokit = await this.getOctokit();
+    const { owner, repo } = this.parseRepo(githubRepo);
+
+    const prResponse = await octokit.request('GET /repos/{owner}/{repo}/pulls/{pull_number}', {
+      owner, repo, pull_number: prNumber,
+    });
+    const pr = prResponse.data;
+    const state: PrCardData['state'] = pr.merged ? 'merged' : (pr.state as 'open' | 'closed');
+
+    let ci: PrCardData['ci'] = 'none';
+    try {
+      const checks = await this.listPRChecks(githubRepo, prNumber);
+      ci = rollupCi(checks.entries);
+    } catch (error) {
+      // CI is best-effort — a card without a verdict is better than no card.
+      logger.warn('GitHub', `Failed to fetch checks for PR #${prNumber} card`, error);
+    }
+
+    return {
+      repo: githubRepo,
+      prNumber,
+      url: pr.html_url,
+      title: pr.title,
+      state,
+      additions: pr.additions ?? 0,
+      deletions: pr.deletions ?? 0,
+      changed_files: pr.changed_files ?? 0,
+      head_sha: pr.head.sha,
+      ci,
     };
   }
 

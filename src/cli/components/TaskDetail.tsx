@@ -4,6 +4,30 @@ import Spinner from 'ink-spinner';
 import { ScrollView, type ScrollViewRef } from 'ink-scroll-view';
 import { fetchTaskDetail, fetchTaskEvents, sendMessage, sendApproval } from '../api.js';
 import { MessageInput } from './MessageInput.js';
+import { prCardStateIcon, prCardStatsLine } from '../../system/pr-card-format.js';
+
+/**
+ * Render a PR card from a `pr_card` event's data. Two lines: a colored title
+ * row and a dimmed stats + URL row — the same content shown on Slack.
+ */
+function renderPrCard(d: Record<string, unknown>): React.ReactNode {
+  const card = {
+    repo: String(d.repo ?? ''),
+    prNumber: Number(d.prNumber ?? 0),
+    url: String(d.url ?? ''),
+    title: String(d.title ?? ''),
+    state: (d.state as 'open' | 'merged' | 'closed') ?? 'open',
+    additions: Number(d.additions ?? 0),
+    deletions: Number(d.deletions ?? 0),
+    changed_files: Number(d.changed_files ?? 0),
+    head_sha: String(d.head_sha ?? ''),
+    ci: (d.ci as 'none' | 'pending' | 'passed' | 'failed') ?? 'none',
+  };
+  const color = card.state === 'merged' ? 'magenta' : card.state === 'closed' ? 'red' : 'cyan';
+  const title = `${prCardStateIcon(card.state)} ${card.repo} #${card.prNumber} — ${card.title}`;
+  const stats = `${prCardStatsLine(card)} · ${card.url}`;
+  return <Text color={color}>{title}{'\n'}<Text dimColor>{stats}</Text></Text>;
+}
 
 /**
  * Format message for CLI display using from, to, and destination fields.
@@ -94,14 +118,35 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
   // Build log lines with inline approvals
   const logLines: { node: React.ReactNode; approval?: { approvalType: 'edit_mode' | 'research_budget'; eventIndex: number } }[] = [];
 
+  // Fold pr_card events so a card renders once, at its most recent `post`
+  // (anchor), showing the latest merged state. `update` events refresh the data
+  // without moving the card; a fresh `post` re-anchors it to the bottom.
+  const prCardAnchor = new Map<string, number>();
+  const prCardLatest = new Map<string, Record<string, unknown>>();
+  events.forEach((e, idx) => {
+    if (e.type !== 'pr_card') return;
+    const cardId = e.data.cardId as string | undefined;
+    if (!cardId) return;
+    prCardLatest.set(cardId, e.data);
+    if (e.data.action === 'post' || !prCardAnchor.has(cardId)) {
+      prCardAnchor.set(cardId, idx);
+    }
+  });
+
   if (events.length > 0) {
     events.forEach((event, idx) => {
       switch (event.type) {
         case 'message':
           logLines.push({
-            node: (() => { const p = formatMessageParts(event.data.from as string, event.data.to as string, event.data.destination as string | undefined); return <><Text dimColor>[{p.label}]</Text>{p.mention ? <Text color="cyan">{p.mention}</Text> : null} {event.data.message as string}</>; })(),
+            node: (() => { const p = formatMessageParts(event.data.from as string, event.data.to as string, event.data.destination as string | undefined); const footer = event.data.footer as string | undefined; return <><Text dimColor>[{p.label}]</Text>{p.mention ? <Text color="cyan">{p.mention}</Text> : null} {event.data.message as string}{footer ? <Text dimColor>{'\n'}{footer}</Text> : null}</>; })(),
           });
           break;
+        case 'pr_card': {
+          const cardId = event.data.cardId as string | undefined;
+          if (!cardId || prCardAnchor.get(cardId) !== idx) break; // render once, at the anchor
+          logLines.push({ node: renderPrCard(prCardLatest.get(cardId) ?? event.data) });
+          break;
+        }
         case 'agent:log':
           logLines.push({
             node: <Text dimColor>[{event.agentName}] {event.data.finding as string}</Text>,

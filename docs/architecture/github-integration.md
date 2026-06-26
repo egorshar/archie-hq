@@ -188,6 +188,14 @@ After a merge check, the orchestrator notifies the PM agent only for noteworthy 
 - **Successful merges**: Logs a completion finding and reactivates PM to announce the merge.
 - **Pending PRs**: No notification. The system waits silently for the next webhook trigger (approval, CI pass, etc.).
 
+## PR Cards
+
+A **PR card** is a compact, self-updating summary of a pull request (state, `+/−` lines, files changed, CI verdict, link) rendered in the originating Slack thread and the CLI. It is driven by a channel-agnostic `pr_card` event on the event bus — one event, rendered by every surface (see [Slack Integration → PR Cards](slack-integration.md) for the Slack/CLI rendering).
+
+- **Data**: `GitHubClient.getPRCardData(repo, prNumber)` does a lean PR fetch (state, `additions`/`deletions`/`changed_files`, head sha) plus a CI roll-up over `listPRChecks()` (`rollupCi` in `src/system/pr-card-format.ts`: any failure-class → `failed`; else any pending → `pending`; else `passed`; no checks → `none`). The snapshot shape is `PrCardData` (`src/types/task.ts`).
+- **Coalesced posting**: nothing is posted while the PM works. `Task.resurfacePrCards()` runs when the PM yields its turn (`complete()`/`stop()`); for any PR whose `prCardFingerprint` changed since its last card, it emits a `pr_card` `post` event and, on Slack, deletes the old card and reposts it at the bottom. The card ref + fingerprint live in `BranchState.pr_card`.
+- **In-place updates**: `events.ts: maybeRefreshPrCards()` runs on `check_suite`/`workflow_run` `completed` and `pull_request closed`, independent of the merge/checks routing (CI successes route to noop otherwise). It calls `Task.refreshPrCardInPlace()` / `refreshAllPrCards()`, which emit a `pr_card` `update` event and edit the Slack message in place (no resurface). No-ops until a card has been posted (the first card waits for the next turn-end).
+
 ## GitHub Event Flow Into Task Sessions
 
 When a GitHub event arrives for an existing task:
@@ -197,6 +205,7 @@ GitHub webhook
   -> connectors/github/events.ts: mountGitHubWebhook() handler
      -> verifyWebhookSignature() (HMAC-SHA256)
      -> ack 200, dispatch to handleGitHubWebhook()
+     -> maybeRefreshPrCards(): on CI-completed / PR-closed, update PR cards in place
   -> connectors/github/webhooks.ts: routeGitHubEvent()
     -> Discard own-bot events (sender === `${GITHUB_APP_SLUG}[bot]`)
     -> Extract branch -> extract task ID (or look up by PR number for issue_comment)
@@ -227,8 +236,9 @@ The system is designed so that the PM agent is only reactivated for GitHub event
 
 ## Relevant Source Files
 
-- `src/connectors/github/client.ts` -- `GitHubClient` class wrapping `@octokit/app`, `configureGitIdentity()`, `fetchOrigin()`, `getGitHubClient()` singleton; PR ops (`listPRs`, `getPRDetails`, `getPRStatus`, `getPRReviews`, `getReviewThreads`, `getPRComments`, `createPullRequest`, `updatePR`, `addPRComment`, `addReviewComment`, `replyToReviewComment`, `resolveReviewThread` (GraphQL), `requestReReview`, `mergePullRequest`, `closePullRequest`)
-- `src/connectors/github/events.ts` -- `mountGitHubWebhook()` Express handler, `handleGitHubWebhook()`, `handleExistingTaskDirect()` (with comment dedup)
+- `src/connectors/github/client.ts` -- `GitHubClient` class wrapping `@octokit/app`, `configureGitIdentity()`, `fetchOrigin()`, `getGitHubClient()` singleton; PR ops (`listPRs`, `getPRDetails`, `getPRStatus`, `getPRCardData`, `getPRReviews`, `getReviewThreads`, `getPRComments`, `createPullRequest`, `updatePR`, `addPRComment`, `addReviewComment`, `replyToReviewComment`, `resolveReviewThread` (GraphQL), `requestReReview`, `mergePullRequest`, `closePullRequest`)
+- `src/connectors/github/events.ts` -- `mountGitHubWebhook()` Express handler, `handleGitHubWebhook()`, `maybeRefreshPrCards()` (in-place PR-card updates), `handleExistingTaskDirect()` (with comment dedup)
+- `src/system/pr-card-format.ts` -- pure PR-card formatting shared by Slack + CLI: `rollupCi`, `prCardFingerprint`, `prCardStatsLine`, `prCardTitleLine`, `prCardStateIcon`
 - `src/connectors/github/webhooks.ts` -- HMAC-SHA256 signature verification, context extraction, deterministic routing (`routeGitHubEvent`, `determineRouteAction`), structured event formatting (`formatGitHubEvent`), merge check debouncing (`handleMergeCheckDirect`)
 - `src/connectors/github/merge.ts` -- Auto-merge logic (`checkAndMergeLinkedPRs`, `triggerMergeCheck`), linked PR collection from `branch_states`, PM notification on conflicts/merges
 - `src/connectors/github/repo-clone.ts` -- Shared-clone lifecycle (`setupSharedClone`, `removeClone`, `CloneCheckout`); each agent gets its own `git clone --shared` from the base repo
