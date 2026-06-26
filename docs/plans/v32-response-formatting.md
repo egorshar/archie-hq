@@ -22,7 +22,7 @@ Agreed behaviour (from discussion):
 ### Changes
 
 1. **`src/tasks/task.ts` — footer builder**
-   - Add a private `buildUserFooter(): string` returning `` `${taskId}` · ${pmModelLabel} `` (task id wrapped in backticks → inline code). One place; leave the bare `taskId` easy to wrap in a `<url|taskId>` link later — no link work now.
+   - Add a private `buildUserFooter(): string` returning `${taskId} · ${pmModelLabel}` as **plain text** (no backticks — the footer is plain grey on Slack and the CLI doesn't render markdown; matches the reference screenshot). One place; leave the bare `taskId` easy to wrap in a `<url|taskId>` link later — no link work now.
 
 2. **`src/connectors/slack/client.ts`**
    - Add an optional `footer?: string` param to `postSlackMessage(args)`. When present, render blocks as `[markdownBlock(text), { type: 'context', elements: [{ type: 'mrkdwn', text: footer }] }]`. Footer text is short/mention-restored, so no length assertion needed on it. Single render chokepoint for narrative messages; `context` blocks are new here but standard Slack shape.
@@ -127,7 +127,7 @@ Agreed behaviour (from discussion):
 | `'pr_card'` event type | `src/system/event-bus.ts` |
 | `PrCardState` on `BranchState` + `PrCardData` type | `src/types/task.ts` |
 | `getPRCardData` + CI roll-up | `src/connectors/github/client.ts` |
-| Async in-place card refresh on CI / PR-closed | `src/connectors/github/webhooks.ts`, `events.ts` |
+| Async in-place card refresh on CI / PR-closed | `src/connectors/github/events.ts` (routing-independent hook in the webhook dispatcher; `webhooks.ts` only exports a helper) |
 | CLI: render `pr_card` events (fold by cardId) + footer dim line | `src/cli/components/TaskDetail.tsx` |
 | Docs | `docs/architecture/slack-integration.md`, `docs/architecture/github-integration.md` |
 
@@ -144,7 +144,7 @@ Agreed behaviour (from discussion):
   - fingerprint equality / change detection.
   - `buildPrCardBlocks()` output for open / merged-failed-CI / no-checks cases.
 - **Slack (dry-run `setSlackDryRun` or a test workspace + test repo):**
-  1. Send any request → every PM reply carries the footer `` `task-…` · claude-opus-4-8 ``.
+  1. Send any request → every PM reply carries the footer `task-… · claude-opus-4-8` (plain grey text).
   2. Approve edit mode, open a PR → **no** card mid-turn; on PM turn-end a card appears under the PM's message with correct `+/−`, files, link, `🔀`.
   3. Push a commit, prompt again → on the next turn-end the old card is deleted and reposted at the bottom with updated stats.
   4. CI finishes → card updates **in place** to `✅`/`❌` (does not move).
