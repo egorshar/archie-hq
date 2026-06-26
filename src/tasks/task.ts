@@ -13,6 +13,7 @@ import { isPmAgent, isRepoAgent } from '../types/agent.js';
 import { modelDisplayLabel } from '../agents/model-label.js';
 import { prCardFingerprint, prCardTitleLine } from '../system/pr-card-format.js';
 import { getGitHubClient } from '../connectors/github/client.js';
+import { createKeyedLock } from '../system/keyed-lock.js';
 
 /**
  * Target for postToUser — controls where the message is delivered.
@@ -80,20 +81,9 @@ export const activeTasks = new Map<string, Task>();
  * its own Task instance from disk. Keyed by taskId (not instance), this lock
  * makes card operations run one at a time across instances, so the stored
  * `pr_card.slack.ts`/fingerprint can't be clobbered or leave a deleted message
- * referenced. Failures don't block the chain. The map entry is cleaned up when
- * it drains.
+ * referenced.
  */
-const cardLocks = new Map<string, Promise<void>>();
-function withCardLock(taskId: string, fn: () => Promise<void>): Promise<void> {
-  const prev = cardLocks.get(taskId) ?? Promise.resolve();
-  const run = prev.then(fn, fn); // run regardless of the previous op's outcome
-  const tracked = run.catch(() => {});
-  cardLocks.set(taskId, tracked);
-  void tracked.then(() => {
-    if (cardLocks.get(taskId) === tracked) cardLocks.delete(taskId);
-  });
-  return run;
-}
+const cardLock = createKeyedLock();
 
 // ---- Task class ----
 
@@ -657,7 +647,7 @@ export class Task {
   async resurfacePrCards(): Promise<void> {
     const client = getGitHubClient();
     if (!client) return;
-    await withCardLock(this.taskId, async () => {
+    await cardLock(this.taskId, async () => {
       const slack = this.resolveSlackChannel();
       let dirty = false;
       for (const { github, prNumber, state } of this.collectPrCards()) {
@@ -692,7 +682,7 @@ export class Task {
   async refreshPrCardInPlace(github: string, prNumber: number): Promise<void> {
     const client = getGitHubClient();
     if (!client) return;
-    await withCardLock(this.taskId, async () => {
+    await cardLock(this.taskId, async () => {
       // Re-resolve under the lock — a concurrent resurface may have just created
       // or replaced this card.
       const target = this.collectPrCards().find((c) => c.github === github && c.prNumber === prNumber);
