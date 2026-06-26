@@ -26,7 +26,6 @@ import http from 'node:http';
 import https from 'node:https';
 import { appendFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { WORKDIR } from './workdir.js';
 import { logger } from './logger.js';
 
 // ░░ MASTER SWITCH — set to false + redeploy to fully disable. ░░
@@ -41,6 +40,10 @@ const PROBE_HOST = '127.0.0.1';
 const UPSTREAM_BASE = process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com';
 const UPSTREAM = new URL(UPSTREAM_BASE);
 
+// Derive the workdir directly from the env (same source of truth as
+// system/workdir.ts) rather than importing it — keeps this debug module
+// self-contained and decoupled from modules that tests routinely mock.
+const WORKDIR = process.env.ARCHIE_WORKDIR || join(process.cwd(), 'workdir');
 const LOG_PATH = join(WORKDIR, 'context-probe.log');
 
 let listening = false;
