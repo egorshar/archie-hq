@@ -23,7 +23,7 @@ import {
   extractBranchFromPayload,
 } from './webhooks.js';
 import { Task } from '../../tasks/task.js';
-import { appendGitHubEvent, findTaskByPRNumber } from '../../tasks/persistence.js';
+import { appendGitHubEvent, findTaskByPRNumber, loadMetadata } from '../../tasks/persistence.js';
 import { AGENT_PROMPTS } from '../../agents/prompts.js';
 import { findBranchStateByPR } from './branch-state.js';
 import { extractTaskIdFromBranch } from './branch-naming.js';
@@ -162,6 +162,17 @@ async function maybeRefreshPrCards(
     taskId = (await findTaskByPRNumber(context.githubRepo, context.prNumber)) ?? undefined;
   }
   if (!taskId) return;
+
+  // Cheap pre-check: only the in-place path matters here, and it no-ops unless a
+  // card has already been posted. Skip the (heavy) Task.get for the common
+  // pre-first-card case by checking the on-disk metadata first.
+  const meta = await loadMetadata(taskId);
+  const hasCard = !!meta && Object.values(meta.repositories ?? {}).some(
+    (attachments) =>
+      Array.isArray(attachments) &&
+      attachments.some((a) => Object.values(a.branch_states ?? {}).some((s) => s.pr_card)),
+  );
+  if (!hasCard) return;
 
   let task: Task;
   try {
