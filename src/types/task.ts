@@ -137,13 +137,12 @@ export interface PrCardData {
   repo: string;          // 'owner/name'
   prNumber: number;
   url: string;           // html_url to the PR
-  title: string;
+  headRef: string;       // head branch name, shown in the card title
   state: 'open' | 'merged' | 'closed';
-  additions: number;
-  deletions: number;
-  changed_files: number;
   head_sha: string;
-  ci: 'none' | 'pending' | 'passed' | 'failed';
+  ci: 'none' | 'pending' | 'passed' | 'failed';  // rolled-up CI verdict
+  ciPassed: number;      // checks concluded OK
+  ciTotal: number;       // total checks (0 = no CI)
 }
 
 /**

@@ -8,7 +8,7 @@
 import { WebClient } from '@slack/web-api';
 import type { SlackThreadRef, SlackFile, SlackThread, SlackThreadMessage, SlackAuthor, SlackAttachment, SlackReaction } from '../../types/index.js';
 import type { PrCardData } from '../../types/task.js';
-import { prCardStateIcon, prCardStatsLine } from '../../system/pr-card-format.js';
+import { prCardSubtitle, SLACK_PR_CARD_EMOJI } from '../../system/pr-card-format.js';
 
 /**
  * Internal raw shape produced by `fetchThreadHistory`. Carries the unresolved
@@ -392,17 +392,19 @@ export async function deleteMessage(channel: string, ts: string): Promise<void> 
 }
 
 /**
- * Build the Block Kit blocks for a PR card: a title row with the repo `#number`
- * linked to the PR, and a grey context line of stats. Shares its text with the
- * CLI renderer via `pr-card-format` so both surfaces read identically.
+ * Build the Block Kit `card` block for a PR card: a title row (`#number` linked
+ * to the PR, then the head branch) and a subtitle (`repo · CI summary`, or the
+ * merged/closed state). Subtitle text is shared with the CLI via
+ * `pr-card-format`; here it uses Slack emoji shortcodes.
  */
 export function buildPrCardBlocks(card: PrCardData): unknown[] {
   const escape = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  const title =
-    `${prCardStateIcon(card.state)} <${card.url}|${escape(`${card.repo} #${card.prNumber}`)}> — ${escape(card.title)}`;
   return [
-    { type: 'section', text: { type: 'mrkdwn', text: title } },
-    { type: 'context', elements: [{ type: 'mrkdwn', text: prCardStatsLine(card) }] },
+    {
+      type: 'card',
+      title: { type: 'mrkdwn', text: `<${card.url}|#${card.prNumber}> ${escape(card.headRef)}` },
+      subtitle: { type: 'mrkdwn', text: prCardSubtitle(card, SLACK_PR_CARD_EMOJI) },
+    },
   ];
 }
 

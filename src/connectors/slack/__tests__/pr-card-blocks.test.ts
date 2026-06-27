@@ -1,6 +1,6 @@
 /**
- * Unit tests for buildPrCardBlocks — the Slack Block Kit rendering of a PR card
- * (linked title row + stats context line, with mrkdwn escaping).
+ * Unit tests for buildPrCardBlocks — the Slack `card` block: title row with the
+ * linked PR number + head branch, and a subtitle with the CI summary.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -8,52 +8,44 @@ import type { PrCardData } from '../../../types/task.js';
 import { buildPrCardBlocks } from '../client.js';
 
 const baseCard: PrCardData = {
-  repo: 'sweatco/archie-hq',
-  prNumber: 482,
-  url: 'https://github.com/sweatco/archie-hq/pull/482',
-  title: 'Add response footer + PR cards',
+  repo: 'sweatco/sweatcoin-mobile',
+  prNumber: 6543,
+  url: 'https://github.com/sweatco/sweatcoin-mobile/pull/6543',
+  headRef: 'fix/recovery-teardown-race',
   state: 'open',
-  additions: 214,
-  deletions: 38,
-  changed_files: 7,
   head_sha: 'abc1234',
-  ci: 'passed',
+  ci: 'pending',
+  ciPassed: 1,
+  ciTotal: 2,
 };
 
-// Narrow the unknown[] blocks to the two shapes we assert on.
-function parts(card: PrCardData) {
-  const blocks = buildPrCardBlocks(card) as Array<{
+function card(c: PrCardData) {
+  const blocks = buildPrCardBlocks(c) as Array<{
     type: string;
-    text?: { type: string; text: string };
-    elements?: Array<{ type: string; text: string }>;
+    title?: { type: string; text: string };
+    subtitle?: { type: string; text: string };
   }>;
-  return { title: blocks[0].text!.text, stats: blocks[1].elements![0].text, blocks };
+  return { block: blocks[0], title: blocks[0].title!.text, subtitle: blocks[0].subtitle!.text };
 }
 
 describe('buildPrCardBlocks', () => {
-  it('renders a section title with the repo #number linked to the PR, and a context stats line', () => {
-    const { title, stats, blocks } = parts(baseCard);
-    expect(blocks).toHaveLength(2);
-    expect(blocks[0].type).toBe('section');
-    expect(blocks[1].type).toBe('context');
-    expect(title).toBe('🔀 <https://github.com/sweatco/archie-hq/pull/482|sweatco/archie-hq #482> — Add response footer + PR cards');
-    expect(stats).toBe('+214 −38 · 7 files · ✅ checks passed');
+  it('emits a single card block with linked #number + branch title and a CI subtitle', () => {
+    const { block, title, subtitle } = card(baseCard);
+    expect(block.type).toBe('card');
+    expect(block.title!.type).toBe('mrkdwn');
+    expect(title).toBe('<https://github.com/sweatco/sweatcoin-mobile/pull/6543|#6543> fix/recovery-teardown-race');
+    expect(subtitle).toBe('sweatcoin-mobile · :hourglass: CI checks (1/2)');
   });
 
-  it('uses the merged icon and failed-CI label for a merged PR with failing checks', () => {
-    const { title, stats } = parts({ ...baseCard, state: 'merged', ci: 'failed' });
-    expect(title).toMatch(/^🟣 </);
-    expect(stats).toBe('+214 −38 · 7 files · ❌ checks failed');
+  it('uses Slack emoji shortcodes for passed / failed / merged', () => {
+    expect(card({ ...baseCard, ci: 'passed', ciPassed: 2 }).subtitle).toBe('sweatcoin-mobile · :white_check_mark: CI checks (2/2)');
+    expect(card({ ...baseCard, ci: 'failed', ciPassed: 1 }).subtitle).toBe('sweatcoin-mobile · :x: CI checks (1/2)');
+    expect(card({ ...baseCard, state: 'merged' }).subtitle).toBe('sweatcoin-mobile · :large_purple_circle: Merged');
   });
 
-  it('omits the CI segment when there are no checks', () => {
-    const { stats } = parts({ ...baseCard, ci: 'none' });
-    expect(stats).toBe('+214 −38 · 7 files');
-  });
-
-  it('escapes mrkdwn-special characters in the title', () => {
-    const { title } = parts({ ...baseCard, title: 'Fix <Foo> & <Bar>' });
-    expect(title).toContain('Fix &lt;Foo&gt; &amp; &lt;Bar&gt;');
-    expect(title).not.toContain('<Foo>');
+  it('escapes mrkdwn-special characters in the branch name', () => {
+    const { title } = card({ ...baseCard, headRef: 'feat/<x>&<y>' });
+    expect(title).toContain('feat/&lt;x&gt;&amp;&lt;y&gt;');
+    expect(title).not.toContain('<x>');
   });
 });

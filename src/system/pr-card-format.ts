@@ -1,74 +1,91 @@
 /**
  * Pure formatting helpers for PR cards.
  *
- * Dependency-free (only a type import) so every surface can share it: the Slack
- * block builder, the CLI renderer, and the GitHub client's CI roll-up. Keeping
- * the text identical here is what makes the card look the same on Slack and the
- * CLI.
+ * Dependency-free (only a type import) so every surface shares it: the Slack
+ * card builder, the CLI renderer, and the GitHub client's CI summary. Keeping
+ * the text identical here is what makes the card read the same on Slack and the
+ * CLI; emoji are supplied per-surface (Slack shortcodes vs. unicode) via the
+ * `PrCardEmoji` set.
  */
 
 import type { PrCardData } from '../types/task.js';
 
-/** Leading state glyph: open / merged / closed. */
-export function prCardStateIcon(state: PrCardData['state']): string {
-  switch (state) {
-    case 'merged': return '🟣';
-    case 'closed': return '🚫';
-    case 'open':
-    default: return '🔀';
-  }
+/** Emoji set for one surface. Slack uses `:shortcode:`; the CLI uses unicode. */
+export interface PrCardEmoji {
+  merged: string;
+  closed: string;
+  ciPending: string;
+  ciPassed: string;
+  ciFailed: string;
 }
 
-/** Trailing CI label, or null when the PR has no checks (omitted from the card). */
-export function ciLabel(ci: PrCardData['ci']): string | null {
-  switch (ci) {
-    case 'pending': return '⏳ checks running';
-    case 'passed': return '✅ checks passed';
-    case 'failed': return '❌ checks failed';
-    case 'none':
-    default: return null;
-  }
-}
+export const SLACK_PR_CARD_EMOJI: PrCardEmoji = {
+  merged: ':large_purple_circle:',
+  closed: ':no_entry_sign:',
+  ciPending: ':hourglass:',
+  ciPassed: ':white_check_mark:',
+  ciFailed: ':x:',
+};
 
-/** Plain title line: `🔀 owner/name #482 — Title`. Slack links the `#num` separately. */
-export function prCardTitleLine(card: PrCardData): string {
-  return `${prCardStateIcon(card.state)} ${card.repo} #${card.prNumber} — ${card.title}`;
-}
+export const CLI_PR_CARD_EMOJI: PrCardEmoji = {
+  merged: '🟣',
+  closed: '🚫',
+  ciPending: '⏳',
+  ciPassed: '✅',
+  ciFailed: '❌',
+};
 
-/** Stats line: `+214 −38 · 7 files · ✅ checks passed` (CI segment omitted when none). */
-export function prCardStatsLine(card: PrCardData): string {
-  const parts = [
-    `+${card.additions} −${card.deletions}`,
-    `${card.changed_files} ${card.changed_files === 1 ? 'file' : 'files'}`,
-  ];
-  const ci = ciLabel(card.ci);
-  if (ci) parts.push(ci);
-  return parts.join(' · ');
+/** Plain title line: `#482 fix/recovery-teardown-race`. Slack links the `#num`. */
+export function prCardTitlePlain(card: PrCardData): string {
+  return `#${card.prNumber} ${card.headRef}`;
 }
 
 /**
- * Channel-agnostic change-detection key. When this differs from the last posted
- * card, the card is considered changed (resurface on PM turn-end / update in
- * place on a webhook).
+ * Subtitle: `<repo> · <status>`. For an open PR the status is the CI summary
+ * (`:hourglass: CI checks (1/2)`), omitted when the PR has no checks; a
+ * merged/closed PR shows its final state instead.
+ */
+export function prCardSubtitle(card: PrCardData, emoji: PrCardEmoji): string {
+  const repo = card.repo.split('/').pop() || card.repo;
+  if (card.state === 'merged') return `${repo} · ${emoji.merged} Merged`;
+  if (card.state === 'closed') return `${repo} · ${emoji.closed} Closed`;
+  if (card.ciTotal > 0) {
+    const icon = card.ci === 'passed' ? emoji.ciPassed : card.ci === 'failed' ? emoji.ciFailed : emoji.ciPending;
+    return `${repo} · ${icon} CI checks (${card.ciPassed}/${card.ciTotal})`;
+  }
+  return repo;
+}
+
+/**
+ * Channel-agnostic change-detection key. Deliberately excludes PR title and
+ * description so editing those never moves/refreshes the card; includes the
+ * head branch, head sha (new commits), state, and the CI verdict + counts (so
+ * each check completing flips it and the card updates).
  */
 export function prCardFingerprint(card: PrCardData): string {
-  return [card.state, card.additions, card.deletions, card.changed_files, card.head_sha, card.ci].join('|');
+  return [card.state, card.headRef, card.head_sha, card.ci, card.ciPassed, card.ciTotal].join('|');
 }
 
 /**
- * Roll a list of checks up to a single CI verdict for the card.
- * Failure-class beats pending beats passed; no checks → `none`.
- * Accepts the minimal `{ status, conclusion }` shape so this stays free of
- * GitHub-client types.
+ * Summarise a list of checks into a verdict plus counts.
+ * Failure-class beats pending beats passed; `passed` counts checks that
+ * concluded OK (success/skipped/neutral), so `passed/total` reads as a progress
+ * fraction. Accepts the minimal `{ status, conclusion }` shape.
  */
-export function rollupCi(
+export function summarizeCi(
   entries: ReadonlyArray<{ status: string; conclusion: string | null }>,
-): PrCardData['ci'] {
-  if (entries.length === 0) return 'none';
+): { state: PrCardData['ci']; passed: number; total: number } {
+  const total = entries.length;
+  if (total === 0) return { state: 'none', passed: 0, total: 0 };
   const isFailure = (c: string | null) => c === 'failure' || c === 'timed_out' || c === 'action_required';
-  const isPending = (e: { status: string; conclusion: string | null }) =>
-    e.status !== 'completed' || e.conclusion === null;
-  if (entries.some((e) => isFailure(e.conclusion))) return 'failed';
-  if (entries.some(isPending)) return 'pending';
-  return 'passed';
+  let failed = 0;
+  let pending = 0;
+  let passed = 0;
+  for (const e of entries) {
+    if (isFailure(e.conclusion)) failed++;
+    else if (e.status !== 'completed' || e.conclusion === null) pending++;
+    else passed++;
+  }
+  const state: PrCardData['ci'] = failed > 0 ? 'failed' : pending > 0 ? 'pending' : 'passed';
+  return { state, passed, total };
 }

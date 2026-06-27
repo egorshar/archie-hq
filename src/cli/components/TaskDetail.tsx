@@ -4,29 +4,30 @@ import Spinner from 'ink-spinner';
 import { ScrollView, type ScrollViewRef } from 'ink-scroll-view';
 import { fetchTaskDetail, fetchTaskEvents, sendMessage, sendApproval } from '../api.js';
 import { MessageInput } from './MessageInput.js';
-import { prCardStateIcon, prCardStatsLine } from '../../system/pr-card-format.js';
+import type { PrCardData } from '../../types/task.js';
+import { prCardSubtitle, CLI_PR_CARD_EMOJI } from '../../system/pr-card-format.js';
 
 /**
- * Render a PR card from a `pr_card` event's data. Two lines: a colored title
- * row and a dimmed stats + URL row — the same content shown on Slack.
+ * Render a PR card from a `pr_card` event's data. Two lines: a colored title row
+ * (`#num branch`) and a dimmed subtitle (`repo · CI summary`) + URL — the same
+ * content shown on Slack, with unicode emoji instead of Slack shortcodes.
  */
 function renderPrCard(d: Record<string, unknown>): React.ReactNode {
-  const card = {
+  const card: PrCardData = {
     repo: String(d.repo ?? ''),
     prNumber: Number(d.prNumber ?? 0),
     url: String(d.url ?? ''),
-    title: String(d.title ?? ''),
-    state: (d.state as 'open' | 'merged' | 'closed') ?? 'open',
-    additions: Number(d.additions ?? 0),
-    deletions: Number(d.deletions ?? 0),
-    changed_files: Number(d.changed_files ?? 0),
+    headRef: String(d.headRef ?? ''),
+    state: (d.state as PrCardData['state']) ?? 'open',
     head_sha: String(d.head_sha ?? ''),
-    ci: (d.ci as 'none' | 'pending' | 'passed' | 'failed') ?? 'none',
+    ci: (d.ci as PrCardData['ci']) ?? 'none',
+    ciPassed: Number(d.ciPassed ?? 0),
+    ciTotal: Number(d.ciTotal ?? 0),
   };
   const color = card.state === 'merged' ? 'magenta' : card.state === 'closed' ? 'red' : 'cyan';
-  const title = `${prCardStateIcon(card.state)} ${card.repo} #${card.prNumber} — ${card.title}`;
-  const stats = `${prCardStatsLine(card)} · ${card.url}`;
-  return <Text color={color}>{title}{'\n'}<Text dimColor>{stats}</Text></Text>;
+  const title = `#${card.prNumber} ${card.headRef}`;
+  const subtitle = `${prCardSubtitle(card, CLI_PR_CARD_EMOJI)} · ${card.url}`;
+  return <Text color={color}>{title}{'\n'}<Text dimColor>{subtitle}</Text></Text>;
 }
 
 /**

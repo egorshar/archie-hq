@@ -20,7 +20,7 @@ import type {
   PRCheckEntry,
 } from '../../agents/tools.js';
 import type { PrCardData } from '../../types/task.js';
-import { rollupCi } from '../../system/pr-card-format.js';
+import { summarizeCi } from '../../system/pr-card-format.js';
 import { logger } from '../../system/logger.js';
 
 const execAsync = promisify(exec);
@@ -420,10 +420,9 @@ export class GitHubClient {
   }
 
   /**
-   * Fetch the compact data shown on a PR card: state, diff stats, head sha, and
-   * a rolled-up CI verdict. Lean by design — uses the PR endpoint (which carries
-   * additions/deletions/changed_files) plus `listPRChecks` for CI, and avoids
-   * `getPRDetails` (which downloads the full diff).
+   * Fetch the compact data shown on a PR card: head branch, state, head sha, and
+   * a CI summary (verdict + passed/total counts). Lean by design — the PR
+   * endpoint plus `listPRChecks` for CI; avoids `getPRDetails` (full diff).
    */
   async getPRCardData(githubRepo: string, prNumber: number): Promise<PrCardData> {
     const octokit = await this.getOctokit();
@@ -435,10 +434,10 @@ export class GitHubClient {
     const pr = prResponse.data;
     const state: PrCardData['state'] = pr.merged ? 'merged' : (pr.state as 'open' | 'closed');
 
-    let ci: PrCardData['ci'] = 'none';
+    let ci = { state: 'none' as PrCardData['ci'], passed: 0, total: 0 };
     try {
       const checks = await this.listPRChecks(githubRepo, prNumber);
-      ci = rollupCi(checks.entries);
+      ci = summarizeCi(checks.entries);
     } catch (error) {
       // CI is best-effort — a card without a verdict is better than no card.
       logger.warn('GitHub', `Failed to fetch checks for PR #${prNumber} card`, error);
@@ -448,13 +447,12 @@ export class GitHubClient {
       repo: githubRepo,
       prNumber,
       url: pr.html_url,
-      title: pr.title,
+      headRef: pr.head.ref,
       state,
-      additions: pr.additions ?? 0,
-      deletions: pr.deletions ?? 0,
-      changed_files: pr.changed_files ?? 0,
       head_sha: pr.head.sha,
-      ci,
+      ci: ci.state,
+      ciPassed: ci.passed,
+      ciTotal: ci.total,
     };
   }
 

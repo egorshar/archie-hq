@@ -11,7 +11,7 @@ import { CLI_CHANNEL_KEY } from '../types/task.js';
 import type { AgentDef } from '../types/agent.js';
 import { isPmAgent, isRepoAgent } from '../types/agent.js';
 import { modelDisplayLabel, resolveAgentModel } from '../agents/model-label.js';
-import { prCardFingerprint, prCardTitleLine } from '../system/pr-card-format.js';
+import { prCardFingerprint, prCardTitlePlain } from '../system/pr-card-format.js';
 import { getGitHubClient } from '../connectors/github/client.js';
 import { createKeyedLock } from '../system/keyed-lock.js';
 
@@ -678,7 +678,7 @@ export class Task {
           let slackRef = state.pr_card?.slack;
           if (slack) {
             if (slackRef?.ts) await deleteMessage(slackRef.channel_id, slackRef.ts);
-            const ts = await postInteractiveToThread(slack.channel_id, slack.thread_id, prCardTitleLine(card), buildPrCardBlocks(card));
+            const ts = await postInteractiveToThread(slack.channel_id, slack.thread_id, prCardTitlePlain(card), buildPrCardBlocks(card));
             slackRef = ts ? { ts, channel_id: slack.channel_id, thread_id: slack.thread_id } : undefined;
           }
           emitEvent('pr_card', this.taskId, { action: 'post', cardId: `${github}#${prNumber}`, ...card });
@@ -711,7 +711,7 @@ export class Task {
         if (target.state.pr_card.fingerprint === fingerprint) return; // nothing changed
         const slackRef = target.state.pr_card.slack;
         if (slackRef?.ts) {
-          await updateMessage(slackRef.channel_id, slackRef.ts, prCardTitleLine(card), buildPrCardBlocks(card));
+          await updateMessage(slackRef.channel_id, slackRef.ts, prCardTitlePlain(card), buildPrCardBlocks(card));
         }
         emitEvent('pr_card', this.taskId, { action: 'update', cardId: `${github}#${prNumber}`, ...card });
         target.state.pr_card.fingerprint = fingerprint;

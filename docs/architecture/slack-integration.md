@@ -167,11 +167,12 @@ The task id is plain text today; it is the single render site to later wrap in a
 
 ## PR Cards
 
-When a repo agent opens a PR, Archie posts a compact, self-updating **PR card** so it's obvious a PR exists, how big the change is, its state, and CI result. The card is driven by a channel-agnostic `pr_card` event (see [GitHub Integration → PR Cards](github-integration.md)); Slack is one renderer:
+When a repo agent opens a PR, Archie posts a compact, self-updating **PR card** so it's obvious a PR exists, its state, and CI progress. The card is driven by a channel-agnostic `pr_card` event (see [GitHub Integration → PR Cards](github-integration.md)); Slack is one renderer:
 
-- `Task.resurfacePrCards()` builds the card via `buildPrCardBlocks` (a `section` title row with the repo `#number` linked to the PR + a `context` stats line) and posts it with `postInteractiveToThread` into the default thread. The posted message `ts` is stored in `BranchState.pr_card.slack`.
-- On the next PM turn-end, if the PR changed, the old card is **deleted** (`deleteMessage`) and reposted at the bottom so it sits under the PM's final message.
-- Async GitHub webhooks (CI conclusion, merge/close) call `Task.refreshPrCardInPlace`, which **edits** the existing message via `updateMessage` (no resurface — the card stays put).
+- `buildPrCardBlocks` emits a Block Kit **`card`** block: a title row (`<url|#number> head-branch`) and a subtitle (`repo · CI summary`), e.g. `sweatcoin-mobile · :hourglass: CI checks (1/2)`. A merged/closed PR shows its final state in the subtitle instead of CI. Subtitle text is shared with the CLI via `pr-card-format`; Slack uses emoji shortcodes (`:hourglass:`/`:white_check_mark:`/`:x:`/`:large_purple_circle:`).
+- `Task.resurfacePrCards()` posts the card with `postInteractiveToThread` into the default thread and stores the message `ts` in `BranchState.pr_card.slack`. It runs **eagerly from `report_completion`** (right after the final message, so the card appears instantly rather than at deferred teardown) and again from `complete()`/`stop()` as an idempotent safety net.
+- When the PR changed since its last card, the old card is **deleted** (`deleteMessage`) and reposted at the bottom so it sits under the PM's final message.
+- Async GitHub webhooks (CI conclusion, merge/close) call `Task.refreshPrCardInPlace`, which **edits** the existing message via `updateMessage` (no resurface — the card stays put). The fingerprint excludes PR title/description, so editing those never moves or refreshes the card.
 
 ## Live Status Indicator
 
