@@ -10,7 +10,7 @@ import type { AgentName, SlackAuthor, SlackChannel, SlackThread, SlackReaction, 
 import { CLI_CHANNEL_KEY } from '../types/task.js';
 import type { AgentDef } from '../types/agent.js';
 import { isPmAgent, isRepoAgent } from '../types/agent.js';
-import { modelDisplayLabel } from '../agents/model-label.js';
+import { modelDisplayLabel, resolveAgentModel } from '../agents/model-label.js';
 import { prCardFingerprint, prCardTitleLine } from '../system/pr-card-format.js';
 import { getGitHubClient } from '../connectors/github/client.js';
 import { createKeyedLock } from '../system/keyed-lock.js';
@@ -599,12 +599,30 @@ export class Task {
    * PM agent's configured model, mirroring spawn's `def.model || 'opus'` default.
    */
   private buildUserFooter(): string {
-    // Read from the team roster (always populated) rather than the spawned
-    // processes, so the model is correct even for messages posted before the PM
-    // process exists (e.g. a system-sent timeout notice).
+    const labels = this.collectModelsUsed().map(modelDisplayLabel);
+    return `${this.taskId} · ${labels.join(' + ')}`;
+  }
+
+  /**
+   * The distinct models the task has actually used, PM first. Reads the PM from
+   * the team roster (always present, so the footer is right even before the PM
+   * process spawns) and every spawned agent's resolved model, deduped in order.
+   * As specialists join, the footer grows (e.g. `Opus 4.8 + Sonnet 4.6 (1M)`).
+   */
+  private collectModelsUsed(): string[] {
+    const raw: string[] = [];
     const pmDef = this.team.find((d) => isPmAgent(d));
-    const model = pmDef?.model || 'opus';
-    return `${this.taskId} · ${modelDisplayLabel(model)}`;
+    if (pmDef) raw.push(resolveAgentModel(pmDef));
+    for (const a of this.agentProcesses.values()) raw.push(resolveAgentModel(a.def));
+    if (raw.length === 0) raw.push('opus');
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const m of raw) {
+      if (seen.has(m)) continue;
+      seen.add(m);
+      out.push(m);
+    }
+    return out;
   }
 
   // ---- PR cards ----------------------------------------------------------

@@ -158,7 +158,7 @@ There is no `post_to_slack` MCP tool and no event-bus subscription that ferries 
 
 ## Message Footer
 
-Every user-facing message carries a small grey footer: `task-<id> · <pm-model>` (e.g. `task-20260626-2130-a3f9k2 · claude-opus-4-8`). It is built once per send by `Task.buildUserFooter()` (task id + the PM agent's resolved model via `modelDisplayLabel` in `src/agents/model-label.ts`, which preserves the `[1m]` 1M-context marker) and delivered to both surfaces:
+Every user-facing message carries a small grey footer: `task-<id> · <models>`, where `<models>` is the **distinct set of models the task has actually used** — PM first, then each spawned specialist — joined with ` + ` (e.g. `task-20260626-2130-a3f9k2 · Opus 4.8 + Sonnet 4.6 (1M)`). As more agents join, the set grows. It is built once per send by `Task.buildUserFooter()` → `collectModelsUsed()` (each agent's model resolved via `resolveAgentModel`, shared with `spawn.ts` so the labels can't drift), then beautified by `modelDisplayLabel` in `src/agents/model-label.ts` (drops the `claude-` prefix, capitalises the family, dots the version, renders the `[1m]` 1M-context window as `(1M)`). Delivered to both surfaces:
 
 - **Slack** — `postToUser` passes it as `postSlackMessage({ …, footer })`, which appends a trailing `context` block beneath the `markdown` block.
 - **CLI** — `logOutgoingMessage` includes `footer` in the `message` event data; `TaskDetail.tsx` renders it dimmed under the message text. Slack ignores the event field (it uses the context block).
