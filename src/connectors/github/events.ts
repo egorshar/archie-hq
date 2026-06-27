@@ -23,7 +23,7 @@ import {
   extractBranchFromPayload,
 } from './webhooks.js';
 import { Task } from '../../tasks/task.js';
-import { appendGitHubEvent, findTaskByPRNumber, findTaskByBranch, loadMetadata } from '../../tasks/persistence.js';
+import { appendGitHubEvent, findTaskByPRNumber, findTaskByBranch } from '../../tasks/persistence.js';
 import { AGENT_PROMPTS } from '../../agents/prompts.js';
 import { findBranchStateByPR } from './branch-state.js';
 import { extractTaskIdFromBranch } from './branch-naming.js';
@@ -172,15 +172,11 @@ async function resolveCardTask(
     return null;
   }
 
-  // Cheap pre-check: skip the (heavy) Task.get unless a card has been posted.
-  const meta = await loadMetadata(taskId);
-  const hasCard = !!meta && Object.values(meta.repositories ?? {}).some(
-    (attachments) =>
-      Array.isArray(attachments) &&
-      attachments.some((a) => Object.values(a.branch_states ?? {}).some((s) => s.pr_card)),
-  );
-  if (!hasCard) return null;
-
+  // No disk pre-check here: it would read stale on-disk metadata while Task.get
+  // returns the live in-memory instance for an active task, so a card present in
+  // memory (debounced save not yet flushed) could be wrongly skipped. The
+  // refresh methods self-gate on the authoritative instance and no-op cheaply
+  // when there's no card; the CI path is debounced, so the Task.get cost is fine.
   try {
     return await Task.get(taskId);
   } catch {

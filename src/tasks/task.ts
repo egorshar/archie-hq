@@ -704,12 +704,19 @@ export class Task {
       // Re-resolve under the lock — a concurrent resurface may have just created
       // or replaced this card.
       const target = this.collectPrCards().find((c) => c.github === github && c.prNumber === prNumber);
-      if (!target || !target.state.pr_card) return; // no card to update yet
+      if (!target || !target.state.pr_card) {
+        logger.system(`PR card ${github}#${prNumber}: no card posted yet — skipping in-place update`);
+        return;
+      }
       try {
         const card = await client.getPRCardData(github, prNumber);
         const fingerprint = prCardFingerprint(card);
-        if (target.state.pr_card.fingerprint === fingerprint) return; // nothing changed
+        if (target.state.pr_card.fingerprint === fingerprint) {
+          logger.system(`PR card ${github}#${prNumber}: unchanged (${fingerprint}) — no update`);
+          return;
+        }
         const slackRef = target.state.pr_card.slack;
+        logger.system(`PR card ${github}#${prNumber}: updating in place (${target.state.pr_card.fingerprint} → ${fingerprint}), slack=${slackRef?.ts ? 'yes' : 'no'}`);
         if (slackRef?.ts) {
           await updateMessage(slackRef.channel_id, slackRef.ts, prCardTitlePlain(card), buildPrCardBlocks(card));
         }
