@@ -704,6 +704,21 @@ Shared folder: ${sharedPath} [READ-ONLY]
       }
     } finally {
       handle.isRunning = false;
+      // Backstop for a deferred teardown that the `result` path above never got
+      // to run — e.g. the agent crashed after report_completion/request_edit_mode
+      // deferred it. Without this the flag stays set, and the idle-check's
+      // pending-teardown guard would then suppress recovery forever, hanging the
+      // task until the wall-clock timeout. Safe here: the turn is over and the
+      // stream is closed (the only reason teardown was deferred), and complete()/
+      // stop() are idempotent. The result path clears the flag, so this is a
+      // no-op on every normal exit.
+      if (agent.pendingTeardown) {
+        const teardown = agent.pendingTeardown;
+        agent.clearPendingTeardown();
+        await teardown().catch((err) =>
+          logger.error(def.id, 'Error during deferred teardown (exit)', err)
+        );
+      }
     }
   })();
 
