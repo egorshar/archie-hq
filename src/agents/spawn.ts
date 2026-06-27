@@ -504,6 +504,13 @@ Shared folder: ${sharedPath} [READ-ONLY]
 
   // ---- Build query options (session ID may change on retry) ----
 
+  // One controller per spawn, shared across retry attempts. task.complete()/stop()
+  // calls handle.abort() to hard-kill a subprocess that is mid-turn when its queue
+  // is stopped — otherwise it loops on "Stream closed" control requests. The
+  // control channel (query.interrupt) is dead at that point, so abort is the only
+  // path that reaches the subprocess.
+  const abortController = new AbortController();
+
   const buildQueryOptions = (sessionId?: string) => ({
     model: model as any,
     systemPrompt,
@@ -533,6 +540,7 @@ Shared folder: ${sharedPath} [READ-ONLY]
       ...(def.pluginDataPath ? { CLAUDE_PLUGIN_DATA: def.pluginDataPath } : {}),
     },
     resume: sessionId,
+    abortController,
     maxTurns: def.maxTurns ?? 100,
     ...(def.effort ? { effort: def.effort } : {}),
     permissionMode: 'bypassPermissions' as const,
@@ -578,6 +586,7 @@ Shared folder: ${sharedPath} [READ-ONLY]
   const handle = {
     running: Promise.resolve() as Promise<void>,
     isRunning: true,
+    abort: () => abortController.abort(),
   };
 
   handle.running = (async () => {

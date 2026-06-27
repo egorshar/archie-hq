@@ -705,9 +705,17 @@ export class Task {
     activeTasks.delete(this.taskId);
     this.clearTaskTimeout();
 
-    // Stop all queues — agent:inactive emitted by Stop hook / crash handler
+    // Stop all queues. A parked or just-finished agent (session inactive) exits
+    // gracefully on its next queue pull — the resume-safe path the deferred
+    // teardown relies on (see spawn.ts: never .return() the generator), so do
+    // NOT abort it. But an agent still mid-turn keeps generating and hits
+    // "Stream closed" on every tool/hook control request, looping until maxTurns
+    // — stopping its queue can't end it, so hard-abort those. agent:inactive is
+    // emitted by the Stop hook / crash handler (or the aborted loop exiting).
     for (const a of this.agentProcesses.values()) {
+      const midTurn = a.session.active;
       a.queue.stop();
+      if (midTurn) a.handle?.abort();
     }
 
     // Clean up clones to free disk space (only when not in edit mode)
@@ -738,9 +746,17 @@ export class Task {
     activeTasks.delete(this.taskId);
     this.clearTaskTimeout();
 
-    // Stop all queues — agent:inactive emitted by Stop hook / crash handler
+    // Stop all queues. A parked or just-finished agent (session inactive) exits
+    // gracefully on its next queue pull — the resume-safe path the deferred
+    // teardown relies on (see spawn.ts: never .return() the generator), so do
+    // NOT abort it. But an agent still mid-turn keeps generating and hits
+    // "Stream closed" on every tool/hook control request, looping until maxTurns
+    // — stopping its queue can't end it, so hard-abort those. agent:inactive is
+    // emitted by the Stop hook / crash handler (or the aborted loop exiting).
     for (const a of this.agentProcesses.values()) {
+      const midTurn = a.session.active;
       a.queue.stop();
+      if (midTurn) a.handle?.abort();
     }
 
     // Clean up clones to free disk space (only when not in edit mode).

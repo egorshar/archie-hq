@@ -78,6 +78,15 @@ export function scheduleIdleCheck(task: Task): void {
   setTimeout(async () => {
     if (!task.isActive || getIsShuttingDown()) return;
 
+    // A pending teardown means a tool (report_completion / request_edit_mode /
+    // research-budget) already called task.complete()/stop(), deferred to this
+    // turn's SDK `result` event. The Stop hook that arms this 3s check fires
+    // *before* that result event, and the gap can exceed 3s — so without this
+    // guard the check fires first, sees isActive still true with all agents
+    // parked, and "recovers" an agent that complete() then orphans mid-turn
+    // (→ "Stream closed" loop). The task is winding down, not stalled.
+    if ([...task.agentProcesses.values()].some((a) => a.pendingTeardown)) return;
+
     const allInactive = checkAllAgentsInactive(task);
     if (allInactive) {
       await triggerRecovery(task);
