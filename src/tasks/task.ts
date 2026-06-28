@@ -1056,6 +1056,11 @@ export class Task {
     const name = agentName as AgentName;
     const agent = this.agentProcesses.get(name);
 
+    // Note: an agent parked on a background task is allowed to go idle here — it
+    // isn't actively working, so we don't fake it as active. Recovery is still
+    // held off while a task is pending via idleDecision's backgroundTasks check;
+    // the ⏳ background-task entry is the in-progress indication.
+
     // Idempotency: skip if agent is already in the requested state (no sessionId update needed)
     if (agent && agent.session.active === active && !sessionId) return;
 

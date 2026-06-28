@@ -41,6 +41,7 @@ import { setupSharedClone, cloneExists, type CloneCheckout } from '../connectors
 import { configureGitIdentity } from '../connectors/github/client.js';
 import { loadPrompt } from '../utils/prompt-loader.js';
 import { processAgentEventForLogging, logger } from '../system/logger.js';
+import { emitEvent } from '../system/event-bus.js';
 import { getProbeBaseUrl } from '../system/context-probe.js';
 import { buildSandboxConfig, createFilesystemGuardHooks, type SandboxOptions } from './sandbox.js';
 import { applyOAuthBindings } from '../system/oauth/inject.js';
@@ -645,6 +646,37 @@ Shared folder: ${sharedPath} [READ-ONLY]
                 }
               }
             }
+
+            // Background tasks: the SDK runs a backgrounded Bash wait / subagent
+            // out-of-band and emits task_started → task_notification. archie drives
+            // agents only through its own queue, so a settle wakes nothing on its
+            // own. Track in-flight tasks (so the idle-check treats the agent as busy,
+            // not stalled — no spurious recovery) and re-engage the agent on settle.
+            if (event.type === 'system' && event.subtype === 'task_started') {
+              agent.backgroundTasks.add(event.task_id);
+              logger.agent(def.id, `background task started — ${event.description}`);
+              // Chat/CLI: one transcript entry per task, keyed by task_id — rendered
+              // as ⏳ running, then folded to ✅/❌ when the matching 'end' arrives.
+              emitEvent('agent:bg_task', taskId, {
+                action: 'start', key: event.task_id, description: event.description,
+              }, def.id);
+            } else if (event.type === 'system' && event.subtype === 'task_notification') {
+              agent.backgroundTasks.delete(event.task_id);
+              logger.agent(def.id, `background task ${event.status} — ${event.summary}`);
+              emitEvent('agent:bg_task', taskId, {
+                action: 'end', key: event.task_id, status: event.status, summary: event.summary,
+              }, def.id);
+              if (!agent.queue.isStopped()) {
+                agent.queue.addMessage(
+                  `Background task ${event.status}: ${event.summary}. ` +
+                  `Re-check what you were waiting on and continue — then report or end your turn.`,
+                );
+                // Enqueue-marks-active: keep the agent busy with no gap before the
+                // SDK starts the resumed turn, so the idle-check can't park it.
+                task.updateAgentState(def.id, true);
+              }
+            }
+
             processAgentEventForLogging(
               event,
               def.id,
@@ -704,6 +736,9 @@ Shared folder: ${sharedPath} [READ-ONLY]
       }
     } finally {
       handle.isRunning = false;
+      // A dead subprocess can't settle these — drain so they don't keep the agent
+      // "busy" forever and wedge the idle-check.
+      agent.backgroundTasks.clear();
       // Backstop for a deferred teardown that the `result` path above never got
       // to run — e.g. the agent crashed after report_completion/request_edit_mode
       // deferred it. Without this the flag stays set, and the idle-check's
