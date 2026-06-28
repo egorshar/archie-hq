@@ -231,7 +231,21 @@ export class Task {
     // (one object per repo agent, keyed by short name). Now it's
     // Record<agentId, AttachedRepo[]> (per-agent list of attached repos).
     // Detect by structural check: any value that's NOT an array is old shape.
-    migrateRepositoriesShape(metadata);
+    const didMigrate = migrateRepositoriesShape(metadata);
+
+    // Persist the upgrade once. The migration is otherwise in-memory, so a
+    // terminal task that's only ever *read* (webhook resolution, comment-dedup
+    // skip) would re-migrate on every load forever. Writing it back here means the
+    // next load hits the fast path — and it locks in the shape now, while every
+    // repo agent still resolves (a later plugin removal would otherwise make the
+    // migration drop those entries). Only an active task ever re-saves on its own.
+    if (didMigrate) {
+      await writeFile(getMetadataPath(taskId), JSON.stringify(metadata, null, 2));
+      // Log once, here — the migration persisted, so it won't run again. (The
+      // migrate fn stays silent: it runs on every load, incl. read-only
+      // findTaskByPRNumber, so logging there would spam.)
+      logger.system(`[migrate] task ${taskId}: upgraded repositories to v30 (${Object.keys(metadata.repositories).join(', ')})`);
+    }
 
     const team = scanAgentDefs();
     // Rehydrate PM-spawned repo agents from their persisted specs and merge
@@ -1392,9 +1406,9 @@ export function getTask(taskId: string): Task | undefined {
  *
  * Exported for testing — exercised in the normal flow only via `Task.get`.
  */
-export function migrateRepositoriesShape(metadata: TaskMetadata): void {
+export function migrateRepositoriesShape(metadata: TaskMetadata): boolean {
   const repos = metadata.repositories;
-  if (!repos || typeof repos !== 'object') return;
+  if (!repos || typeof repos !== 'object') return false;
 
   // Fast path: nothing to migrate if every entry is already an array.
   let needsMigration = false;
@@ -1404,7 +1418,7 @@ export function migrateRepositoriesShape(metadata: TaskMetadata): void {
       break;
     }
   }
-  if (!needsMigration) return;
+  if (!needsMigration) return false;
 
   const migrated: Record<string, AttachedRepo[]> = {};
   for (const [key, value] of Object.entries(repos)) {
@@ -1467,11 +1481,11 @@ export function migrateRepositoriesShape(metadata: TaskMetadata): void {
     const list = (migrated[agentId] ??= []);
     if (!list.some((a) => a.github === attached.github)) {
       list.push(attached);
-      logger.system(`[migrate] task ${metadata.task_id}: ${key} -> ${agentId}/${primary}`);
     } else {
       logger.warn('task', `[migrate] task ${metadata.task_id}: skipping legacy ${key} — ${agentId} already has ${attached.github}`);
     }
   }
 
   metadata.repositories = migrated;
+  return true;
 }
