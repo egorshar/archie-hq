@@ -218,7 +218,14 @@ export function mountApiRoutes(app: Application): void {
   router.post('/tasks/:id/approve', async (req: Request, res: Response) => {
     try {
       const taskId = req.params.id as string;
-      const { type, approve } = req.body as { type: string; approve: boolean };
+      const { type, approve, approver } = req.body as {
+        type: string;
+        approve: boolean;
+        // Optional resolved human (id/name/email) to author commits as. CLI/API
+        // callers have no Slack identity by default; when omitted, commits stay
+        // bot-authored.
+        approver?: { id: string; name: string; email?: string };
+      };
 
       if (!type || typeof approve !== 'boolean') {
         res.status(400).json({ error: 'type and approve are required' });
@@ -229,7 +236,7 @@ export function mountApiRoutes(app: Application): void {
 
       if (type === 'edit_mode') {
         if (approve) {
-          await task.handleEditModeApproval();
+          await task.handleEditModeApproval(approver);
         } else {
           await task.handleEditModeDenial();
         }

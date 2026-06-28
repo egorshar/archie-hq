@@ -551,6 +551,18 @@ Shared folder: ${sharedPath} [READ-ONLY]
       } : {}),
       ...(def.pluginPath ? { CLAUDE_PLUGIN_ROOT: def.pluginPath } : {}),
       ...(def.pluginDataPath ? { CLAUDE_PLUGIN_DATA: def.pluginDataPath } : {}),
+      // Author this repo agent's commits as the human who approved edit mode.
+      // GIT_AUTHOR_* sets only the author; the committer keeps falling back to
+      // the GitHub App bot configured via configureGitIdentity(), so Archie
+      // stays on every commit while `git blame` points to a person. The email
+      // lets GitHub link the commit to their profile; the noreply fallback still
+      // surfaces the name before the Slack users:read.email scope is granted.
+      ...(isRepoAgent(def) && metadata.edit_approved_by ? {
+        GIT_AUTHOR_NAME: metadata.edit_approved_by.name,
+        GIT_AUTHOR_EMAIL:
+          metadata.edit_approved_by.email ||
+          `${metadata.edit_approved_by.id}@users.noreply.archie.invalid`,
+      } : {}),
     },
     resume: sessionId,
     abortController,

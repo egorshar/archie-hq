@@ -233,7 +233,19 @@ export async function mountSlackApp(
       }
 
       const task = await Task.get(taskId);
-      await task.handleEditModeApproval();
+      // Resolve the approver to a name (+email when the users:read.email scope is
+      // granted) so repo agents can author their commits as this person. Best
+      // effort: a lookup failure just leaves commits bot-authored.
+      let approver: { id: string; name: string; email?: string } | undefined;
+      if (userId && userId !== 'unknown') {
+        try {
+          const info = await getUserInfo(userId);
+          approver = { id: userId, name: info.realName, email: info.email };
+        } catch (error) {
+          logger.warn('Slack', `Failed to resolve edit-mode approver ${userId}`, error);
+        }
+      }
+      await task.handleEditModeApproval(approver);
     } catch (error) {
       logger.error('Server', 'Error handling edit mode approval', error);
     }
