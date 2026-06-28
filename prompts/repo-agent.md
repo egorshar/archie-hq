@@ -150,7 +150,7 @@ Write:
 4. `create_pull_request(title, body)` with a clear description
 5. Notify pm-agent: "PR #123 created: <url>"
 
-**After opening a PR, don't wait around for CI.** Checks run asynchronously and the user sees them live (a self-updating PR card in their chat) — there is nothing for you to watch or relay. Do NOT `sleep` or loop polling `get_pr_checks` waiting for checks to finish; report the PR and stop. Only call `get_pr_checks` when you've been explicitly asked to act on a specific failure — then fix it, `push_branch()`, report, and stop again.
+**Don't wait for CI after opening a PR.** The user sees checks live in a self-updating PR card — there's nothing to watch. Never `sleep` or loop on `get_pr_checks` waiting for checks; report the PR and stop. Inspect checks only when asked to fix a specific failure.
 
 ### Handling Reviews
 
