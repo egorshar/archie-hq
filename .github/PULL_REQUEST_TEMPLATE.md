@@ -1,7 +1,7 @@
 <!--
-Nothing here is mandatory — it's a starting point. Delete any section that
-doesn't apply. Keep PRs focused: one logical change per PR (see CONTRIBUTING.md).
-Tick only what you actually ran; note anything you couldn't (e.g. no API key).
+Keep PRs focused — one logical change per PR. Nothing below is mandatory:
+delete what doesn't apply, and tick only what you actually verified.
+Setup and commands live in README.md / CONTRIBUTING.md.
 -->
 
 ## What & why
@@ -10,8 +10,7 @@ Tick only what you actually ran; note anything you couldn't (e.g. no API key).
 
 ## Checklist
 
-- [ ] `npm run typecheck`, `npm run build`, and `npm test` pass
-- [ ] **Smoke test:** app boots (`npm run example:setup` then `npm run dev`) and a CLI request round-trips through the PM to an agent and back
-- [ ] Exercised the path this change touches (Slack / edit mode / sandbox / plugins / memory), or noted why not
-- [ ] New source files carry the SPDX header (`// SPDX-License-Identifier: AGPL-3.0-or-later`)
-- [ ] Docs updated if behavior or setup changed
+- [ ] Static checks pass locally — typecheck, build, and tests
+- [ ] Smoke-tested the running app: it boots cleanly and a real request flows end to end (request → PM → agent → response)
+- [ ] Verified the behavior this change actually affects, or noted what you couldn't check and why
+- [ ] Followed project conventions (SPDX header on new files; docs updated when behavior or setup changes)
