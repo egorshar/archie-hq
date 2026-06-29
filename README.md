@@ -11,10 +11,9 @@
 
 Under the hood it's not one chatbot but a whole team: a PM agent takes your request, brings in the right specialist agents, has them collaborate, and reports back. It's built on the [Claude Agent SDK](https://docs.anthropic.com/en/docs/claude-code/sdk) with a plugin architecture — add a new skill or department by dropping in a plugin directory, no core code changes.
 
-**Why "employee" and not just "agent":** unlike single-purpose agent frameworks, Archie has coworkers, a manager, a workplace (Slack), and rules of conduct — specialist agents talk to each other, share findings, and operate under an OS-level sandbox with a human approval gate before any code ships. You onboard new abilities as plugins, not forks.
-
 ## Contents
 
+- [Why a team, not a single agent?](#why-a-team-not-a-single-agent)
 - [How It Works](#how-it-works)
 - [Quick Start](#quick-start-no-slack-no-github--just-an-api-key)
 - [Plugins](#plugins)
@@ -24,6 +23,16 @@ Under the hood it's not one chatbot but a whole team: a PM agent takes your requ
 - [Technology Stack](#technology-stack)
 - [Contributing](CONTRIBUTING.md)
 - [License](#license)
+
+## Why a team, not a single agent?
+
+A single agent can call sub-agents, so why model a whole team? Three reasons:
+
+- **Context stays focused.** One agent grinding through a long task fills its context window fast and starts losing the thread. Splitting the work across agents keeps each one's context small, relevant, and sharp.
+- **Specialists beat a generalist.** An agent with a well-defined role — backed by peers it can question and reach agreement with — produces better work than a single generic agent reasoning alone. Collaboration and disagreement are features, not overhead.
+- **A coordinator delegates; a lead hoards.** Give one "lead" agent some sub-agents and it tends to do the whole job itself — it sees itself as the one in charge of the *work*. Archie's PM is a coordinator by design: its job is to delegate and synthesize, never to do the work. That structural choice is what actually distributes the work to the right specialists instead of one model trying to be everything.
+
+This is also why Archie reads as an **employee**, not a tool: it has coworkers, a manager, a workplace (Slack), and a human approval gate before anything ships. You onboard new abilities as plugins, not forks.
 
 ## How It Works
 
