@@ -14,6 +14,7 @@ Under the hood it's not one chatbot but a whole team: a PM agent takes your requ
 ## Contents
 
 - [Why a team, not a single agent?](#why-a-team-not-a-single-agent)
+- [Runs your whole team on one server](#runs-your-whole-team-on-one-server)
 - [How It Works](#how-it-works)
 - [Quick Start](#quick-start-no-slack-no-github--just-an-api-key)
 - [Plugins](#plugins)
@@ -33,6 +34,13 @@ A single agent can call sub-agents, so why model a whole team? Three reasons:
 - **A coordinator delegates; a lead hoards.** Give one "lead" agent some sub-agents and it tends to do the whole job itself — it sees itself as the one in charge of the *work*. Archie's PM is a coordinator by design: its job is to delegate and synthesize, never to do the work. That structural choice is what actually distributes the work to the right specialists instead of one model trying to be everything.
 
 This is also why Archie reads as an **employee**, not a tool: it has coworkers, a manager, a workplace (Slack), and a human approval gate before anything ships. You onboard new abilities as plugins, not forks.
+
+## Runs your whole team on one server
+
+Archie is a production system, not a demo — and it's deliberately cheap to operate:
+
+- **Massively parallel, single box.** Every task is its own lightweight, isolated runtime, so many run concurrently on one server. In production, a single instance serves an entire ~100-person company running tasks in parallel, with no resource strain.
+- **Near-zero infrastructure.** No database, no message broker, no external state store — just files on disk and git. All runtime state lives under one working directory, which makes deploying, backing up, and recovering trivial. Crash recovery is built in: tasks check-point to disk and resume after a restart.
 
 ## How It Works
 
