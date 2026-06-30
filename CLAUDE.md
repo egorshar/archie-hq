@@ -48,6 +48,10 @@ See `docs/guides/local-development.md` for full setup instructions.
 
 Use the unified logger (`src/system/logger.ts`) for all console output. Never use `console.log/error/warn` directly. The logger provides color-coded, semantic logging methods for agents, system events, and errors.
 
+## Writing Conventions
+
+**Never hard-wrap prose.** In Markdown and other prose (docs, `CHANGELOG.md`, PR descriptions, comments), write each paragraph or bullet as a single line and let it soft-wrap. Do not insert manual line breaks to hit a column width — they make edits and diffs noisy. Only code (fenced blocks, indented samples) may span fixed-width lines.
+
 ## Git Workflow
 
 **IMPORTANT**: Only create commits when explicitly requested by the user. Never commit code automatically.
