@@ -118,6 +118,8 @@ jobs:
               trailing `_Technical: …_` clause.
             - A change that is pure plumbing with no user-facing value stays purely technical:
               write it as an italic `_Technical: …_` bullet with no bold business lead.
+            - Write each bullet on a SINGLE line — never hard-wrap prose across multiple lines.
+              Only fenced code may span lines.
             - Be concise and faithful. Never invent a change that is not in `context.md`.
 
             Then self-review your draft before saving: does every bullet either lead with real
