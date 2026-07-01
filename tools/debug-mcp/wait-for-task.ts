@@ -1,10 +1,7 @@
 /**
  * wait_for_task core — bounded, resumable waiting for an Archie task to reach a
- * terminal/actionable state.
- *
- * Pure logic over a minimal client surface (TaskClient) so it is unit-testable
- * with a fake client — no running server and no MCP transport. The real
- * ArchieClient satisfies TaskClient structurally.
+ * terminal/actionable state. Pure logic over a minimal TaskClient surface so it can
+ * be unit-tested with a fake; the real ArchieClient satisfies TaskClient structurally.
  */
 
 export type WaitState =
@@ -32,7 +29,7 @@ export interface WaitForTaskArgs {
   cursor?: number;
 }
 
-/** The slice of ArchieClient the wait logic needs (the real client satisfies it structurally). */
+/** The slice of ArchieClient the wait logic needs (satisfied structurally). */
 export interface TaskClient {
   listTasks(): Promise<Array<{ task_id: string }>>;
   getTaskDetail(taskId: string): Promise<{ knowledgeLog: string }>;
@@ -58,7 +55,7 @@ const DEFAULT_RECENT_WINDOW = 25;
 const ATTRIBUTION_MAX = 512;
 
 function firstNonEmptyLine(log: string): string | null {
-  const line = (log || '').split('\n').find((s) => s.trim().length > 0);
+  const line = log.split('\n').find((s) => s.trim().length > 0);
   return line ? line.slice(0, ATTRIBUTION_MAX) : null;
 }
 
@@ -70,10 +67,8 @@ async function findTaskByNonce(
   const tasks = await client.listTasks();
   for (const t of tasks.slice(0, recentWindow)) {
     try {
-      const detail = await client.getTaskDetail(t.task_id);
-      if (detail.knowledgeLog && detail.knowledgeLog.includes(nonce)) {
-        return t.task_id;
-      }
+      const { knowledgeLog } = await client.getTaskDetail(t.task_id);
+      if (knowledgeLog.includes(nonce)) return t.task_id;
     } catch {
       // task vanished or unreadable mid-scan — skip it
     }
@@ -81,12 +76,7 @@ async function findTaskByNonce(
   return undefined;
 }
 
-/**
- * Resolve a task (by id or nonce) and block until it reaches a terminal/actionable
- * state — `completed`, `stopped`, or `approval_requested` — or the wait cap is hit
- * (`pending`, with a cursor to resume). Returns `not_found` if a nonce never
- * correlates within the budget.
- */
+/** Resolve a task (by id or nonce) and block until it settles or the wait cap is hit. */
 export async function waitForTask(
   client: TaskClient,
   args: WaitForTaskArgs,
@@ -97,12 +87,7 @@ export async function waitForTask(
   }
 
   const now = deps.now ?? Date.now;
-  const sleep =
-    deps.sleep ??
-    ((ms: number) =>
-      new Promise<void>((resolve) => {
-        setTimeout(resolve, ms);
-      }));
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const capSeconds = deps.capSeconds ?? DEFAULT_CAP_SECONDS;
   const pollIntervalMs = deps.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   const recentWindow = deps.recentWindow ?? DEFAULT_RECENT_WINDOW;
@@ -116,6 +101,15 @@ export async function waitForTask(
   let attributionTried = false;
   const pmReplies: string[] = [];
 
+  const settle = (state: WaitState, extra?: Partial<WaitResult>): WaitResult => ({
+    task_id: taskId ?? null,
+    state,
+    attribution,
+    pm_replies: pmReplies,
+    cursor,
+    ...extra,
+  });
+
   for (;;) {
     if (!taskId && args.nonce) {
       taskId = await findTaskByNonce(client, args.nonce, recentWindow);
@@ -125,8 +119,8 @@ export async function waitForTask(
       if (!attributionTried) {
         attributionTried = true;
         try {
-          const detail = await client.getTaskDetail(taskId);
-          attribution = firstNonEmptyLine(detail.knowledgeLog);
+          const { knowledgeLog } = await client.getTaskDetail(taskId);
+          attribution = firstNonEmptyLine(knowledgeLog);
         } catch {
           // attribution is best-effort
         }
@@ -154,25 +148,13 @@ export async function waitForTask(
       }
 
       // Terminal states win over a replayed approval gate (the feed replays full history).
-      if (completed) return { task_id: taskId, state: 'completed', attribution, pm_replies: pmReplies, cursor };
-      if (stopped) return { task_id: taskId, state: 'stopped', attribution, pm_replies: pmReplies, cursor };
-      if (approval) {
-        return {
-          task_id: taskId,
-          state: 'approval_requested',
-          attribution,
-          pm_replies: pmReplies,
-          cursor,
-          ...(approvalType ? { approval_type: approvalType } : {}),
-        };
-      }
+      if (completed) return settle('completed');
+      if (stopped) return settle('stopped');
+      if (approval) return settle('approval_requested', approvalType && { approval_type: approvalType });
     }
 
     if (now() >= deadline) {
-      if (!taskId) {
-        return { task_id: null, state: 'not_found', attribution: null, pm_replies: [] };
-      }
-      return { task_id: taskId, state: 'pending', attribution, pm_replies: pmReplies, cursor };
+      return settle(taskId ? 'pending' : 'not_found');
     }
 
     await sleep(pollIntervalMs);

@@ -193,13 +193,13 @@ server.tool(
 
 server.tool(
   'wait_for_task',
-  'Wait (server-side) for a task to settle, returning its state in one call instead of polling get_events yourself. Finds the task by task_id or by a nonce in its knowledge log, blocks until it reaches completed / stopped / approval_requested or a ~45s cap, and returns STATE plus the attribution line and any pm-agent replies. On the cap it returns STATE=pending with a CURSOR — call again with that cursor (and task_id) to resume. On approval_requested, approve via the "approve" tool, then resume.',
+  'Block server-side until a task settles, in one call instead of polling get_events. Locate it by task_id or by a nonce in its knowledge log, then wait until completed / stopped / approval_requested or a ~45s cap. Returns STATE with the attribution line and any pm-agent replies. On the cap: STATE=pending plus a CURSOR — call again with that cursor and task_id to resume. On approval_requested: approve via the "approve" tool, then resume.',
   {
     task_id: z.string().optional().describe('Task to wait on. Provide this or "nonce".'),
     nonce: z
       .string()
       .optional()
-      .describe('Substring to locate the task by (matched in its knowledge log). Use when you tagged a message with a nonce and do not yet know the task id.'),
+      .describe("Substring matched in the task's knowledge log — use when you tagged a message with a nonce but don't yet know the task id."),
     timeout_seconds: z
       .number()
       .optional()
