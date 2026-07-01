@@ -308,6 +308,12 @@ export function mountApiRoutes(app: Application): void {
         } else {
           await task.handleTriggerDenial(ref);
         }
+      } else if (type === 'max_mode') {
+        if (approve) {
+          await task.handleMaxModeApproval(cleanApprover?.name);
+        } else {
+          await task.handleMaxModeDenial();
+        }
       } else {
         res.status(400).json({ error: `Unknown approval type: ${type}` });
         return;
