@@ -9,7 +9,7 @@ The `archie-debug` MCP exposes only single-shot reads (`list_tasks`, `get_events
 - Return: resolved `state`, the attribution line (first knowledge-log line, carrying the `@<U…:Name>` marker), any `pm-agent` replies, the task id, and the approval `type` (`edit_mode` | `research_budget`) when gated.
 - **Bounded, resumable** waiting: the tool caps its internal wait below typical MCP client tool-call timeouts and, if not yet settled, returns `state: "pending"` plus an event cursor so the caller resumes with one more call instead of busy-looping.
 - Poll incrementally via the existing `/api/tasks/:id/events?after=<cursor>` endpoint (no full-history refetch each tick).
-- Correct terminal-state precedence: because the events feed replays full history, a task that cleared an approval gate and then finished must report `completed`/`stopped`, not the stale `approval:requested`.
+- Order-aware state folding: because the events feed replays full history, the tool folds it in order rather than by unordered presence — `task:completed` always wins, an unresolved `approval:requested` outranks the edit-mode gate's own deferred `task:stopped` (so a gate reports `approval_requested`, not `stopped`), and a later `task:resumed` cancels a stale `task:stopped` (so a resume after approval is not misread as stopped).
 
 ## Capabilities
 

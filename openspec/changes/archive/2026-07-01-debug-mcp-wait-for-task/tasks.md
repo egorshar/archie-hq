@@ -14,7 +14,7 @@
 ## 3. Event polling and state detection
 
 - [x] 3.1 Poll `getEvents(taskId, after=cursor)` on the interval, advancing `cursor = result.total`, processing only newly returned events
-- [x] 3.2 Detect state with terminal precedence: `task:completed` / `task:stopped` win over `approval:requested` when the replayed history contains both
+- [x] 3.2 Detect state by folding the ordered feed: track the latest lifecycle event (`task:created`/`task:resumed` → running, `task:stopped` → stopped, `task:completed` → completed, so a `task:resumed` cancels a stale stop) and a pending-approval flag (`approval:requested` sets it; `approval:resolved`/`task:resumed`/`task:completed` clear it); precedence is `completed` > unresolved approval > `stopped`
 - [x] 3.3 On `approval:requested` (and no terminal), extract `approval_type` (`edit_mode` | `research_budget`) from the event data
 - [x] 3.4 Collect `pm_replies` from events where `type === "message"` and `data.from === "pm-agent"`
 - [x] 3.5 Set `attribution` to the first line of the task's `knowledgeLog`
@@ -35,10 +35,11 @@
 - [x] 6.1 Unit-test state detection against fake event feeds: completed; stopped; approval_requested; approved+completed → `completed` (precedence)
 - [x] 6.2 Unit-test nonce correlation: found within the window; `not_found` when absent; resolve-by-id path
 - [x] 6.3 Unit-test bounded/resumable behavior: cap reached → `pending` + cursor; resume from cursor processes only new events
-- [x] 6.4 Wire the tests into the repo's test command (mock the `ArchieClient` dependency; no running server required) — added `tools/**/*.test.ts` to `vitest.config.ts` `include`
+- [x] 6.4 Unit-test approval-gate ordering: `approval:requested` + deferred `task:stopped` → `approval_requested`; `task:resumed` cancels a stale stop (no spurious `stopped`); resume after the gate stop reaches `completed`
+- [x] 6.5 Wire the tests into the repo's test command (mock the `ArchieClient` dependency; no running server required) — added `tools/**/*.test.ts` to `vitest.config.ts` `include`
 
 ## 7. Verification and docs
 
 - [x] 7.1 Update the `tools/debug-mcp` tool list / header comment to include `wait_for_task` — there is no central tool list (no README; the header documents URL resolution), so the tool self-documents via its `server.tool(...)` description
-- [x] 7.2 Typecheck the debug-mcp sources clean — the repo's `npm run typecheck` scopes to `src/**` (tools run via `tsx`), so verified with a targeted `tsc --noEmit` over the three `tools/debug-mcp/*.ts` files (exit 0); `vitest run` is 10/10
-- [ ] 7.3 Live check against a running Archie (`npm run docker:dev`): `wait_for_task` by nonce returns `completed` with attribution + the PM reply for a real DM, and an approval-gated task returns `approval_requested` then `completed` after `approve`
+- [x] 7.2 Typecheck the debug-mcp sources clean — the repo's `npm run typecheck` scopes to `src/**` (tools run via `tsx`), so verified with a targeted `tsc --noEmit` over the three `tools/debug-mcp/*.ts` files (exit 0); `vitest run` is 13/13
+- [x] 7.3 Live check against a running Archie: `wait_for_task` by task_id/nonce returns `completed` with attribution + the PM reply, and an approval-gated task returns `approval_requested` then `completed` after `approve` — verified end-to-end (`approval_requested → pending → completed`, no spurious `stopped` on resume)

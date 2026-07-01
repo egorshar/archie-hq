@@ -14,7 +14,7 @@ The pieces to build on already exist:
 - One blocking MCP call that correlates a task (by `task_id` or `nonce`) and waits until it reaches `task:completed` / `task:stopped` / `approval:requested`, returning a compact result (`state`, `task_id`, `attribution`, `pm_replies`, `approval_type?`).
 - Bounded and resumable: never hang the tool call; return `pending` + a cursor when a cap is hit so the caller resumes with one more call.
 - Reuse existing REST endpoints and the existing `after`/`total` cursor; poll incrementally.
-- Correct terminal-state precedence over a replayed `approval:requested`.
+- Correct order-aware state precedence: `completed` always wins, an unresolved approval outranks the gate's deferred `task:stopped`, and a `task:resumed` cancels a stale stop.
 
 **Non-Goals:**
 - No new Archie server endpoints and no runtime/app behavior change — all logic lives in the MCP process.
@@ -28,8 +28,8 @@ The pieces to build on already exist:
 **1. Poll inside the MCP process (not the agent, not a new server endpoint).**
 The MCP server is a Node process that can `await setTimeout` between polls and return only a summary. This keeps the busy-poll off the agent's context and needs no Archie change. *Alternatives:* agent-driven `get_events` looping (rejected — no sleep, context bloat, non-deterministic); a long-poll endpoint in Archie's REST driven by the event bus (rejected for now — core-app change and more risk; still subject to the client timeout in Decision 4).
 
-**2. Derive state from the events feed.**
-A single `getEvents` feed yields terminal signals, the approval gate, and PM replies together. Scan for `task:completed`/`task:stopped` first, then `approval:requested` — terminal wins because the feed replays full history (an approved-then-completed task carries both). Collect `pm_replies` from `type==="message" && data.from==="pm-agent"`. *Alternative:* poll `metadata.status` (rejected — doesn't surface the approval gate or the replies; needs a second source).
+**2. Derive state by folding the ordered events feed.**
+A single `getEvents` feed yields lifecycle signals, the approval gate, and PM replies together. Because the feed replays full history and the edit-mode gate emits `approval:requested` and *then* a deferred `task:stopped` (approval later reactivates with `task:resumed`), fold events in order rather than by unordered presence: track the latest lifecycle state (`task:created`/`task:resumed` → running, `task:stopped` → stopped, `task:completed` → completed) and whether an approval is currently pending (`approval:requested` sets it; `approval:resolved`, `task:resumed`, or `task:completed` clear it). Precedence: `completed` wins; else an unresolved approval → `approval_requested`; else `stopped`. This makes a gate report `approval_requested` (not `stopped`) and keeps a post-approval resume from being misread as `stopped`. Collect `pm_replies` from `type==="message" && data.from==="pm-agent"`. *Alternative:* poll `metadata.status` (rejected — doesn't surface the approval gate or the replies; needs a second source).
 
 **3. Cursor = the events `total`, resumable across calls.**
 Poll `getEvents(id, after=cursor)`, advance `cursor = result.total`, process only new events. When returning `pending`, hand the cursor back; the next call passes it as `after`. This reuses the model the `get_events` tool already documents.
@@ -48,7 +48,7 @@ Return MCP text content with labeled fields (`TASK=`, `STATE=`, `ATTRIBUTION=`, 
 - **MCP client tool-call timeout varies by client/config** → cap the internal wait conservatively (Decision 4) and keep it resumable; document the cap.
 - **`listTasks` scan cost when there are many tasks** → bound to a most-recent window (Decision 5); the nonce path is for fresh test traffic where the task is recent.
 - **Polling is relocated, not eliminated** → acceptable: it leaves the agent's context and uses the incremental `after` cursor. A true long-poll remains a future option.
-- **State detection depends on event-type strings** → they are the strings the app emits today (`task:completed`, `task:stopped`, `approval:requested`); pinned by the spec scenarios and unit tests.
+- **State detection depends on event-type strings** → they are the strings the app emits today (`task:created`, `task:resumed`, `task:stopped`, `task:completed`, `approval:requested`, `approval:resolved`); pinned by the spec scenarios and unit tests.
 - **Nonce false-positive substring match** → nonces are high-entropy (`E2E-<hex>`); negligible, and the match can be scoped to the attribution/first line if needed.
 
 ## Migration Plan
