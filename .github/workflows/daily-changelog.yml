@@ -1,0 +1,234 @@
+# Daily changelog — summarize the previous day's changes into CHANGELOG.md.
+#
+# Two jobs, split for security (see "Security" below):
+#   generate — gather the day's PR context, have Claude draft the dated entry,
+#              expose it as a job output. Has the Anthropic key; NO push access.
+#   publish  — on a fresh checkout, splice the entry into CHANGELOG.md with the
+#              trusted insert script and push to main. Has the deploy key; runs
+#              NO model.
+#
+# How it works:
+#   1. generate: scripts/changelog-gather.sh builds the model's context — each PR
+#      merged that day with its description, linked issues, commit subjects, and
+#      diffstat (so the model grasps intent without reading code), plus a
+#      raw-commit backstop for direct-to-main pushes.
+#   2. If nothing landed — or that day already has an entry — stop (no empty commit).
+#   3. generate: the Claude Code Action writes ONLY the dated entry to new-entry.md;
+#      a step captures it into the `entry` job output.
+#   4. publish: scripts/changelog-insert.mjs splices the entry below [Unreleased],
+#      above the newest dated entry, leaving structure and the bottom snapshot alone.
+#   5. publish: commit straight to main with [skip ci] so it doesn't trigger a rebuild.
+#
+# Security:
+#   The gather step feeds attacker-influenceable text (PR/issue/commit bodies) to
+#   the model, so the model step is treated as untrusted. It is isolated in the
+#   `generate` job, which never holds the deploy key — so a prompt-injected model
+#   cannot read/exfiltrate the push credential or tamper with a script that later
+#   runs alongside it. `publish` runs no model and checks out fresh, so the insert
+#   script it runs is the trusted repo version; the drafted entry crosses the job
+#   boundary as a job output consumed via an env var (never expression-interpolated
+#   into a shell), and the insert script only ever writes CHANGELOG.md.
+#
+# Setup prerequisites:
+#   - Repo secret ANTHROPIC_API_KEY (the Claude Code Action authenticates with it).
+#   - Repo secret CHANGELOG_DEPLOY_KEY — the PRIVATE half of a write-enabled
+#     deploy key whose PUBLIC half is added to the repo (Settings -> Deploy keys,
+#     "Allow write access") AND to the branch ruleset's bypass list. The built-in
+#     github-actions bot cannot be a ruleset bypass actor, so publish pushes over
+#     SSH as this deploy key to land the entry directly on main.
+#
+# Actions are SHA-pinned per org policy (full commit SHA + version comment).
+name: Daily changelog
+
+on:
+  schedule:
+    # 02:00 UTC daily — late enough to capture the full previous UTC day.
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "Day to summarize (YYYY-MM-DD, UTC). Defaults to yesterday."
+        required: false
+        type: string
+
+# Never let two runs edit the changelog at once.
+concurrency:
+  group: daily-changelog
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  generate:
+    name: Draft the entry
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      skip: ${{ steps.gather.outputs.skip }}
+      date: ${{ steps.gather.outputs.date }}
+      entry: ${{ steps.capture.outputs.entry }}
+    steps:
+      - name: Check out main (full history)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Gather the day's changes (PR context)
+        id: gather
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TARGET_DATE="${{ inputs.date }}"
+          if [ -z "$TARGET_DATE" ]; then
+            TARGET_DATE="$(date -u -d 'yesterday' +%F)"
+          fi
+          echo "date=$TARGET_DATE" >> "$GITHUB_OUTPUT"
+          echo "Target day: $TARGET_DATE (UTC)"
+
+          # Already documented? Then there's nothing to do.
+          if grep -qE "^## ${TARGET_DATE}\b" CHANGELOG.md; then
+            echo "Entry for $TARGET_DATE already exists — skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          set +e
+          bash scripts/changelog-gather.sh "$TARGET_DATE" "${{ github.repository }}" context.md
+          code=$?
+          set -e
+          if [ "$code" = "10" ]; then
+            echo "Nothing landed on $TARGET_DATE — skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          [ "$code" = "0" ] || exit "$code"
+
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "::group::Context for the model"
+          cat context.md
+          echo "::endgroup::"
+
+      - name: Write the entry with Claude
+        if: steps.gather.outputs.skip == 'false'
+        uses: anthropics/claude-code-action@4633baf5267540f3f8cb58b684f79901d564c280 # v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          claude_args: |
+            --allowedTools Read,Write
+            --max-turns 8
+            --model sonnet
+          prompt: |
+            You are updating Archie HQ's CHANGELOG.md. Write the entry for ${{ steps.gather.outputs.date }}.
+
+            First read two files in the repo:
+            - `context.md` — the changes that landed that day. Merged pull requests are the
+              primary source: each PR's description explains *what and why*, with its linked
+              issues, commit subjects, and diffstat. A raw-commit list at the end is a backstop
+              for anything pushed straight to main. Use the PR descriptions to understand the
+              VALUE and intent of each change — you do not need to read the code.
+            - `CHANGELOG.md` — copy the exact voice, formatting, and density of the existing
+              dated entries near the top.
+
+            Rules (follow exactly):
+            - The output is ONE section. The first line is the heading `## ${{ steps.gather.outputs.date }}` and nothing comes before it.
+            - One logical change = one bullet. A PR is normally one bullet, even when it spans
+              several commits. Do not write one bullet per commit, and do not list every commit.
+            - Lead each bullet with the VALUE the change delivers for business users — a bold
+              lead-in sentence drawn from the PR's "what & why" — then add engineer detail in a
+              trailing `_Technical: …_` clause.
+            - A change that is pure plumbing with no user-facing value stays purely technical:
+              write it as an italic `_Technical: …_` bullet with no bold business lead.
+            - Write each bullet on a SINGLE line — never hard-wrap prose across multiple lines.
+              Only fenced code may span lines.
+            - Be concise and faithful. Never invent a change that is not in `context.md`.
+
+            Then self-review your draft before saving: does every bullet either lead with real
+            user value or stand as an explicit `_Technical:_` note? Is anything invented or
+            mis-summarized versus `context.md`? Are related changes grouped? Revise, then save.
+
+            Write ONLY the finished entry to a new file named `new-entry.md`.
+            Do NOT modify CHANGELOG.md or any other file.
+
+      - name: Capture the drafted entry
+        id: capture
+        if: steps.gather.outputs.skip == 'false'
+        run: |
+          set -euo pipefail
+          if [ ! -s new-entry.md ]; then
+            echo "Claude produced no new-entry.md — aborting." >&2
+            exit 1
+          fi
+          # Pass the entry to the publish job as a job output. It is consumed there
+          # via an env var (never interpolated into a shell), so its content — which
+          # is attacker-influenceable — cannot inject commands downstream.
+          {
+            echo 'entry<<CHANGELOG_ENTRY_EOF'
+            cat new-entry.md
+            echo 'CHANGELOG_ENTRY_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+  publish:
+    name: Insert and push
+    needs: generate
+    if: needs.generate.outputs.skip == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out main (full history)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: main
+          fetch-depth: 0
+          # Deploy key on the ruleset bypass list — lets this job push the entry
+          # directly to the protected main branch over SSH.
+          ssh-key: ${{ secrets.CHANGELOG_DEPLOY_KEY }}
+
+      - name: Insert the entry and push
+        env:
+          TARGET_DATE: ${{ needs.generate.outputs.date }}
+          ENTRY: ${{ needs.generate.outputs.entry }}
+        run: |
+          set -euo pipefail
+
+          # Materialize the drafted entry from the env var (safe: no shell
+          # interpolation of untrusted content). The insert script — the trusted
+          # repo version, since no model ran in this job — sanitizes it and only
+          # ever writes CHANGELOG.md.
+          printf '%s\n' "$ENTRY" > new-entry.md
+
+          set +e
+          node scripts/changelog-insert.mjs CHANGELOG.md new-entry.md
+          code=$?
+          set -e
+          # 3 == entry already present (race / re-run): treat as a clean no-op.
+          if [ "$code" = "3" ]; then
+            echo "Already present — nothing to commit."
+            exit 0
+          fi
+          [ "$code" = "0" ] || exit "$code"
+
+          rm -f new-entry.md
+
+          if git diff --quiet -- CHANGELOG.md; then
+            echo "No changelog change — nothing to commit."
+            exit 0
+          fi
+
+          git config user.name "archie-changelog[bot]"
+          git config user.email "archie-changelog@users.noreply.github.com"
+          git add CHANGELOG.md
+          git commit -m "docs(changelog): add entry for ${TARGET_DATE} [skip ci]"
+
+          # Retry the push a few times to ride out transient failures.
+          n=0
+          until git push origin HEAD:main; do
+            n=$((n + 1))
+            [ "$n" -ge 4 ] && { echo "push failed after retries" >&2; exit 1; }
+            sleep $((2 ** n))
+            git pull --rebase origin main
+          done
