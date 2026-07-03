@@ -6,6 +6,10 @@ Archie ships continuously, so changes are grouped by the **date they landed** on
 
 _Changes on `main` that haven't been summarized into a dated entry yet._
 
+## 2026-07-02
+
+_No changes landed on `main` this day._
+
 ## 2026-07-01
 
 - **Debugging a task no longer requires busy-polling — one call blocks server-side until it settles.** The `archie-debug` MCP gains a `wait_for_task` tool that correlates a task by ID or nonce, then waits server-side until it reaches `completed`, `stopped`, or `approval_requested` (capped at ~45 s, resumable via cursor), returning the final state, attribution line, and any PM replies in one shot. _Technical: events are folded in order — `task:resumed` cancels a stale `task:stopped`, an unresolved `approval:requested` outranks the gate's deferred stop, and `completed` always wins; incremental polling via the existing `/events?after=` cursor; 13 unit tests; no Archie runtime change (PR #158)._
