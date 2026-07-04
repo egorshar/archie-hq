@@ -228,7 +228,14 @@ export function parseEvidenceJson(input: string, source = 'stdin'): ParseResult 
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     // V8 phrases EOF-mid-document differently depending on where the input cuts off.
-    const truncated = /unexpected end of (json )?input|unterminated (string|fractional number) in json|end of data/i.test(msg);
+    let truncated = /unexpected end of (json )?input|unterminated (string|fractional number) in json|end of data/i.test(msg);
+    // Truncation right after a complete value reports as a missing ',' or closer — but only
+    // class it as truncation when the complaint is at the very end of the input; the same
+    // message mid-input is genuine malformation.
+    if (!truncated) {
+      const positional = /expected ',' or '[}\]]' after (?:property value|array element) in json at position (\d+)/i.exec(msg);
+      if (positional) truncated = Number(positional[1]) >= input.trimEnd().length;
+    }
     return {
       ok: false,
       error: truncated ? `truncated JSON input from ${source}: ${msg}` : `invalid JSON from ${source}: ${msg}`,
@@ -339,17 +346,35 @@ export async function runEvidenceWriter(
 
 // ---- CLI main ----
 
-function parseArgs(argv: string[]): { inFile?: string; outDir?: string } {
+const USAGE = 'usage: npx tsx tools/e2e/evidence.ts [--in <file>] [--out-dir <dir>]';
+
+/** Exported for tests. Throws on unknown arguments and on flags missing their value. */
+export function parseArgs(argv: string[]): { inFile?: string; outDir?: string } {
   const result: { inFile?: string; outDir?: string } = {};
+  const takeValue = (flag: string, i: number): string => {
+    const value = argv[i];
+    if (value === undefined) throw new Error(`${flag} requires a value (${USAGE})`);
+    return value;
+  };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
-    if (arg === '--in') result.inFile = argv[++i];
+    if (arg === '--in') result.inFile = takeValue('--in', ++i);
     else if (arg.startsWith('--in=')) result.inFile = arg.slice('--in='.length);
-    else if (arg === '--out-dir') result.outDir = argv[++i];
+    else if (arg === '--out-dir') result.outDir = takeValue('--out-dir', ++i);
     else if (arg.startsWith('--out-dir=')) result.outDir = arg.slice('--out-dir='.length);
-    else throw new Error(`unknown argument: ${arg} (usage: npx tsx tools/e2e/evidence.ts [--in <file>] [--out-dir <dir>])`);
+    else throw new Error(`unknown argument: ${arg} (${USAGE})`);
   }
   return result;
+}
+
+/**
+ * Destination precedence: --out-dir flag → E2E_EVIDENCE_DIR env → default.
+ * Set-but-empty values count as unset (consistent with config.ts port resolution).
+ */
+export function resolveOutDir(flag: string | undefined, env: string | undefined, defaultDir: string): string {
+  if (flag) return flag;
+  if (env) return env;
+  return defaultDir;
 }
 
 async function readStdinFully(): Promise<string> {
@@ -392,7 +417,7 @@ async function main(): Promise<void> {
     source = 'stdin';
   }
 
-  const outDir = args.outDir ?? process.env.E2E_EVIDENCE_DIR ?? join(repoRoot, 'e2e-evidence');
+  const outDir = resolveOutDir(args.outDir, process.env.E2E_EVIDENCE_DIR, join(repoRoot, 'e2e-evidence'));
 
   const realFs: EvidenceFs = {
     mkdir: async (dir) => void (await fsp.mkdir(dir, { recursive: true })),

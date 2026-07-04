@@ -115,6 +115,8 @@ One file pair per scenario; a scenario names the AC ids it covers, so Forge's pe
 - **`resolveBaseUrl` duplicates ~20 lines of the debug MCP's resolution logic** → deliberate: the alternative is editing `tools/debug-mcp/` to export it, which is off-limits. The duplication is pinned by tests asserting the same precedence order.
 - **JSON+markdown evidence pair can theoretically diverge** → the markdown is only ever produced by the renderer from the JSON in the same invocation; reviewers who suspect divergence read the JSON, which is canonical.
 - **Serial-only scenarios, bounded nonce window**: `wait_for_task`'s nonce scan covers the 25 most-recent tasks — ample for one runner, unvalidated for parallel runs, and on a long-lived instance old nonces fall out of the window (remedy: fresh boot before a scenario session). Documented as a constraint in the SKILL.md recipes; parallelism is out of scope.
+- **Evidence pair transactionality is in-process only** (review round 1, finding 5): deterministic temp names (`<scenario>.json.tmp`) assume no concurrent writer for the same scenario — accepted because runs are serial by constraint, which SKILL.md already mandates.
+- **Raw excerpt lines containing a triple-backtick fence could break out of the code block in the rendered `.md`** (review round 1, finding 6): accepted — the canonical JSON is unaffected, and reviewers judge from the JSON whenever the rendering looks suspect.
 
 ## Migration Plan
 

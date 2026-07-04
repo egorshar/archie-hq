@@ -1,7 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import {
+  parseArgs,
   parseEvidenceJson,
   renderEvidenceMarkdown,
+  resolveOutDir,
   runEvidenceWriter,
   validateEvidence,
   writeEvidencePair,
@@ -144,6 +146,49 @@ describe('parseEvidenceJson', () => {
     const r = parseEvidenceJson('{"a": nope}', '/tmp/evidence.json');
     expect(r.ok).toBe(false);
     expect(!r.ok && r.error).toMatch(/invalid JSON from \/tmp\/evidence\.json/);
+  });
+
+  it('classifies a cut right after a complete value as truncated (missing comma/closer at end of input)', () => {
+    for (const input of ['{"a": 5', '[{"a":1}']) {
+      const r = parseEvidenceJson(input);
+      expect(r.ok).toBe(false);
+      expect(!r.ok && r.error, input).toContain('truncated JSON input from stdin');
+    }
+  });
+
+  it('the same missing-comma complaint mid-input stays classified as invalid, not truncated', () => {
+    const r = parseEvidenceJson('{"a": 5 "b": 6}');
+    expect(r.ok).toBe(false);
+    expect(!r.ok && r.error).toContain('invalid JSON from stdin');
+  });
+});
+
+describe('parseArgs', () => {
+  it('accepts both flag forms', () => {
+    expect(parseArgs(['--in', 'p.json', '--out-dir', 'out'])).toEqual({ inFile: 'p.json', outDir: 'out' });
+    expect(parseArgs(['--in=p.json', '--out-dir=out'])).toEqual({ inFile: 'p.json', outDir: 'out' });
+    expect(parseArgs([])).toEqual({});
+  });
+
+  it('rejects flags missing their value instead of silently ignoring them', () => {
+    expect(() => parseArgs(['--in'])).toThrow(/--in requires a value/);
+    expect(() => parseArgs(['--out-dir'])).toThrow(/--out-dir requires a value/);
+  });
+
+  it('rejects unknown arguments', () => {
+    expect(() => parseArgs(['--bogus'])).toThrow(/unknown argument: --bogus/);
+  });
+});
+
+describe('resolveOutDir', () => {
+  it('flag beats env beats default', () => {
+    expect(resolveOutDir('flagged', 'from-env', '/default')).toBe('flagged');
+    expect(resolveOutDir(undefined, 'from-env', '/default')).toBe('from-env');
+    expect(resolveOutDir(undefined, undefined, '/default')).toBe('/default');
+  });
+
+  it('treats a set-but-empty E2E_EVIDENCE_DIR as unset (no writes to cwd by accident)', () => {
+    expect(resolveOutDir(undefined, '', '/default')).toBe('/default');
   });
 });
 

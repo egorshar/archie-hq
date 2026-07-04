@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   archieContainerState,
+  parseArgs,
   preflight,
   renderDiagnostics,
   runBoot,
@@ -171,6 +172,22 @@ describe('renderDiagnostics', () => {
   });
 });
 
+describe('parseArgs', () => {
+  it('accepts both flag forms', () => {
+    expect(parseArgs(['--timeout-seconds', '120'])).toEqual({ timeoutFlag: '120' });
+    expect(parseArgs(['--timeout-seconds=120'])).toEqual({ timeoutFlag: '120' });
+    expect(parseArgs([])).toEqual({});
+  });
+
+  it('rejects --timeout-seconds without a value instead of silently ignoring it', () => {
+    expect(() => parseArgs(['--timeout-seconds'])).toThrow(/--timeout-seconds requires a value/);
+  });
+
+  it('rejects unknown arguments', () => {
+    expect(() => parseArgs(['--bogus'])).toThrow(/unknown argument: --bogus/);
+  });
+});
+
 describe('preflight', () => {
   it('fails when .env is absent', () => {
     expect(preflight(undefined).join()).toContain('.env not found');
@@ -252,6 +269,30 @@ describe('runBoot — orchestration ordering', () => {
     expect(code).toBe(0);
     expect(deps.logs.join('\n')).toContain('http://localhost:3000');
     expect(deps.logs.join('\n')).toContain('{"status":"ok"}');
+  });
+
+  it('a transient compose ps failure (non-zero exit, empty stdout) skips the container check instead of aborting', async () => {
+    // Regression: readPs is wired over the never-rejecting exec wrapper. A failed ps resolves
+    // {code:1, stdout:''} — which must NOT be misread as "archie container gone" and abort a
+    // boot whose /health was about to turn 200.
+    let fetches = 0;
+    const { exec } = fakeExec((_cmd, args) => {
+      if (args.includes('up')) return { code: 0, stdout: '', stderr: '' };
+      return { code: 1, stdout: '', stderr: 'Cannot connect to the Docker daemon' }; // every ps fails
+    });
+    const deps = bootDeps({
+      exec,
+      fetchHealth: async () => {
+        fetches++;
+        if (fetches < 3) throw new Error('ECONNREFUSED');
+        return { status: 200, body: '{"status":"ok"}' };
+      },
+    });
+
+    const code = await runBoot(deps, { baseUrl: 'http://localhost:3000', timeoutSeconds: 600 });
+
+    expect(code).toBe(0); // boot survived the flaky ps and reached healthy
+    expect(fetches).toBe(3);
   });
 
   it('a poll-phase failure prints the diagnostics block and returns non-zero', async () => {

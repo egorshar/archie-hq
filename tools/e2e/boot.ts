@@ -216,7 +216,16 @@ export async function runBoot(deps: BootDeps, opts: BootOpts): Promise<number> {
   const outcome = await waitForHealth(
     {
       fetchHealth: deps.fetchHealth,
-      readPs: async () => (await deps.exec('docker', ['compose', 'ps', '--format', 'json'])).stdout,
+      readPs: async () => {
+        // The exec wrapper never rejects, so a failed ps must be surfaced as a rejection here:
+        // waitForHealth then skips the container check that tick instead of misreading empty
+        // stdout as "archie container gone" and aborting a boot that was about to succeed.
+        const ps = await deps.exec('docker', ['compose', 'ps', '--format', 'json']);
+        if (ps.code !== 0) {
+          throw new Error(`docker compose ps failed (exit ${ps.code}): ${ps.stderr.trim() || '(no stderr)'}`);
+        }
+        return ps.stdout;
+      },
       now: deps.now,
       sleep: deps.sleep,
     },
@@ -235,12 +244,17 @@ export async function runBoot(deps: BootDeps, opts: BootOpts): Promise<number> {
 
 // ---- CLI main ----
 
-function parseArgs(argv: string[]): { timeoutFlag?: string } {
+/** Exported for tests. Throws on unknown arguments and on flags missing their value. */
+export function parseArgs(argv: string[]): { timeoutFlag?: string } {
   const result: { timeoutFlag?: string } = {};
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
     if (arg === '--timeout-seconds') {
-      result.timeoutFlag = argv[++i];
+      const value = argv[++i];
+      if (value === undefined) {
+        throw new Error('--timeout-seconds requires a value (usage: npx tsx tools/e2e/boot.ts [--timeout-seconds N])');
+      }
+      result.timeoutFlag = value;
     } else if (arg.startsWith('--timeout-seconds=')) {
       result.timeoutFlag = arg.slice('--timeout-seconds='.length);
     } else {
@@ -286,7 +300,11 @@ async function main(): Promise<void> {
       exec: makeExec({ cwd: repoRoot }),
       execBuild: makeExec({ cwd: repoRoot, echo: true }),
       fetchHealth: async () => {
-        const res = await fetch(`${baseUrl}/health`);
+        // Per-probe timeout so a wedged container can't stall a single fetch past the
+        // overall cap (undici's default is ~300s); an abort is just a failed probe and
+        // waitForHealth keeps polling until its own deadline.
+        const probeTimeoutMs = Math.min(10_000, timeoutSeconds * 1000);
+        const res = await fetch(`${baseUrl}/health`, { signal: AbortSignal.timeout(probeTimeoutMs) });
         return { status: res.status, body: await res.text() };
       },
       now: Date.now,
