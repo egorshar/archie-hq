@@ -20,8 +20,6 @@ Verify acceptance criteria against a live Archie instance booted from the branch
 - For the edit-mode scenario only: at least one configured engineering repo in the workdir (see the recipe's prerequisite note).
 - macOS Docker Desktop caveat: a wedged `docker-credential-desktop` helper can stall `docker compose up --build` during registry auth — upstream of the harness's bounded wait, so boot appears to hang before any diagnostics. Verify with `docker-credential-desktop list </dev/null`; if it hangs, point `DOCKER_CONFIG` at a scratch dir without `credsStore` for the run (leave your real `~/.docker/config.json` untouched).
 
-**Prior art / supersede note:** this skill takes the `.claude/skills/archie-e2e/` path from draft PR #71 (`feature/e2e-harness`), whose surviving value is Slack-specific (DM ingress, `resolve-bot.sh`, Slack round-trip assertions). PR #71 rebases on top of this skill and re-lands its Slack material as an extension (e.g. an additional scenario recipe); CLI/API ingress here is the general-purpose harness Forge Stage 4 needs.
-
 **Rollback:** delete `.claude/skills/archie-e2e/` and `tools/e2e/` — the harness has no side effects and nothing else references them (plus one `e2e-evidence/` line in `.gitignore`).
 
 ## 1. Boot
