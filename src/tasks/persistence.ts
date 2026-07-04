@@ -5,7 +5,7 @@
  * appending to knowledge.log
  */
 
-import { mkdir, readFile, writeFile, appendFile } from 'fs/promises';
+import { mkdir, readdir, readFile, writeFile, appendFile } from 'fs/promises';
 import { createReadStream, existsSync } from 'fs';
 import { createInterface } from 'readline';
 import { join } from 'path';
@@ -552,6 +552,33 @@ export async function readKnowledgeLog(taskId: string): Promise<string> {
 }
 
 /**
+ * Candidate scan: task IDs whose shared/metadata.json contains `needle` as a
+ * plain substring, in directory order. Pure fs — the needles carry external
+ * input (webhook branch names, Slack thread ids), which previously reached a
+ * shell via grep interpolation. A substring hit only narrows candidates;
+ * callers verify matches structurally against the parsed metadata.
+ */
+async function scanMetadataFiles(needle: string): Promise<string[]> {
+  let dirs: string[];
+  try {
+    dirs = await readdir(SESSIONS_DIR);
+  } catch {
+    return [];
+  }
+  const hits: string[] = [];
+  for (const dir of dirs) {
+    if (!dir.startsWith('task-')) continue;
+    try {
+      const text = await readFile(join(SESSIONS_DIR, dir, 'shared', 'metadata.json'), 'utf-8');
+      if (text.includes(needle)) hits.push(dir);
+    } catch {
+      // No readable metadata.json — not a task session.
+    }
+  }
+  return hits;
+}
+
+/**
  * Find a task by Slack thread ID.
  * Checks in-memory active tasks first (instant), then scans disk.
  */
@@ -564,33 +591,19 @@ export async function findTaskByThread(threadId: string): Promise<string | null>
     if (found) return taskId;
   }
 
-  // Disk: grep metadata files not loaded in memory
+  // Disk: scan metadata files not loaded in memory. JSON.stringify matches the
+  // serialized form exactly (saveMetadata writes JSON.stringify(…, 2)).
   await ensureSessionsDir();
-
-  try {
-    const { execSync } = await import('child_process');
-    const grepResult = execSync(
-      `grep -l '"thread_id": "${threadId}"' ${SESSIONS_DIR}/task-*/shared/metadata.json 2>/dev/null || true`,
-      { encoding: 'utf-8' }
-    ).trim();
-
-    if (grepResult) {
-      const taskIdMatch = grepResult.split('\n')[0].match(/task-[a-z0-9-]+/i);
-      if (taskIdMatch) return taskIdMatch[0];
-    }
-  } catch {
-    // Fallback silently if grep fails
-  }
-
-  return null;
+  const hits = await scanMetadataFiles(`"thread_id": ${JSON.stringify(threadId)}`);
+  return hits[0] ?? null;
 }
 
 /**
  * Find a task by PR number and repo.
  *
- * Uses grep to find candidates, then verifies that some agent on the task has
- * an AttachedRepo for the matching github with a branch state pointing at the
- * given PR number.
+ * Scans metadata files for candidates, then verifies that some agent on the
+ * task has an AttachedRepo for the matching github with a branch state
+ * pointing at the given PR number.
  */
 export async function findTaskByPRNumber(
   githubRepo: string,
@@ -599,21 +612,7 @@ export async function findTaskByPRNumber(
   await ensureSessionsDir();
 
   try {
-    // Use grep to find metadata files containing the PR number
-    const { execSync } = await import('child_process');
-    const grepResult = execSync(
-      `grep -l '"pr_number": ${prNumber}' ${SESSIONS_DIR}/task-*/shared/metadata.json 2>/dev/null || true`,
-      { encoding: 'utf-8' }
-    ).trim();
-
-    if (!grepResult) return null;
-
-    // Check each candidate to verify repo matches
-    for (const filePath of grepResult.split('\n')) {
-      const taskIdMatch = filePath.match(/task-[a-z0-9-]+/i);
-      if (!taskIdMatch) continue;
-
-      const taskId = taskIdMatch[0];
+    for (const taskId of await scanMetadataFiles(`"pr_number": ${prNumber}`)) {
       const metadata = await loadMetadata(taskId);
       if (!metadata) continue;
 
@@ -639,7 +638,7 @@ export async function findTaskByPRNumber(
       }
     }
   } catch {
-    // Fallback silently if grep fails
+    // Fallback silently if the scan or metadata walk fails
   }
 
   return null;
@@ -659,23 +658,13 @@ export async function findTaskByBranch(
   if (!branch) return null;
 
   try {
-    const { execSync } = await import('child_process');
-    // Candidate-narrowing grep: the branch string appears as a branch_states
-    // key (it may also match a current_branch/base_branch value — harmless, the
-    // `branch in branch_states` check below filters those out). Fixed-string
-    // (-F) because branch names contain regex-special chars like '/'.
-    const grepResult = execSync(
-      `grep -lF '"${branch}"' ${SESSIONS_DIR}/task-*/shared/metadata.json 2>/dev/null || true`,
-      { encoding: 'utf-8' }
-    ).trim();
-
-    if (!grepResult) return null;
-
-    for (const filePath of grepResult.split('\n')) {
-      const taskIdMatch = filePath.match(/task-[a-z0-9-]+/i);
-      if (!taskIdMatch) continue;
-
-      const taskId = taskIdMatch[0];
+    // Candidate-narrowing scan: the branch appears as a branch_states key (it
+    // may also match a current_branch/base_branch value — harmless, the
+    // `branch in branch_states` check below filters those out). The branch is
+    // webhook-controlled and may contain quotes and shell metacharacters, so
+    // it must never reach a shell; JSON.stringify also matches the serialized
+    // (escaped) form exactly.
+    for (const taskId of await scanMetadataFiles(JSON.stringify(branch))) {
       const metadata = await loadMetadata(taskId);
       if (!metadata) continue;
 
@@ -691,7 +680,7 @@ export async function findTaskByBranch(
       }
     }
   } catch {
-    // Fallback silently if grep fails
+    // Fallback silently if the scan or metadata walk fails
   }
 
   return null;
@@ -699,27 +688,16 @@ export async function findTaskByBranch(
 
 /**
  * Find all tasks with a given status.
- * Uses grep to find matching files in one pass (faster than reading every metadata.json).
+ * Substring scan narrows candidates without parsing every metadata.json.
  */
 export async function findTasksByStatus(
   status: 'in_progress' | 'stopped' | 'completed'
 ): Promise<TaskMetadata[]> {
   await ensureSessionsDir();
 
-  const { execSync } = await import('child_process');
-  const grepResult = execSync(
-    `grep -l '"status": "${status}"' ${SESSIONS_DIR}/task-*/shared/metadata.json 2>/dev/null || true`,
-    { encoding: 'utf-8' }
-  ).trim();
-
-  if (!grepResult) return [];
-
   const tasks: TaskMetadata[] = [];
-  for (const filePath of grepResult.split('\n')) {
-    const taskIdMatch = filePath.match(/task-[a-z0-9-]+/i);
-    if (!taskIdMatch) continue;
-
-    const metadata = await loadMetadata(taskIdMatch[0]);
+  for (const taskId of await scanMetadataFiles(`"status": ${JSON.stringify(status)}`)) {
+    const metadata = await loadMetadata(taskId);
     if (metadata) tasks.push(metadata);
   }
 

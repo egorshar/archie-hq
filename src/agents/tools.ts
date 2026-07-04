@@ -40,6 +40,7 @@ function formatSlackSendError(err: unknown): string {
 }
 import { findSlackUsers, findSlackChannels, getSlackFileInfo, downloadSlackFile } from '../connectors/slack/client.js';
 import { readCanvas } from '../connectors/slack/canvas-read.js';
+import { collectCanvasFileAllowlist } from '../connectors/slack/channel-canvas.js';
 import { scheduleReminder, cancelReminder } from '../system/reminder-scheduler.js';
 import * as chrono from 'chrono-node';
 import { writeFile } from 'fs/promises';
@@ -1749,6 +1750,15 @@ function createFetchSlackReferenceTool(agent: Agent, task: Task) {
       const fileId = extractSlackFileId(args.reference);
       if (!fileId) {
         return err(`No Slack file id found in "${args.reference}". Pass a Slack file link or an F… id.`);
+      }
+      // Scope to canvas-referenced files only: the bot token can read far more
+      // of the workspace than this task should reach, so an unscoped id would
+      // let prompt-influenced input exfiltrate arbitrary accessible files.
+      const allowed = await collectCanvasFileAllowlist(task.metadata);
+      if (!allowed.has(fileId)) {
+        return err(
+          `File ${fileId} is not referenced by an adopted channel canvas for this task — only the canvas itself or files it references can be fetched.`,
+        );
       }
       const cwd = requireSandbox(agent).cwd;
       try {
