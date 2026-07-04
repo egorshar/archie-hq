@@ -15,11 +15,11 @@
 
 ## 3. Evidence writer
 
-- [ ] 3.1 Create `tools/e2e/evidence.ts` defining the `archie-e2e-evidence/v1` schema types and a pure `validateEvidence(payload)` — required fields present, `assertions` non-empty, each assertion has `id/description/expected/observed/pass`, `result` equals the AND of assertion passes, `terminal_state` in the allowed union — returning structured errors
-- [ ] 3.2 Add a pure `renderEvidenceMarkdown(evidence)` producing the reviewer-facing `.md` (scenario, ACs, timestamps, assertion table with pass/fail, excerpts as fenced blocks, verdict)
-- [ ] 3.3 Add `tools/e2e/evidence.test.ts`: valid payload passes; missing assertions / inconsistent `result` / bad `terminal_state` rejected with named errors; markdown render includes every assertion and the verdict; stdin EOF mid-JSON (truncated input) → classed error, non-zero exit path, and NO files on disk
-- [ ] 3.4 Wire the CLI `main` with all-or-nothing semantics: read stdin fully into memory then parse (truncated/malformed JSON → clear classed error, e.g. "truncated JSON input from stdin", exit non-zero, no files written); `--in <file>` validates existence/readability before open; on valid payload write `<out-dir>/<scenario>.json` + `<out-dir>/<scenario>.md` atomically via temp-file + rename, transactionally (both files land or neither; clean up temps on failure); destination from `--out-dir` / `E2E_EVIDENCE_DIR` / default `./e2e-evidence/`; invalid payload exits non-zero printing the validation errors, writing nothing
-- [ ] 3.5 Add `e2e-evidence/` to `.gitignore`
+- [x] 3.1 Create `tools/e2e/evidence.ts` defining the `archie-e2e-evidence/v1` schema types and a pure `validateEvidence(payload)` — required fields present, `assertions` non-empty, each assertion has `id/description/expected/observed/pass`, `result` equals the AND of assertion passes, `terminal_state` in the allowed union — returning structured errors
+- [x] 3.2 Add a pure `renderEvidenceMarkdown(evidence)` producing the reviewer-facing `.md` (scenario, ACs, timestamps, assertion table with pass/fail, excerpts as fenced blocks, verdict)
+- [x] 3.3 Add `tools/e2e/evidence.test.ts`: valid payload passes; missing assertions / inconsistent `result` / bad `terminal_state` rejected with named errors; markdown render includes every assertion and the verdict; stdin EOF mid-JSON (truncated input) → classed error, non-zero exit path, and NO files on disk
+- [x] 3.4 Wire the CLI `main` with all-or-nothing semantics: read stdin fully into memory then parse (truncated/malformed JSON → clear classed error, e.g. "truncated JSON input from stdin", exit non-zero, no files written); `--in <file>` validates existence/readability before open; on valid payload write `<out-dir>/<scenario>.json` + `<out-dir>/<scenario>.md` atomically via temp-file + rename, transactionally (both files land or neither; clean up temps on failure); destination from `--out-dir` / `E2E_EVIDENCE_DIR` / default `./e2e-evidence/`; invalid payload exits non-zero printing the validation errors, writing nothing
+- [x] 3.5 Add `e2e-evidence/` to `.gitignore`
 
 ## 4. Teardown
 
