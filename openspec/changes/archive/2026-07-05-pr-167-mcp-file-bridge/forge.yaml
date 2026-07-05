@@ -2,7 +2,7 @@ run: pr-167-mcp-file-bridge
 source: { type: pr, ref: "167" }
 repo: sweatco/archie-hq
 branch: archie/task-20260605-1434-l7is2a
-stage: ship
+stage: done
 stage_rounds: { implement: 3, qa: 2 }
 acceptance_criteria:
   - id: AC1
@@ -44,5 +44,5 @@ acceptance_criteria:
     text: "Image-swap works against real set_offer_image"
     method: deploy-only
     status: waived
-    evidence: "Post-merge step: run one dry-run swap via the bridge once sweatcoin-backend #13905 deploys"
+    evidence: "Post-merge check (no ticket, operator-run): one dry-run swap via the bridge once sweatcoin-backend #13905 deploys"
 pr: 167
