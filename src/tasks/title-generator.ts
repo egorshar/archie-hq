@@ -7,12 +7,12 @@
  * absence of a title as a benign fallback to channel_name.
  */
 
-import { query } from '@anthropic-ai/claude-agent-sdk';
 import { z, toJSONSchema } from 'zod';
 import type { SlackThread } from '../types/index.js';
 import { renderMessageForContext } from './persistence.js';
 import { isExternalUser } from '../connectors/slack/client.js';
 import { logger } from '../system/logger.js';
+import { getLlmOneShot } from '../system/backends.js';
 
 const REDACTION_PLACEHOLDER = '[redacted: external participant in shared channel]';
 
@@ -94,40 +94,20 @@ ${transcript}
 
 Respond with JSON only.`;
 
-    for await (const event of query({
+    const raw = await getLlmOneShot().json({
       prompt,
-      options: {
-        model: 'haiku',
-        systemPrompt: SYSTEM_PROMPT,
-        executable: 'node',
-        env: {
-          NODE_ENV: process.env.NODE_ENV || 'development',
-          ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
-          // Forward CA-trust to the spawned CLI (TLS-intercepting proxy); no-op when unset.
-          ...(process.env.NODE_USE_SYSTEM_CA ? { NODE_USE_SYSTEM_CA: process.env.NODE_USE_SYSTEM_CA } : {}),
-          ...(process.env.NODE_EXTRA_CA_CERTS ? { NODE_EXTRA_CA_CERTS: process.env.NODE_EXTRA_CA_CERTS } : {}),
-          PATH: process.env.PATH,
-        },
-        tools: [],
-        maxTurns: 2,
-        outputFormat: {
-          type: 'json_schema',
-          schema: titleJsonSchema,
-        },
-      },
-    })) {
-      if (event.type !== 'result') continue;
-      if (event.subtype === 'success') {
-        const parsed = TitleSchema.safeParse((event as any).structured_output);
-        if (parsed.success) {
-          result = parsed.data;
-        } else {
-          logger.warn('title-generator', `schema validation failed: ${parsed.error.message}`);
-        }
-      } else {
-        logger.warn('title-generator', `haiku call failed: ${event.subtype}`);
-      }
+      model: 'haiku',
+      systemPrompt: SYSTEM_PROMPT,
+      maxTurns: 2,
+      jsonSchema: titleJsonSchema,
+    });
+    if (!raw) return null;
+    const parsed = TitleSchema.safeParse(raw);
+    if (!parsed.success) {
+      logger.warn('title-generator', `schema validation failed: ${parsed.error.message}`);
+      return null;
     }
+    result = parsed.data;
 
     if (!result) return null;
     return cleanTitle(result.title);
