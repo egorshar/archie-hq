@@ -18,7 +18,13 @@ import { summarizeCi } from '../../system/pr-card-format.js';
 import { glRequest, glRequestAll } from './http.js';
 import { mapDetailedMergeStatus, mapMrState, mapPipelineStatusToConclusion } from './status-map.js';
 
-const NOT_IMPL = (name: string) => new Error(`GitLabHost.${name} not implemented until Plan 2`);
+/** Map GitLab vulnerability state vocabulary to canonical open|dismissed|fixed. */
+const VULN_STATE_TO_CANONICAL: Record<string, string> = {
+  detected: 'open',
+  confirmed: 'open',
+  dismissed: 'dismissed',
+  resolved: 'fixed',
+};
 
 export class GitLabHost implements RepoHost {
   readonly kind = 'gitlab' as const;
@@ -539,7 +545,7 @@ export class GitLabHost implements RepoHost {
     const loc = v.location ?? {};
     return {
       number: v.id,
-      state: v.state ?? 'detected',
+      state: VULN_STATE_TO_CANONICAL[v.state] ?? 'open',
       tool: v.report_type ?? 'unknown',
       ruleId: v.identifier ?? null,
       ruleName: v.name ?? null,
@@ -553,7 +559,7 @@ export class GitLabHost implements RepoHost {
       dismissedComment: null,
       mostRecentInstance: {
         ref: null,
-        state: v.state ?? null,
+        state: v.state ? (VULN_STATE_TO_CANONICAL[v.state] ?? 'open') : null,
         path: loc.file ?? null,
         startLine: loc.start_line ?? null,
         endLine: loc.end_line ?? null,
