@@ -96,3 +96,26 @@ describe('GitLabHost.getPRComments', () => {
     expect(comments[0]).toMatchObject({ id: 1, author: 'alice', body: 'hi' });
   });
 });
+
+describe('GitLabHost.listPRChecks', () => {
+  it('maps the latest pipeline jobs into a PRChecksReport', async () => {
+    process.env.GITLAB_BASE_URL = 'https://gl.example';
+    process.env.GITLAB_TOKEN = 't';
+    vi.stubGlobal('fetch', vi.fn()
+      // MR (for head sha + pipeline)
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        sha: 'abc123', head_pipeline: { id: 55 },
+      }), { status: 200 }))
+      // pipeline jobs
+      .mockResolvedValueOnce(new Response(JSON.stringify([
+        { id: 1, name: 'build', status: 'success', stage: 'build', web_url: 'u1', started_at: null, finished_at: null },
+        { id: 2, name: 'test', status: 'failed', stage: 'test', web_url: 'u2', started_at: null, finished_at: null },
+      ]), { status: 200 })));
+
+    const host = new GitLabHost();
+    const report = await host.listPRChecks('group/proj', 7);
+    expect(report.headSha).toBe('abc123');
+    expect(report.entries).toHaveLength(2);
+    expect(report.entries[1]).toMatchObject({ name: 'test', conclusion: 'failure', source: 'check_run' });
+  });
+});
