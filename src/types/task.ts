@@ -287,6 +287,18 @@ export interface TaskMetadata {
    * user — in which case authoring falls back to the bot (the prior behaviour).
    */
   edit_approved_by?: { id: string; name: string; email?: string };
+  /**
+   * The single pending merge-approval request (written by `merge_pull_request`
+   * on a non-auto repo, cleared on every resolution — approve or deny). A
+   * request record, not a grant: merge approval is one-shot per PR, not a
+   * task-lifetime mode. Survives restart like `edit_allowed`.
+   */
+  pending_merge_approval?: {
+    github: string;       // repo of the requested PR
+    pr_number: number;    // which PR to merge on approval
+    requested_by: string; // agent id — to clear its parked teardown on resolution
+    requested_at: string; // ISO 8601, for the audit finding
+  };
   research_budget_extra?: number;    // Additional research budget granted via Slack approval (+5 per approval)
   research_request_count?: number;   // Persisted research request count (survives stop/reactivate)
   failure_counter?: number;          // Consecutive recovery attempts (Stage 3 idle detection)
