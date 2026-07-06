@@ -80,7 +80,7 @@ GitLab 18.x exposes `detailed_merge_status` on the MR. Mapping to `MergeableStat
 
 ### 5. Plugin frontmatter unchanged
 
-One `REPO_HOST` per deployment. The existing plugin-frontmatter repo-id field (`github: group/project`) is simply interpreted under the active host — GitLab reads it as `group/project`. No `plugin-loader.ts` change, no mixed-host frontmatter, no `metadata.archie.repo.host` work (that's a later, multi-host concern). Keeps Phase 1 focused.
+One `REPO_HOST` per deployment — a global switch, not per-repo. The existing plugin-frontmatter repo-id field (`github: group/project`) is simply interpreted under the active host — GitLab reads it as `group/project`. No `plugin-loader.ts` change and no `metadata.archie.repo.host` field. Mixed-host operation (different repos on different hosts in one process) is **not a goal of this effort** and is dropped, not deferred; the spec §4 per-repo `host:` field is intentionally not implemented.
 
 ## Capability probe (spec R2)
 
@@ -131,7 +131,8 @@ Implement exactly the surface the tools use. `repo` = `group/project`; URL-encod
 
 ## Out of scope (Phase 1)
 
-- opencode runtime (Phase 2); PR→CR / github→repo neutral renaming (Phase 4); mixed-host plugin frontmatter; horizontal scaling; triage re-enablement; Slack-layer changes.
+- opencode runtime (Phase 2); PR→CR / github→repo neutral renaming (Phase 4); horizontal scaling; triage re-enablement; Slack-layer changes.
+- Mixed-host operation (per-repo host selection / spec §4 `host:` frontmatter) is dropped from this effort entirely — one `REPO_HOST` per deployment is the model (see decision 5).
 
 ## Acceptance
 
