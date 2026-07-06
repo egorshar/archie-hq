@@ -1044,6 +1044,9 @@ function createListCodeScanningAlertsTool(agent: Agent, task: Task) {
       if (!resolved.ok) return err(resolved.error);
       const client = getRepoHost();
       if (!client) throw new Error('GitHub client not configured');
+      if (!client.capabilities().securityAlerts) {
+        return err(`Code scanning alerts are not available on this repo host (${client.kind}).`);
+      }
 
       let alerts;
       try {
@@ -1096,6 +1099,9 @@ function createGetCodeScanningAlertTool(agent: Agent, task: Task) {
       if (!resolved.ok) return err(resolved.error);
       const client = getRepoHost();
       if (!client) throw new Error('GitHub client not configured');
+      if (!client.capabilities().securityAlerts) {
+        return err(`Code scanning alerts are not available on this repo host (${client.kind}).`);
+      }
 
       let alert;
       try {
