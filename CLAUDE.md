@@ -28,6 +28,7 @@ Slack messages → PM Agent → Specialist Agents (Backend, Mobile)
 - **Plugin agents** handle non-engineering domains (generic, no git infrastructure)
 - Agents communicate via message queues and shared `shared-knowledge.log`
 - `docs/` contains architecture docs, guides, historical plans, and proposals
+- Backend seams (repo host / agent runtime) are abstracted behind src/ports/ and resolved by src/system/backends.ts; see docs/architecture/backends.md.
 
 ## Working Directory
 
