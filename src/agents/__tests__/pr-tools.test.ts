@@ -807,3 +807,33 @@ describe('findBranchStateByPR', () => {
     expect(findBranchStateByPR(attached, 42)).toBeUndefined();
   });
 });
+
+describe('dispatch_workflow — capability gating', () => {
+  const makeHost = (workflowDispatch: boolean) => ({
+    kind: 'gitlab' as const,
+    capabilities: vi.fn().mockReturnValue({
+      reviewStates: false, securityAlerts: false, nativeAutoMerge: true, reReviewRequest: false, workflowDispatch,
+    }),
+    dispatchWorkflow: vi.fn().mockResolvedValue({ id: 42, url: 'https://gl/-/pipelines/42' }),
+  });
+
+  beforeEach(() => { vi.clearAllMocks(); });
+
+  it('short-circuits when workflowDispatch is off (no API call)', async () => {
+    const host = makeHost(false);
+    vi.mocked(getGitHubClient).mockReturnValue(host as any);
+    const tool = getRepoTool(makeAgent(), makeTask(), 'dispatch_workflow');
+    const result = await tool({ repo: 'flant/infra/review', ref: 'ci-bot/us-trigger', inputs: { US_BOT: 'true' } }, {});
+    expect(result.content[0].text).toMatch(/not available/i);
+    expect(host.dispatchWorkflow).not.toHaveBeenCalled();
+  });
+
+  it('dispatches and returns the pipeline url when enabled', async () => {
+    const host = makeHost(true);
+    vi.mocked(getGitHubClient).mockReturnValue(host as any);
+    const tool = getRepoTool(makeAgent(), makeTask(), 'dispatch_workflow');
+    const result = await tool({ repo: 'flant/infra/review', ref: 'ci-bot/us-trigger', inputs: { WERF_NEW_NAMESPACE: 'feature-sweed-123', US_BOT: 'true' } }, {});
+    expect(host.dispatchWorkflow).toHaveBeenCalledWith('flant/infra/review', 'ci-bot/us-trigger', { inputs: { WERF_NEW_NAMESPACE: 'feature-sweed-123', US_BOT: 'true' } });
+    expect(result.content[0].text).toContain('https://gl/-/pipelines/42');
+  });
+});

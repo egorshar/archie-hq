@@ -169,6 +169,8 @@ const SPAWN_REPO_TOOLS = [
   // Security / code scanning
   'mcp__repo-tools__list_code_scanning_alerts',
   'mcp__repo-tools__get_code_scanning_alert',
+  // CI dispatch
+  'mcp__repo-tools__dispatch_workflow',
   // PR write
   'mcp__repo-tools__push_branch',
   'mcp__repo-tools__create_pull_request',

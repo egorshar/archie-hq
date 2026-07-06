@@ -1337,6 +1337,42 @@ function createListCodeScanningAlertsTool(agent: Agent, task: Task) {
   );
 }
 
+function createDispatchWorkflowTool(agent: Agent, task: Task) {
+  return tool(
+    'dispatch_workflow',
+    'Trigger a CI workflow run on a ref (GitHub workflow_dispatch; GitLab pipeline). ' +
+    'Use for actions like deploying a feature stand via a central pipeline. Pass the repo, the ref/branch to run, ' +
+    'and inputs as a flat string map (they map to GitLab pipeline variables / GitHub workflow inputs). ' +
+    'Returns the run/pipeline id and URL to watch.',
+    {
+      // Deliberately NOT resolveGithub(agent, args.github): this tool dispatches on an arbitrary
+      // target repo (e.g. a central CI/infra repo) that the calling agent is not bound to, so the
+      // caller must pass the target repo directly rather than resolving against its own bound repos.
+      repo: z.string().describe('Repo "group/project" (GitLab) or "owner/name" (GitHub) to run the workflow in.'),
+      ref: z.string().describe('Branch/ref to run the workflow on, e.g. "ci-bot/us-trigger".'),
+      inputs: z.record(z.string(), z.string()).optional().describe('Flat key→value params (GitLab pipeline variables / GitHub workflow inputs).'),
+      workflow: z.string().optional().describe('GitHub only: the workflow file/id to dispatch. Ignored by GitLab.'),
+    },
+    async (args) => {
+      const client = getRepoHost();
+      if (!client) throw new Error('Repo host not configured');
+      if (!client.capabilities().workflowDispatch) {
+        return err(`Workflow dispatch is not available on this repo host (${client.kind}).`);
+      }
+      let res;
+      try {
+        res = await client.dispatchWorkflow(args.repo, args.ref, {
+          ...(args.inputs ? { inputs: args.inputs } : {}),
+          ...(args.workflow ? { workflow: args.workflow } : {}),
+        });
+      } catch (e) {
+        return err(e instanceof Error ? e.message : String(e));
+      }
+      return ok(`Dispatched workflow on ${args.repo}@${args.ref}` + (res.url ? ` — ${res.url}` : res.id != null ? ` (id ${res.id})` : ''));
+    },
+  );
+}
+
 function createGetCodeScanningAlertTool(agent: Agent, task: Task) {
   return tool(
     'get_code_scanning_alert',
@@ -2645,6 +2681,8 @@ export function createRepoToolsMcpServer(agent: Agent, task: Task) {
       // Security / code scanning
       createListCodeScanningAlertsTool(agent, task),
       createGetCodeScanningAlertTool(agent, task),
+      // CI dispatch
+      createDispatchWorkflowTool(agent, task),
       // PR write
       createPushBranchTool(agent, task),
       createPullRequestTool(agent, task),
