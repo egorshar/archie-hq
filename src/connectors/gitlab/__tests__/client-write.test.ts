@@ -1,0 +1,92 @@
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { GitLabHost } from '../client.js';
+
+const ENV = { ...process.env };
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+  process.env = { ...ENV };
+});
+
+function setEnv() {
+  process.env.GITLAB_BASE_URL = 'https://gl.example';
+  process.env.GITLAB_TOKEN = 't';
+}
+
+describe('GitLabHost.createPullRequest', () => {
+  it('POSTs an MR and returns iid + web_url', async () => {
+    setEnv();
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ iid: 12, web_url: 'https://gl.example/g/p/-/merge_requests/12' }), { status: 201 })
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const host = new GitLabHost();
+    const res = await host.createPullRequest('g/p', 'feat/x', 'main', 'Title', 'Body');
+    expect(res).toEqual({ pr_number: 12, pr_url: 'https://gl.example/g/p/-/merge_requests/12' });
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toContain('/projects/g%2Fp/merge_requests');
+    expect(init.method).toBe('POST');
+    const body = JSON.parse(init.body);
+    expect(body).toMatchObject({ source_branch: 'feat/x', target_branch: 'main', title: 'Title', description: 'Body' });
+  });
+});
+
+describe('GitLabHost.mergePullRequest', () => {
+  it('squashes by default and returns success', async () => {
+    setEnv();
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ state: 'merged' }), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const host = new GitLabHost();
+    const res = await host.mergePullRequest('g/p', 12);
+    expect(res.success).toBe(true);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toContain('/merge_requests/12/merge');
+    expect(init.method).toBe('PUT');
+    expect(JSON.parse(init.body)).toMatchObject({ squash: true });
+  });
+
+  it('returns success:false with the error message on failure', async () => {
+    setEnv();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('Method Not Allowed', { status: 405 })));
+    const host = new GitLabHost();
+    const res = await host.mergePullRequest('g/p', 12);
+    expect(res.success).toBe(false);
+    expect(res.message).toMatch(/405|Method Not Allowed/);
+  });
+});
+
+describe('GitLabHost.closePullRequest / updatePR / addPRComment', () => {
+  it('closePullRequest PUTs state_event=close', async () => {
+    setEnv();
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({}), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    await new GitLabHost().closePullRequest('g/p', 12);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toContain('/merge_requests/12');
+    expect(init.method).toBe('PUT');
+    expect(JSON.parse(init.body)).toMatchObject({ state_event: 'close' });
+  });
+
+  it('updatePR maps title/body/base to title/description/target_branch', async () => {
+    setEnv();
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({}), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    await new GitLabHost().updatePR('g/p', 12, { title: 'T', body: 'B', base: 'develop' });
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body).toEqual({ title: 'T', description: 'B', target_branch: 'develop' });
+  });
+
+  it('addPRComment POSTs a note', async () => {
+    setEnv();
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ id: 1 }), { status: 201 }));
+    vi.stubGlobal('fetch', fetchMock);
+    await new GitLabHost().addPRComment('g/p', 12, 'hello');
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toContain('/merge_requests/12/notes');
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(init.body)).toEqual({ body: 'hello' });
+  });
+});
