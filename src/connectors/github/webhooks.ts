@@ -10,11 +10,19 @@
 
 import crypto from 'crypto';
 import { extractTaskIdFromBranch } from './branch-naming.js';
-import { checkAndMergeLinkedPRs } from './merge.js';
-import { findTaskByPRNumber, loadMetadata, appendGitHubEvent } from '../../tasks/persistence.js';
-import { Task } from '../../tasks/task.js';
-import { AGENT_PROMPTS } from '../../agents/prompts.js';
-import { logger } from '../../system/logger.js';
+import { findTaskByPRNumber, loadMetadata } from '../../tasks/persistence.js';
+import {
+  determineRouteAction,
+  handleMergeCheckDirect,
+  handleChecksReadyDirect,
+} from '../shared/cr-router.js';
+import type { NormalizedEventContext } from '../../ports/repo-host-events.js';
+import type { RepoHostEventSource } from '../../ports/repo-host-events.js';
+
+// Re-exported so `events.ts` (and any other consumer importing from this
+// module) keeps resolving these names — their definitions now live in the
+// host-agnostic shared/cr-router.ts (Task 12).
+export { handleMergeCheckDirect, handleChecksReadyDirect };
 
 // ============================================================================
 // Signature Verification
@@ -251,94 +259,13 @@ export function formatGitHubEvent(context: GitHubEventContext): FormattedGitHubE
 }
 
 // ============================================================================
-// Merge Check Handling
-// ============================================================================
-
-/**
- * Debounce timers for merge checks (per task)
- */
-const mergeCheckTimers = new Map<string, NodeJS.Timeout>();
-const MERGE_CHECK_DEBOUNCE_MS = 5000;
-
-/**
- * Handle merge check with debouncing
- *
- * Called for: PR approval, push, CI success
- * Debounces to avoid redundant checks when webhooks arrive in bursts.
- */
-export function handleMergeCheckDirect(taskId: string): void {
-  // Cancel any pending merge check for this task
-  const existingTimer = mergeCheckTimers.get(taskId);
-  if (existingTimer) {
-    clearTimeout(existingTimer);
-    logger.system(`GitHub: Debouncing merge check for task ${taskId}`);
-  }
-
-  // Schedule new merge check after debounce delay
-  const timer = setTimeout(async () => {
-    mergeCheckTimers.delete(taskId);
-    logger.system(`GitHub: Running merge check for task ${taskId}`);
-    await checkAndMergeLinkedPRs(taskId);
-  }, MERGE_CHECK_DEBOUNCE_MS);
-
-  mergeCheckTimers.set(taskId, timer);
-}
-
-// ============================================================================
-// Checks-Ready Debouncing
-// ============================================================================
-
-/**
- * Per-PR debounce timers for check_suite.completed events. A push typically
- * triggers several check suites which complete within seconds of each other;
- * we coalesce them into a single PM ping so the agent inspects checks once.
- *
- * Key format: `${taskId}:${githubRepo}#${prNumber}` — per-PR, not per-task.
- */
-const checksReadyTimers = new Map<string, NodeJS.Timeout>();
-const CHECKS_READY_DEBOUNCE_MS = 20_000;
-
-/**
- * Handle check_suite.completed with per-PR debouncing.
- *
- * Resets the timer on every event in the window; on fire, appends one
- * structured GitHub event to knowledge.log and wakes PM with the standard
- * `existingTask` prompt. PM is expected to call `get_pr_checks` to inspect.
- */
-export function handleChecksReadyDirect(
-  taskId: string,
-  githubRepo: string,
-  prNumber: number
-): void {
-  const key = `${taskId}:${githubRepo}#${prNumber}`;
-  const existingTimer = checksReadyTimers.get(key);
-  if (existingTimer) {
-    clearTimeout(existingTimer);
-    logger.system(`GitHub: Debouncing checks_ready for ${key}`);
-  }
-
-  const timer = setTimeout(async () => {
-    checksReadyTimers.delete(key);
-    logger.system(`GitHub: Firing checks_ready for ${key}`);
-    try {
-      await appendGitHubEvent(taskId, githubRepo, {
-        from: 'ci',
-        destination: `PR #${prNumber}`,
-        message: `checks updated — call get_pr_checks(${prNumber}) to inspect`,
-      });
-      const task = await Task.get(taskId);
-      await task.sendMessage(AGENT_PROMPTS.existingTask, 'pm-agent');
-    } catch (error) {
-      logger.error('checks-ready', `Failed to deliver checks_ready ping for ${key}`, error);
-    }
-  }, CHECKS_READY_DEBOUNCE_MS);
-
-  checksReadyTimers.set(key, timer);
-}
-
-// ============================================================================
 // GitHub Routing (merged from system/webhook-router.ts)
 // ============================================================================
+//
+// Merge-check and checks-ready debounced handling (handleMergeCheckDirect,
+// handleChecksReadyDirect) and the routing decision (determineRouteAction)
+// now live in ../shared/cr-router.ts (Task 12) since they depend only on the
+// host-agnostic NormalizedEventContext + task ids, not on raw GitHub payloads.
 
 /**
  * Route result for GitHub events
@@ -353,66 +280,6 @@ export type GitHubRouteResult =
       githubRepo: string;
       prNumber: number;
     };
-
-/**
- * Internal route action
- */
-type InternalRouteAction = 'merge_check' | 'existing_task' | 'checks_ready' | 'noop';
-
-/**
- * Deterministic routing based on event type
- */
-function determineRouteAction(context: GitHubEventContext): InternalRouteAction {
-  const { eventType, action, state } = context;
-
-  switch (eventType) {
-    case 'pull_request_review':
-      if (state === 'approved') return 'merge_check';
-      if (state === 'changes_requested') return 'existing_task';
-      if (state === 'commented') return 'existing_task';
-      return 'noop';
-
-    case 'pull_request_review_comment':
-      return 'existing_task';
-
-    case 'issue_comment':
-      if (action !== 'created') return 'noop';
-      return 'existing_task';
-
-    case 'pull_request':
-      if (action === 'closed') return 'existing_task';
-      if (action === 'opened' || action === 'synchronize') return 'merge_check';
-      return 'noop';
-
-    case 'push':
-      return 'merge_check';
-
-    case 'workflow_run':
-      if (action === 'completed') {
-        if (state === 'failure') return 'existing_task';
-        return 'merge_check';
-      }
-      return 'noop';
-
-    case 'check_suite':
-      if (action !== 'completed') return 'noop';
-      // Only wake PM on failure-like conclusions. Success/neutral/skipped
-      // are already covered by the pre-existing merge triggers
-      // (workflow_run, push, pull_request_review) — no need to duplicate.
-      if (
-        state === 'failure' ||
-        state === 'cancelled' ||
-        state === 'timed_out' ||
-        state === 'action_required'
-      ) {
-        return 'checks_ready';
-      }
-      return 'noop';
-
-    default:
-      return 'noop';
-  }
-}
 
 /**
  * Get our GitHub App bot username (e.g., "archie-hq[bot]")
@@ -476,8 +343,11 @@ export async function routeGitHubEvent(
     return { action: 'discard', reason: `Task ${taskId} not found` };
   }
 
-  // Determine route action
-  const routeAction = determineRouteAction(context);
+  // Determine route action via the shared, host-agnostic router (Task 12).
+  // GitHubEventContext is a superset of NormalizedEventContext; map its
+  // `githubRepo` field to the host-neutral `repo` field expected there.
+  const normalizedContext: NormalizedEventContext = { ...context, repo: context.githubRepo };
+  const routeAction = determineRouteAction(normalizedContext);
 
   switch (routeAction) {
     case 'existing_task':
@@ -503,3 +373,26 @@ export async function routeGitHubEvent(
       return { action: 'discard', reason: `No action needed for ${eventType}/${context.action}` };
   }
 }
+
+// ============================================================================
+// RepoHostEventSource conformer
+// ============================================================================
+
+/**
+ * GitHub's RepoHostEventSource — wraps the existing verify/parse/self-event
+ * functions so backends.ts can hand callers a host-neutral event source.
+ */
+export const githubEventSource: RepoHostEventSource = {
+  kind: 'github',
+  verifySignature(rawBody, headers, secret) {
+    const sig = headers['x-hub-signature-256'];
+    return typeof sig === 'string' && verifyWebhookSignature(rawBody, sig, secret);
+  },
+  parseEvent(eventType, payload) {
+    const ctx = formatGitHubContext(eventType, payload as any);
+    return { ...ctx, repo: ctx.githubRepo };
+  },
+  isSelfEvent(context) {
+    return context.user === getGitHubAppBotUsername();
+  },
+};
