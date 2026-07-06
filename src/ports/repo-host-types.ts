@@ -202,6 +202,15 @@ export interface CodeScanningAlert {
   mostRecentInstance: CodeScanningAlertInstance | null;
 }
 
+/**
+ * Result of dispatching a CI workflow run (canonical). GitLab returns a pipeline
+ * (id + web_url); GitHub's workflow_dispatch returns no body, so both may be null.
+ */
+export interface WorkflowDispatchResult {
+  id: number | string | null;
+  url: string | null;
+}
+
 export interface CodeScanningAlertFilters {
   /** Alert state filter. Defaults to `open` at the call site. */
   state?: 'open' | 'dismissed' | 'fixed';
