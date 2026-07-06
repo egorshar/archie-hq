@@ -208,81 +208,19 @@ function findStashIndex(stashList: string, stashName: string): number | null {
   return null;
 }
 
-// ---- GitHub Types (moved here, re-exported for backward compat) ----
-
-export type MergeableState = 'clean' | 'dirty' | 'blocked' | 'behind' | 'unstable' | 'unknown';
-
-export interface PRStatus {
-  state: 'open' | 'merged' | 'closed';
-  mergeable: boolean;
-  mergeableState: MergeableState;
-  approved: boolean;
-}
-
-export interface PRReview {
-  id: string;
-  user: string;
-  state: 'approved' | 'changes_requested' | 'commented';
-  body: string;
-  submittedAt: string;
-}
-
-export interface ReviewThreadComment {
-  commentId: number;
-  author: string;
-  body: string;
-  createdAt: string;
-  url: string;
-}
-
-export interface ReviewThread {
-  threadId: string;
-  isResolved: boolean;
-  isOutdated: boolean;
-  path: string;
-  line: number | null;
-  comments: ReviewThreadComment[];
-}
-
-export interface PRComment {
-  id: number;
-  author: string;
-  body: string;
-  createdAt: string;
-  url: string;
-}
-
-export type CheckConclusion =
-  | 'success'
-  | 'failure'
-  | 'cancelled'
-  | 'timed_out'
-  | 'neutral'
-  | 'action_required'
-  | 'skipped'
-  | 'stale'
-  | null;
-
-export interface PRCheckEntry {
-  source: 'check_run' | 'status';
-  name: string;
-  app: string;
-  status: string;
-  conclusion: CheckConclusion;
-  url: string | null;
-  startedAt: string | null;
-  completedAt: string | null;
-  output?: {
-    title?: string;
-    summary?: string;
-    text?: string;
-  };
-}
-
-export interface PRChecksReport {
-  headSha: string;
-  entries: PRCheckEntry[];
-}
+// Host-neutral repo-host domain types live in the ports layer now. Re-exported
+// here so existing importers (`from '../../agents/tools.js'`) keep working.
+export type {
+  MergeableState,
+  PRStatus,
+  PRReview,
+  ReviewThread,
+  ReviewThreadComment,
+  PRComment,
+  CheckConclusion,
+  PRCheckEntry,
+  PRChecksReport,
+} from '../ports/repo-host-types.js';
 
 // ---- Tool creation helpers ----
 
