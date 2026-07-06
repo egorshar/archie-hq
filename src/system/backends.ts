@@ -7,8 +7,10 @@
 
 import type { RepoHost } from '../ports/repo-host.js';
 import type { AgentRuntime } from '../ports/agent-runtime.js';
+import type { LlmOneShot } from '../ports/llm-one-shot.js';
 import { getGitHubClient } from '../connectors/github/client.js';
 import { claudeSdkRuntime } from '../runtime/claude/runtime.js';
+import { claudeLlmOneShot } from '../runtime/claude/llm-one-shot.js';
 import { logger } from './logger.js';
 
 export type RepoHostKind = 'github' | 'gitlab';
@@ -87,4 +89,13 @@ export function getAgentRuntime(): AgentRuntime {
       logger.warn('backends', `getAgentRuntime() called for unsupported runtime "${runtime}"; defaulting to claude`);
       return claudeSdkRuntime;
   }
+}
+
+/**
+ * The active LlmOneShot (one-shot prompt→text/JSON calls). Tied to the agent
+ * runtime selection today (both are LLM-provider bindings) — Phase 0 has
+ * only one provider, so this always resolves to the Claude SDK impl.
+ */
+export function getLlmOneShot(): LlmOneShot {
+  return claudeLlmOneShot;
 }
