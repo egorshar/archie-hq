@@ -18,7 +18,7 @@ Verify acceptance criteria against a live Archie instance booted from the branch
 - `.env` at the repo root with a non-empty `ANTHROPIC_API_KEY`. **No Slack tokens are needed** — scenarios enter through the CLI/API channel.
 - The `archie-debug` MCP available (registered in `.mcp.json` as `npx tsx tools/debug-mcp/server.ts`). The harness consumes it as-is and never modifies `tools/debug-mcp/`.
 - For the edit-mode scenario only: at least one configured engineering repo in the workdir (see the recipe's prerequisite note).
-- macOS Docker Desktop caveat: a wedged `docker-credential-desktop` helper can stall `docker compose up --build` during registry auth — upstream of the harness's bounded wait, so boot appears to hang before any diagnostics. Verify with `docker-credential-desktop list </dev/null`; if it hangs, point `DOCKER_CONFIG` at a scratch dir without `credsStore` for the run (leave your real `~/.docker/config.json` untouched).
+- macOS Docker Desktop caveat: a wedged `docker-credential-desktop` helper can stall `docker compose up --build` during registry auth — upstream of the harness's bounded wait, so boot appears to hang before any diagnostics. Verify with `docker-credential-desktop list </dev/null`; if it hangs, point `DOCKER_CONFIG` at a scratch dir without `credsStore` for the run (leave your real `~/.docker/config.json` untouched). The scratch config also drops the `desktop-linux` context, so additionally set `DOCKER_HOST=unix://$HOME/.docker/run/docker.sock` or every docker command will fail to reach the daemon (observed in the 2026-07-05 QA run).
 
 **Rollback:** delete `.claude/skills/archie-e2e/` and `tools/e2e/` — the harness has no side effects and nothing else references them (plus one `e2e-evidence/` line in `.gitignore`).
 
@@ -38,7 +38,7 @@ On success it prints the resolved base URL and the `/health` body — paste both
 
 **Failure diagnostics** (printed on any compose-up or poll-phase failure, always followed by a non-zero exit): the `docker compose ps` table plus the last 100 lines of the archie container's logs (`docker compose logs --no-color --tail=100 archie`). Read the log tail first — missing env keys, plugin clone failures, and crash loops all surface there.
 
-**Boot time observations** (fills in at the first live run — Stage 4 of the harness's own change): cold `--build` boot: _not yet measured_; warm boot (image cached): _not yet measured_. Tuning guidance: once measured, set `--timeout-seconds` to roughly **2× the observed cold time** for CI-like runs, and near the warm time for tight iteration. Until then the generous 600s default stands.
+**Boot time observations**: cold `--build` boot: ~45s build + ~2min to healthy (M-series Mac, 2026-07-05 QA run of forge run pr-167-mcp-file-bridge); warm boot (image cached): _not yet measured_. Tuning guidance: set `--timeout-seconds` to roughly **2× the observed cold time** (~330s) for CI-like runs, and near the warm time for tight iteration once measured. The generous 600s default remains a safe ceiling.
 
 ## 2. Drive scenarios (archie-debug MCP recipes)
 
