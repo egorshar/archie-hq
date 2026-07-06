@@ -221,7 +221,29 @@ describe('GitLabHost.listCodeScanningAlerts', () => {
       number: 7, tool: 'sast', securitySeverity: 'high', ruleName: 'SQL Injection',
       url: 'https://gl.example/g/p/-/security/vulnerabilities/7',
     });
+    // Verify GitLab 'detected' state maps to canonical 'open'
+    expect(alerts[0].state).toBe('open');
+    expect(alerts[0].mostRecentInstance).toBeDefined();
+    expect(alerts[0].mostRecentInstance?.state).toBe('open');
     expect(alerts[0].mostRecentInstance).toMatchObject({ path: 'src/db.ts', startLine: 10 });
+  });
+
+  it('maps GitLab resolved vulnerability to canonical fixed state', async () => {
+    setEnv();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify([
+      {
+        id: 8, state: 'resolved', report_type: 'sast', severity: 'medium',
+        name: 'XSS', description: 'cross-site', location: { file: 'src/ui.ts', start_line: 50 },
+        web_url: 'https://gl.example/g/p/-/security/vulnerabilities/8',
+        created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-02T00:00:00Z',
+      },
+    ]), { status: 200 })));
+
+    const alerts = await new GitLabHost().listCodeScanningAlerts('g/p', { state: 'fixed' });
+    expect(alerts).toHaveLength(1);
+    // Verify GitLab 'resolved' state maps to canonical 'fixed'
+    expect(alerts[0].state).toBe('fixed');
+    expect(alerts[0].mostRecentInstance?.state).toBe('fixed');
   });
 });
 
@@ -234,5 +256,8 @@ describe('GitLabHost.getCodeScanningAlert', () => {
     }), { status: 200 })));
     const alert = await new GitLabHost().getCodeScanningAlert('g/p', 7);
     expect(alert).toMatchObject({ number: 7, tool: 'sast', securitySeverity: 'critical', ruleName: 'RCE' });
+    // Verify GitLab 'detected' state maps to canonical 'open'
+    expect(alert.state).toBe('open');
+    expect(alert.mostRecentInstance?.state).toBe('open');
   });
 });
