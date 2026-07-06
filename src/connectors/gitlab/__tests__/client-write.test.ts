@@ -202,3 +202,37 @@ describe('GitLabHost.addReviewComment', () => {
     expect(body.position).toMatchObject({ position_type: 'text', new_path: 'src/a.ts', new_line: 42, base_sha: 'b', head_sha: 'h', start_sha: 's' });
   });
 });
+
+describe('GitLabHost.listCodeScanningAlerts', () => {
+  it('maps GitLab vulnerabilities into canonical CodeScanningAlert[]', async () => {
+    setEnv();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify([
+      {
+        id: 7, state: 'detected', report_type: 'sast', severity: 'high',
+        name: 'SQL Injection', description: 'desc', location: { file: 'src/db.ts', start_line: 10 },
+        web_url: 'https://gl.example/g/p/-/security/vulnerabilities/7',
+        created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-02T00:00:00Z',
+      },
+    ]), { status: 200 })));
+
+    const alerts = await new GitLabHost().listCodeScanningAlerts('g/p', { state: 'open' });
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]).toMatchObject({
+      number: 7, tool: 'sast', securitySeverity: 'high', ruleName: 'SQL Injection',
+      url: 'https://gl.example/g/p/-/security/vulnerabilities/7',
+    });
+    expect(alerts[0].mostRecentInstance).toMatchObject({ path: 'src/db.ts', startLine: 10 });
+  });
+});
+
+describe('GitLabHost.getCodeScanningAlert', () => {
+  it('maps one vulnerability by id', async () => {
+    setEnv();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      id: 7, state: 'detected', report_type: 'sast', severity: 'critical', name: 'RCE',
+      description: 'd', location: { file: 'a.ts', start_line: 3 }, web_url: 'u',
+    }), { status: 200 })));
+    const alert = await new GitLabHost().getCodeScanningAlert('g/p', 7);
+    expect(alert).toMatchObject({ number: 7, tool: 'sast', securitySeverity: 'critical', ruleName: 'RCE' });
+  });
+});
