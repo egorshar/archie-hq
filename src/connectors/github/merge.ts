@@ -15,11 +15,13 @@ export interface MergeCheckResult {
   merged: string[];    // PRs that were merged
   pending: string[];   // PRs waiting for approval/CI
   conflicts: string[]; // PRs with merge conflicts
+  ready: string[];     // Ready PRs in non-auto repos — held for an explicit merge request
 }
 
 import { appendAgentFinding } from '../../tasks/persistence.js';
 import { Task } from '../../tasks/task.js';
 import { AGENT_PROMPTS } from '../../agents/prompts.js';
+import { isAutoMergeRepo } from '../../agents/registry.js';
 import { createGitHubClient, type GitHubClient } from './client.js';
 import { isMergeReadyPerGithub } from './mergeability.js';
 import { logger } from '../../system/logger.js';
@@ -58,7 +60,7 @@ export async function checkAndMergeLinkedPRs(taskId: string): Promise<void> {
  * notifying PM (since PM is calling this via a tool).
  */
 export async function triggerMergeCheck(taskId: string): Promise<MergeCheckResult> {
-  const result: MergeCheckResult = { merged: [], pending: [], conflicts: [] };
+  const result: MergeCheckResult = { merged: [], pending: [], conflicts: [], ready: [] };
 
   const task = await Task.get(taskId);
 
@@ -119,11 +121,17 @@ export async function triggerMergeCheck(taskId: string): Promise<MergeCheckResul
       !mergeable.includes(pr)
   );
 
+  // Policy split: the orchestrator only merges PRs in auto-merge repos. Ready
+  // PRs in non-auto repos are held for an explicit user-requested merge.
+  const autoMergeable = mergeable.filter((pr) => isAutoMergeRepo(pr.github));
+  const held = mergeable.filter((pr) => !autoMergeable.includes(pr));
+
   // Log categorization for debugging
   logger.system(
     `Task ${taskId}: PR categorization: ` +
       `alreadyMerged=${alreadyMerged.length}, ` +
-      `mergeable=${mergeable.length}, ` +
+      `mergeable=${autoMergeable.length}, ` +
+      `ready=${held.length}, ` +
       `conflicted=${conflicted.length}, ` +
       `pending=${pending.length}`
   );
@@ -141,8 +149,11 @@ export async function triggerMergeCheck(taskId: string): Promise<MergeCheckResul
 
     let category: string;
     let reason = '';
-    if (mergeable.includes(pr)) {
+    if (autoMergeable.includes(pr)) {
       category = 'READY TO MERGE';
+    } else if (held.includes(pr)) {
+      category = 'READY (merge on request)';
+      reason = 'repo is not auto-merge';
     } else if (conflicted.includes(pr)) {
       category = 'CONFLICTED';
       reason = 'merge conflicts';
@@ -164,8 +175,8 @@ export async function triggerMergeCheck(taskId: string): Promise<MergeCheckResul
     result.merged.push(`${pr.github}#${pr.prNumber} (already merged)`);
   }
 
-  // Merge what's ready
-  for (const pr of mergeable) {
+  // Merge what's ready — auto-merge repos only (AC2)
+  for (const pr of autoMergeable) {
     try {
       const mergeResult = await githubClient.mergePullRequest(pr.github, pr.prNumber);
       if (mergeResult.success) {
@@ -178,6 +189,11 @@ export async function triggerMergeCheck(taskId: string): Promise<MergeCheckResul
       const message = error instanceof Error ? error.message : 'Unknown error';
       result.pending.push(`${pr.github}#${pr.prNumber}: ${message}`);
     }
+  }
+
+  // Record held-ready PRs (non-auto repos — never merged here, AC1)
+  for (const pr of held) {
+    result.ready.push(`${pr.github}#${pr.prNumber}`);
   }
 
   // Record conflicts
