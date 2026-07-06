@@ -298,3 +298,37 @@ describe('GitLabHost.getCodeScanningAlert', () => {
     expect(alert.mostRecentInstance?.state).toBe('open');
   });
 });
+
+describe('GitLabHost.dispatchWorkflow', () => {
+  it('POSTs a pipeline with ref + array-form variables and returns id + url', async () => {
+    setEnv();
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ id: 2009999, web_url: 'https://gl.example/g/p/-/pipelines/2009999' }), { status: 201 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const host = new GitLabHost();
+    const res = await host.dispatchWorkflow('flant/infra/review', 'ci-bot/us-trigger', {
+      inputs: { WERF_NEW_NAMESPACE: 'feature-sweed-123', REVIEW_SERVER_BRANCH: 'feature/SWEED-123', US_BOT: 'true' },
+    });
+    expect(res).toEqual({ id: 2009999, url: 'https://gl.example/g/p/-/pipelines/2009999' });
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toContain('/projects/flant%2Finfra%2Freview/pipeline');
+    expect(init.method).toBe('POST');
+    const body = JSON.parse(init.body);
+    expect(body.ref).toBe('ci-bot/us-trigger');
+    // variables must be the array form GitLab requires
+    expect(body.variables).toEqual(expect.arrayContaining([
+      { key: 'WERF_NEW_NAMESPACE', value: 'feature-sweed-123' },
+      { key: 'REVIEW_SERVER_BRANCH', value: 'feature/SWEED-123' },
+      { key: 'US_BOT', value: 'true' },
+    ]));
+  });
+
+  it('sends an empty variables array when no inputs given', async () => {
+    setEnv();
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ id: 1, web_url: 'u' }), { status: 201 }));
+    vi.stubGlobal('fetch', fetchMock);
+    await new GitLabHost().dispatchWorkflow('g/p', 'main');
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).variables).toEqual([]);
+  });
+});

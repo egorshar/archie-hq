@@ -296,8 +296,17 @@ export class GitLabHost implements RepoHost {
     };
   }
 
-  async dispatchWorkflow(_repo: string, _ref: string, _opts?: { workflow?: string; inputs?: Record<string, string> }): Promise<WorkflowDispatchResult> {
-    throw new Error('GitLabHost.dispatchWorkflow not implemented until Plan 1 Task 2');
+  async dispatchWorkflow(repo: string, ref: string, opts: { workflow?: string; inputs?: Record<string, string> } = {}): Promise<WorkflowDispatchResult> {
+    // GitLab triggers a pipeline on `ref`; opts.inputs → the pipeline's `variables`,
+    // which GitLab requires in array form [{key,value}] with a JSON content-type.
+    const variables = Object.entries(opts.inputs ?? {}).map(([key, value]) => ({ key, value }));
+    const pipeline = await glRequest<{ id: number; web_url: string | null }>({
+      method: 'POST',
+      path: `/projects/${this.projectId(repo)}/pipeline`,
+      body: { ref, variables },
+    });
+    logger.system(`GitLab: dispatched pipeline ${pipeline.id} on ${repo}@${ref} (${variables.length} vars)`);
+    return { id: pipeline.id, url: pipeline.web_url };
   }
 
   async listAccessibleRepos(): Promise<Array<{ github: string; default_branch: string; description?: string }>> {
