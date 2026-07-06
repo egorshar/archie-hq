@@ -58,6 +58,11 @@ export interface RepoHost {
   getWorkflowRunById(repo: string, runId: number): Promise<WorkflowRunReport>;
 
   // repos
+  // `github` is the canonical repo-identifier field, kept host-neutral in meaning
+  // despite its GitHub-oriented name: GitHub fills it with "owner/name", a future
+  // GitLab host fills it with "group/project". The name matches the existing
+  // plugin-frontmatter repo key (RepoEntry.github); renaming both to a neutral
+  // key is a Phase 4 concern.
   listAccessibleRepos(): Promise<Array<{ github: string; default_branch: string; description?: string }>>;
   resolveRepo(repo: string): Promise<{ default_branch: string } | null>;
 
