@@ -82,6 +82,7 @@ export function scanAgentDefs(): AgentDef[] {
             repos: agent.repo.repos.map((r) => ({
               github: r.github,
               baseBranch: r.baseBranch || 'main',
+              autoMerge: r.autoMerge === true,
             })),
             primary: agent.repo.primary,
           },
@@ -190,6 +191,8 @@ export function synthesizeDynamicAgentDef(spec: DynamicAgentSpec): AgentDef {
   const repos: RepoEntry[] = spec.repos.map((r) => ({
     github: r.github,
     baseBranch: r.baseBranch || 'main',
+    // PM-spawned dynamic agents can never confer auto-merge.
+    autoMerge: false,
   }));
   if (repos.length === 0) {
     throw new Error(`Dynamic agent spec ${spec.id} has no repos`);
