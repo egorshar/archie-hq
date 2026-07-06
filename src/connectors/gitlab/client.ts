@@ -529,6 +529,54 @@ export class GitLabHost implements RepoHost {
     // Degrade gracefully (P3): log and no-op rather than throwing on a normal path.
     logger.system(`GitLab: requestReReview is a no-op on this host (MR !${prNumber}); reReviewRequest capability is false`);
   }
-  async listCodeScanningAlerts(_repo: string, _filters?: CodeScanningAlertFilters): Promise<CodeScanningAlert[]> { throw NOT_IMPL('listCodeScanningAlerts'); }
-  async getCodeScanningAlert(_repo: string, _alertNumber: number): Promise<CodeScanningAlert> { throw NOT_IMPL('getCodeScanningAlert'); }
+
+  /**
+   * Map a GitLab vulnerability (Ultimate) into the canonical CodeScanningAlert.
+   * E2E-VERIFY: field names on GET /projects/:id/vulnerabilities against a real
+   * Ultimate instance (report_type/severity/location shape) — Plan 4 E2E.
+   */
+  private mapVulnerability(v: any): CodeScanningAlert {
+    const loc = v.location ?? {};
+    return {
+      number: v.id,
+      state: v.state ?? 'detected',
+      tool: v.report_type ?? 'unknown',
+      ruleId: v.identifier ?? null,
+      ruleName: v.name ?? null,
+      ruleDescription: v.description ?? null,
+      severity: v.severity ?? null,
+      securitySeverity: v.severity ?? null,
+      url: v.web_url ?? null,
+      createdAt: v.created_at ?? null,
+      updatedAt: v.updated_at ?? null,
+      dismissedReason: v.dismissal_reason ?? null,
+      dismissedComment: null,
+      mostRecentInstance: {
+        ref: null,
+        state: v.state ?? null,
+        path: loc.file ?? null,
+        startLine: loc.start_line ?? null,
+        endLine: loc.end_line ?? null,
+        message: v.description ?? null,
+      },
+    };
+  }
+
+  async listCodeScanningAlerts(repo: string, filters: CodeScanningAlertFilters = {}): Promise<CodeScanningAlert[]> {
+    // GitLab vulnerability state vocabulary: detected|confirmed|dismissed|resolved.
+    // Map the canonical open|dismissed|fixed loosely; default to the detected set.
+    const stateMap: Record<string, string> = { open: 'detected', dismissed: 'dismissed', fixed: 'resolved' };
+    const vulns = await glRequestAll<any>({
+      path: `/projects/${this.projectId(repo)}/vulnerabilities`,
+      query: { state: filters.state ? stateMap[filters.state] : undefined },
+    });
+    const alerts = vulns.map((v) => this.mapVulnerability(v));
+    logger.system(`GitLab: vulnerabilities for ${repo}: ${alerts.length}`);
+    return alerts;
+  }
+
+  async getCodeScanningAlert(repo: string, alertNumber: number): Promise<CodeScanningAlert> {
+    const v = await glRequest<any>({ path: `/vulnerabilities/${alertNumber}` });
+    return this.mapVulnerability(v);
+  }
 }
