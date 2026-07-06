@@ -13,6 +13,7 @@ import { isPmAgent, isRepoAgent } from '../types/agent.js';
 import { modelDisplayLabel, resolveAgentModel } from '../agents/model-label.js';
 import { prCardFingerprint, prCardTitlePlain } from '../system/pr-card-format.js';
 import { getGitHubClient } from '../connectors/github/client.js';
+import { isMergeReadyPerGithub } from '../connectors/github/mergeability.js';
 import { createKeyedLock } from '../system/keyed-lock.js';
 
 /**
@@ -1278,6 +1279,107 @@ export class Task {
   async handleEditModeDenial(): Promise<void> {
     await appendAgentFinding(this.taskId, 'system', 'Edit mode denied by user', 'decision');
     await this.sendMessage(AGENT_PROMPTS.existingTask, 'pm-agent');
+  }
+
+  /**
+   * Resolve a pending merge approval (approve side).
+   *
+   * The identity gate is a **synchronous read-compare-clear** on
+   * `pending_merge_approval`: no await between reading the slot, comparing it
+   * to `expected`, and clearing it. A supersede landing mid-resolution
+   * therefore turns an in-flight click into a stale no-op — it can never merge
+   * the superseding PR. Adapters (Slack handlers, API route) do no slot
+   * verification of their own; this method is the single verification point.
+   *
+   * On match the engine merges directly (no agent re-wake): fetch PR status,
+   * merge when open and GitHub reports it ready — **no `approved` check**,
+   * GitHub branch protection is the sole review authority on this path —
+   * append a completion finding on success or a decision finding carrying the
+   * exact reason on failure, and reactivate the PM so the user learns the
+   * outcome either way.
+   */
+  async handleMergeApproval(
+    approver: { id: string; name: string; email?: string } | undefined,
+    expected: { github: string; pr_number: number },
+  ): Promise<'resolved' | 'stale'> {
+    const pending = this.metadata.pending_merge_approval;
+    if (!pending || pending.github !== expected.github || pending.pr_number !== expected.pr_number) {
+      logger.warn(
+        'task',
+        `Stale merge approval for ${expected.github}#${expected.pr_number} on task ${this.taskId} — ` +
+        `slot ${pending ? `holds ${pending.github}#${pending.pr_number}` : 'is empty'}`,
+      );
+      return 'stale';
+    }
+    this.metadata.pending_merge_approval = undefined;
+
+    // Cancel the park armed by merge_pull_request on the requesting agent —
+    // same stream-closed-loop protection edit mode applies to the PM, but
+    // targeted at whichever repo agent parked the task.
+    this.agentProcesses.get(pending.requested_by as AgentName)?.clearPendingTeardown();
+
+    const prRef = `${pending.github}#${pending.pr_number}`;
+    const bySuffix = approver?.name ? ` by ${approver.name}` : '';
+    let findingType: 'completion' | 'decision';
+    let finding: string;
+    const client = getGitHubClient();
+    if (!client) {
+      findingType = 'decision';
+      finding = `Merge approved${bySuffix} but PR ${prRef} was not merged: GitHub client not configured`;
+    } else {
+      try {
+        const status = await client.getPRStatus(pending.github, pending.pr_number);
+        if (status.state === 'open' && isMergeReadyPerGithub(status)) {
+          const result = await client.mergePullRequest(pending.github, pending.pr_number);
+          if (result.success) {
+            findingType = 'completion';
+            finding = `PR ${prRef} merged on user approval${bySuffix}`;
+          } else {
+            findingType = 'decision';
+            finding = `Merge approved${bySuffix} but PR ${prRef} was not merged: ${result.message}`;
+          }
+        } else {
+          findingType = 'decision';
+          finding = `Merge approved${bySuffix} but PR ${prRef} was not merged: ` +
+            `state=${status.state}, mergeable=${status.mergeable}, mergeableState=${status.mergeableState}`;
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Unknown error';
+        findingType = 'decision';
+        finding = `Merge approved${bySuffix} but PR ${prRef} was not merged: ${message}`;
+      }
+    }
+
+    this.debouncedSave();
+    await appendAgentFinding(this.taskId, 'system', finding, findingType);
+    await this.sendMessage(AGENT_PROMPTS.existingTask, 'pm-agent');
+    return 'resolved';
+  }
+
+  /**
+   * Resolve a pending merge approval (deny side). Same synchronous
+   * read-compare-clear gate as {@link handleMergeApproval}; on match the slot
+   * and the parked teardown are cleared and the PM is reactivated. No GitHub
+   * call of any kind — deny must never merge.
+   */
+  async handleMergeDenial(expected: { github: string; pr_number: number }): Promise<'resolved' | 'stale'> {
+    const pending = this.metadata.pending_merge_approval;
+    if (!pending || pending.github !== expected.github || pending.pr_number !== expected.pr_number) {
+      logger.warn(
+        'task',
+        `Stale merge denial for ${expected.github}#${expected.pr_number} on task ${this.taskId} — ` +
+        `slot ${pending ? `holds ${pending.github}#${pending.pr_number}` : 'is empty'}`,
+      );
+      return 'stale';
+    }
+    this.metadata.pending_merge_approval = undefined;
+
+    this.agentProcesses.get(pending.requested_by as AgentName)?.clearPendingTeardown();
+
+    this.debouncedSave();
+    await appendAgentFinding(this.taskId, 'system', 'Merge denied by user — PR not merged', 'decision');
+    await this.sendMessage(AGENT_PROMPTS.existingTask, 'pm-agent');
+    return 'resolved';
   }
 
   async handleResearchBudgetApproval(): Promise<void> {
