@@ -189,6 +189,30 @@ async function extractTaskUsernames(taskId: string): Promise<import('../memory/t
 // ---- Main spawner ----
 
 /**
+ * State-mutating repo-tools that must stay behind the read-only/edit-mode gate.
+ * These act on a real repo/CI system (push, PR mutation, branch creation, CI
+ * dispatch) and are only added to `disallowedTools` when `editAllowed` is false.
+ * Every write-capable repo-tools tool must be listed here — see the
+ * tool-contract test guarding this invariant.
+ */
+export const REPO_TOOLS_REQUIRING_EDIT_MODE = [
+  'mcp__repo-tools__push_branch',
+  'mcp__repo-tools__create_pull_request',
+  'mcp__repo-tools__update_pr',
+  'mcp__repo-tools__add_pr_comment',
+  'mcp__repo-tools__add_review_comment',
+  'mcp__repo-tools__reply_to_review_comment',
+  'mcp__repo-tools__resolve_review_thread',
+  'mcp__repo-tools__request_re_review',
+  'mcp__repo-tools__merge_pull_request',
+  'mcp__repo-tools__close_pull_request',
+  'mcp__repo-tools__create_branch',
+  // CI dispatch — triggers a real pipeline/feature-stand deploy, so it's a
+  // write action even though it doesn't touch git state directly.
+  'mcp__repo-tools__dispatch_workflow',
+];
+
+/**
  * Spawn an agent. Branches on the agent's capabilities (PM coordinator vs. repo
  * access vs. plain plugin) for all behavior. Sets agent.handle on success.
  */
@@ -492,21 +516,7 @@ Shared folder: ${sharedPath} [READ-ONLY]
 
     disallowedTools = [
       ...disallowedTools,
-      ...(editAllowed
-        ? []
-        : [
-            'mcp__repo-tools__push_branch',
-            'mcp__repo-tools__create_pull_request',
-            'mcp__repo-tools__update_pr',
-            'mcp__repo-tools__add_pr_comment',
-            'mcp__repo-tools__add_review_comment',
-            'mcp__repo-tools__reply_to_review_comment',
-            'mcp__repo-tools__resolve_review_thread',
-            'mcp__repo-tools__request_re_review',
-            'mcp__repo-tools__merge_pull_request',
-            'mcp__repo-tools__close_pull_request',
-            'mcp__repo-tools__create_branch',
-          ]),
+      ...(editAllowed ? [] : REPO_TOOLS_REQUIRING_EDIT_MODE),
     ];
 
     // Repo agents extend the base sandbox with every attached clone (RW in edit
