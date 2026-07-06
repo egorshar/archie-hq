@@ -158,6 +158,7 @@ PR #169 (max-mode approval) touches every approval surface this change extends (
 
 - **Approval is not SHA-pinned.** `pending_merge_approval` carries no head SHA (`PRStatus` exposes none today), so the task can push new commits between the prompt and the click, and an approval merges the branch's *current* head after a state-level re-check only. Accepted: same class as GitHub's own stale-approval behavior and today's auto-merge; mitigated by the re-check plus the paused task in the common path (a parked task isn't pushing). SHA-pinning is a compatible later refinement once `PRStatus` carries a head SHA.
 - **External Slack guests can click `approve_merge`.** Mirrors the edit-mode precedent (`events.ts:249-253`): the click resolves the approval, only identity recording is skipped. Accepted for now, consistent with edit mode — the same guest could approve edit mode and drive the task anyway; flagged as input to issue #168's generalization, where approver authorization properly belongs.
+- **Rare duplicate ready nudge under cross-trigger races.** The notify-once marker is flushed synchronously before PM activation, but two tight windows remain (bug-hunt round 2, R2-1): an overlapping merge check whose GitHub fetches outlast the 5s debounce, or an independent task activation registering a canonical instance mid-run, can each lose the marker write and produce one duplicate "ready" notification. State converges after; no wrong merge is possible. Inherent to lockless file-based task state — accepted.
 
 ## Migration Plan
 
