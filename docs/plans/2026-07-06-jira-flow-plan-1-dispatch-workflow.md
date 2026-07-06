@@ -226,6 +226,8 @@ git commit -m "feat(gitlab): dispatchWorkflow → POST pipeline (ref + array-for
 - Produces: a `dispatch_workflow` tool on the repo-tools MCP server.
 
 > Model this on `createListCodeScanningAlertsTool` (same file) for the capability-gate + null-host + error patterns. `inputs` is a free-form string→string map.
+>
+> **Deliberate deviation from the template:** the arg is `repo: z.string()`, NOT the template's `github: githubArgSchema` + `resolveGithub(agent, args.github)`. `resolveGithub` resolves against the *agent's own bound repos*; the feature-stand-manager dispatches on `flant/infra/review`, a repo it is not bound to, so it must pass the target repo directly. Add a one-line code comment saying so, so a future reader doesn't "fix" it back to `resolveGithub`.
 
 - [ ] **Step 1: Write the failing tests.** Append to `src/agents/__tests__/pr-tools.test.ts`:
 
@@ -310,7 +312,9 @@ function createDispatchWorkflowTool(agent: Agent, task: Task) {
 - [ ] **Step 5: Run tests + typecheck + full suite.**
 
 Run: `npm run typecheck && npx vitest run src/agents/__tests__/pr-tools.test.ts && npm test`
-Expected: PASS (baseline + new). Existing repo-tools contract test may assert the tool set — if it enumerates tools, add `dispatch_workflow` to its expected list ONLY if that test is designed to be updated with new tools; otherwise it should already pass (it checks PM has no PR tools, not an exact repo-tool set — verify).
+Expected: PASS (baseline + new). `pr-tools.test.ts` has no tool-set assertion, but `src/agents/__tests__/tool-contract.test.ts` DOES enumerate the exact repo-tools set (`SPAWN_REPO_TOOLS`). Add `'mcp__repo-tools__dispatch_workflow'` to that array — a pure, non-weakening allowlist addition (the array is designed to grow with each new registered tool). This is the intended maintenance, not a forbidden "edit existing tests to pass".
+
+> Note: zod is v4 in this repo — `z.record` needs two args: `z.record(z.string(), z.string())`, not the one-arg v3 form.
 
 - [ ] **Step 6: Commit.**
 

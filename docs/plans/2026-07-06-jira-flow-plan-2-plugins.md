@@ -21,6 +21,7 @@
 - **Branch for dev work is `feature/<KEY>`** (matches the review pipeline's `review_branch_var`).
 - **Never merge** MRs. **Jira write-back = one closing comment** (`add-comment`); no transition/label change.
 - **Secrets:** none in files. MCP tokens via `${MCP_JIRA_TOKEN}` / `${MCP_CONFLUENCE_TOKEN}` (set in Archie's env). The pipeline trigger uses `dispatch_workflow` (in-process; no token in any agent).
+- **Edit mode is task-wide, PM-requested, human-approved (Plan 1 gate):** `dispatch_workflow` — like `create_pull_request`, `push_branch`, etc. — is disallowed for repo agents until the task's `edit_allowed` is true. Only the **PM** has `request_edit_mode`; developer and feature-stand agents do not. The user approves once and the grant covers **every** agent in the task for its lifetime. Practical consequence: the PM must request edit mode (reason covering code changes **and** the stand deploy) before the work; the feature-stand-manager then inherits it and can dispatch. A read-only (unapproved) task cannot deploy — by design.
 - **Verification is boot-based:** after each task, boot Archie (or reboot) and confirm the change loads (agent registers / MCP connects / config reads). Full live E2E is Task 5.
 
 ## File structure (in `archie-plugins`)
@@ -126,10 +127,12 @@ For each confirmed repo:
   - `backend-agent`: `walli/sweed/server`, `sd/service/shop-api`
   - `frontend-agent`: `walli/sweed/web-ui-portal-ci`, `walli/sweed/web-ui-cashier-ci`, `sd/web-ui-shop`
 - **Otherwise** — `spawn_repo_agent` for that repo (pass its `group/project` path from the Confluence doc), then delegate to the spawned agent.
-Give each developer: the ticket key, summary, acceptance criteria, the repo's Confluence "details", and the instruction to **work on branch `feature/<KEY>`, implement the acceptance criteria minimally, and open one MR per repo into the repo's default branch — never merge**. Approve edit mode when they request it (or relay the request to the user if a human gate is desired).
+Give each developer: the ticket key, summary, acceptance criteria, the repo's Confluence "details", and the instruction to **work on branch `feature/<KEY>`, implement the acceptance criteria minimally, and open one MR per repo into the repo's default branch — never merge**.
+
+**Edit mode (request once, up front).** Only you (the PM) can call `request_edit_mode`; the developer and feature-stand agents cannot. This grant is **task-wide and task-lifetime** — approved once by the user, it covers every agent you delegate to for the rest of this task. So before (or as soon as) you delegate implementation, call `request_edit_mode` **once** with a reason that names both halves of the work: making the code changes **and** deploying a feature stand via CI (e.g. *"Implement SWEED-123 across server + web-ui-portal-ci: code changes, open MRs, and deploy a feature stand via the review pipeline"*). The user's single approval then authorizes both the developers' commits/MRs and the feature-stand-manager's pipeline dispatch later in step 5. If a developer reports it needs edit mode, that means you haven't requested it yet — request it now.
 
 ## 5. Feature stand
-Once every developer has reported its MR open, delegate to `feature-stand-manager`: give it the ticket key and the list of affected repos (their `group/project` paths). It deploys one feature stand via the central review pipeline and returns the stand URL(s) + pipeline URL. If it reports a failure, relay it and stop.
+Once every developer has reported its MR open, delegate to `feature-stand-manager`: give it the ticket key and the list of affected repos (their `group/project` paths). It deploys one feature stand via the central review pipeline and returns the stand URL(s) + pipeline URL. (It relies on the task-wide edit mode you already had approved in step 4 — it cannot request its own.) If it reports that it lacks edit mode / the dispatch tool is unavailable, call `request_edit_mode` (covering the stand deploy) and re-delegate. If it reports any other failure, relay it and stop.
 
 ## 6. Report + close
 Post to the user in Slack: the stand URL(s) and every MR link. Then post **one closing comment** on the Jira ticket via `add-comment` — the MR URL(s) and stand URL(s) — and do nothing else to Jira (no status/label change). The user tests the stand.
@@ -304,6 +307,7 @@ Read `${CLAUDE_PLUGIN_ROOT}/config/review.yml` (pipeline: `project`, `ref`, `nam
    - `ref` = `review.yml` `ref` (`ci-bot/us-trigger`)
    - `inputs` = `{ US_BOT: "true", <WERF_NEW|EXISTED>_NAMESPACE: "<namespace>", and for EACH affected repo its repos.yml review_branch_var: "feature/<KEY>" }`
    Example inputs: `{ "US_BOT": "true", "WERF_NEW_NAMESPACE": "feature-sweed-123", "REVIEW_SERVER_BRANCH": "feature/SWEED-123", "REVIEW_WEB_UI_PORTAL_CI_BRANCH": "feature/SWEED-123" }`
+   `dispatch_workflow` is gated behind the task's **edit mode**, which the PM has approved task-wide for this feature (it covers your dispatch as well as the code changes). You **cannot** request edit mode yourself. If the tool comes back "not available on this repo host" *for a capability/edit-mode reason* (as opposed to a GitLab API error), edit mode isn't active yet — do NOT fake success: report back to the PM that you need edit mode approved for the stand deploy, and stop.
 4. **Watch.** `dispatch_workflow` returns the pipeline id + URL. Poll it to completion with `get_check_run`/`get_pr_checks` (or report the URL for the PM to watch if polling isn't available). If it fails, report the failure + pipeline URL and stop.
 5. **Stand URLs.** For each affected repo that has a `stand_url` in `repos.yml`, substitute `{ticket}`→the key and `{ticket_lower}`→its lowercase form. Repos without `stand_url` (e.g. `server`) deploy into the same namespace but have no own URL — don't report one for them. Report the frontend stand URL(s) + the pipeline URL back to the PM.
 
@@ -316,7 +320,7 @@ Read `${CLAUDE_PLUGIN_ROOT}/config/review.yml` (pipeline: `project`, `ref`, `nam
 ```bash
 git add feature-stand/ && git commit -m "feat(feature-stand): manager agent + review/repos config" && git push
 ```
-Reboot; verify `feature-stand-manager` registers (primary `flant/infra/review`) and that repo clones. Confirm the agent has `dispatch_workflow` (Plan 1 must be in the running build) — check the repo-tools inventory in its spawn log, or a dry task asking it to list its tools. If `flant/infra/review` won't clone (bot access), rebind to a clonable repo per the note above.
+Reboot; verify `feature-stand-manager` registers (primary `flant/infra/review`) and that repo clones. Confirm the agent has `dispatch_workflow` (Plan 1 must be in the running build). **Note:** `dispatch_workflow` is edit-mode-gated, so it only appears in the repo-tools inventory when the task's `edit_allowed` is true — a read-only spawn will (correctly) show it in `disallowedTools`. To confirm the tool exists, either inspect a spawn in an edit-mode-approved task, or check the registered repo-tools set (the tool is registered unconditionally; the gate is applied via `disallowedTools`). If `flant/infra/review` won't clone (bot access), rebind to a clonable repo per the note above.
 
 ---
 
@@ -328,9 +332,9 @@ Reboot; verify `feature-stand-manager` registers (primary `flant/infra/review`) 
 
 - [ ] **Step 1: Pick a safe test Jira ticket** whose feature touches a repo the bot can push to (ideally your sandbox). Confirm it's in the Confluence ownership doc.
 - [ ] **Step 2: In Slack, "@Archie implement <KEY>".** Verify the PM: fetches the ticket (Jira MCP), reads Confluence, and **posts the proposed affected repos and waits**.
-- [ ] **Step 3: Confirm the repos.** Verify the PM delegates to the right standing agent(s) and/or spawns a repo agent; approve edit mode when asked.
+- [ ] **Step 3: Confirm the repos.** Verify the PM delegates to the right standing agent(s) and/or spawns a repo agent. Verify the PM calls `request_edit_mode` **once**, with a reason that mentions both the code changes and the feature-stand deploy; approve it. (Confirm you are NOT asked to approve again for the stand later — the grant is task-wide.)
 - [ ] **Step 4: Verify each dev agent** opens an MR on `feature/<KEY>` into the repo's default branch (never merged) and reports the URL.
-- [ ] **Step 5: Verify the feature-stand-manager** dispatches the review pipeline (`dispatch_workflow` → pipeline URL), the pipeline succeeds, and it returns the stand URL(s).
+- [ ] **Step 5: Verify the feature-stand-manager** dispatches the review pipeline (`dispatch_workflow` → pipeline URL) **without a second edit-mode prompt** (it inherited the task-wide grant), the pipeline succeeds, and it returns the stand URL(s).
 - [ ] **Step 6: Verify the PM** posts the stand URL(s) + MR links in Slack and adds **one closing Jira comment** (MR + stand URLs), with no status/label change.
 - [ ] **Step 7: Record evidence** (task knowledge.log path, MR URLs, pipeline URL, stand URL, Jira comment) — mirror the Phase-1 E2E evidence style.
 
@@ -342,5 +346,5 @@ Failure handling to confirm: if a dev agent or the pipeline fails, the PM relays
 - **Spec coverage:** MCP wiring (T1) → PM orchestration incl. Jira/Confluence + affected-repo confirm + hybrid delegation + feature-stand handoff + closing Jira comment (T2) → standing backend/frontend agents (T3) → feature-stand-manager + repos.yml/review.yml, using `dispatch_workflow` (T4) → live E2E (T5). Matches the design's components + decisions (hybrid, `feature/<KEY>`, closing-comment-only, central werf pipeline, dynamic spawn).
 - **Placeholder scan:** none — every file has complete content. `<KEY>` / `{ticket_lower}` are runtime substitutions the agents perform, not plan placeholders.
 - **Consistency:** repo ids are GitLab `group/project` everywhere (frontmatter + repos.yml keys match: `walli/sweed/server`, `sd/service/shop-api`, `walli/sweed/web-ui-portal-ci`, `walli/sweed/web-ui-cashier-ci`, `sd/web-ui-shop`, `flant/infra/review`); standing-agent split matches the PM overlay's routing list; `dispatch_workflow` inputs (namespace + `REVIEW_*_BRANCH` + `US_BOT`) match Plan 1's tool + the review pipeline contract.
-- **Mechanics verified:** `dispatch_workflow` is a repo tool → feature-stand-manager is a repo agent; agents read `${CLAUDE_PLUGIN_ROOT}/config/*.yml`; PM overlay frontmatter grants `jira`/`confluence` MCP.
+- **Mechanics verified (against archie-hq code):** `dispatch_workflow` is a repo tool → feature-stand-manager is a repo agent; agents read `${CLAUDE_PLUGIN_ROOT}/config/*.yml`; PM overlay frontmatter grants `jira`/`confluence` MCP (`registry.ts buildPmDef → resolveAgentMcpServers`, spread into the PM def; also surfaces a `pmIntegrations` line). **Edit-mode gate:** `dispatch_workflow` is in `REPO_TOOLS_REQUIRING_EDIT_MODE` (`spawn.ts`) — disallowed until task-wide `edit_allowed`; `request_edit_mode` is PM-only (`orchestration-tools`, not on repo agents); approval is human, task-wide, task-lifetime (`task.handleEditModeApproval`). Hence the PM requests once (covering the stand deploy) and the manager inherits the grant — reflected in the Task 2 + Task 4 prompts.
 - **Flagged for implementation:** MCP transport `http` vs `sse` (verify against `1bf.sweed.tech`); bot clone access to `flant/infra/review` (else rebind the manager); `flant/infra/review` API access for the pipeline dispatch (design Input #3).
