@@ -20,7 +20,7 @@ A user asks Archie in Slack to implement a Jira feature; Archie's PM pulls the t
 6. **Developer agents:** work on branch **`feature/<KEY>`** (e.g. `feature/SWEED-123`), implement to the acceptance criteria, push, and **open one MR per repo into that repo's `target_branch` (never merge)**. Report the MR URL back to the PM.
 7. **PM → feature-stand-manager:** hands off the ticket key + the set of affected repos (with their `review_branch_var`s) + the branch.
 8. **feature-stand-manager** computes the namespace from `review.namespace_template`, decides new-vs-existing against `review.existing_namespaces_file`, and calls **`dispatch_workflow("flant/infra/review", "ci-bot/us-trigger", { <WERF_NEW|EXISTED>_NAMESPACE, <each repo's review_branch_var>=feature/<KEY>, US_BOT: "true" })`**, then watches the returned pipeline to success and derives the **stand URL(s)** from each affected repo's `stand_url` template.
-9. **PM → Slack:** posts the stand URL(s) + MR link(s). **Light Jira write-back:** one closing comment (MR + stand URLs) and move the ticket to done. User tests.
+9. **PM → Slack:** posts the stand URL(s) + MR link(s). **Jira write-back:** one closing comment on the ticket (MR + stand URLs) — no status transition or label change for now. User tests.
 
 Failure handling: any dev agent that can't complete, or a pipeline that fails, reports back to the PM; the PM posts the failure (what failed + links) to Slack and stops — it does not fake success. (No autonomous label state machine; interactive only.)
 
@@ -34,7 +34,7 @@ Standing context appended to the PM's system prompt. Covers:
 - **Affected-repo confirmation** step (Slack) before delegating.
 - **Delegation rules:** standing agent vs `spawn_repo_agent` (hybrid); pass the `repos.yml` entry + Confluence details as the brief; instruct the branch name `feature/<KEY>`.
 - **Feature-stand handoff** to `feature-stand-manager` after all MRs are open.
-- **Light Jira write-back:** closing comment + move-to-done only.
+- **Jira write-back:** a single closing comment (`add-comment`) with MR + stand URLs; no status transition or label change.
 - **Slack** is native (Archie comms tools) — no bash/curl.
 
 ### Standing dev agents (`backend/agents/backend.md`, `frontend/agents/frontend.md`)
@@ -121,7 +121,7 @@ A generic repo tool (same family as `create_pull_request`), registered on the re
 - Multi-agent, **user-initiated** (name a ticket: "implement SWEED-123"); not the autonomous scheduled tick.
 - Dev agents: **hybrid** (standing backend/frontend + dynamic `spawn_repo_agent`).
 - Repo operational fields: **`config/repos.yml`** in the plugins repo (CI-generatable); Confluence is human discovery.
-- Jira write-back: **light** (closing comment + move-to-done; no label state machine).
+- Jira write-back: **closing comment only** (`add-comment` with MR + stand URLs); no status transition or label change.
 - Feature stand: **central werf review pipeline** via the generic `dispatch_workflow` tool.
 - Trigger seam: **`dispatch_workflow` typed tool + `RepoHost.dispatchWorkflow`** (canonical naming; no secret in agents; not a bespoke deploy tool).
 - Branch: **`feature/<KEY>`**.
