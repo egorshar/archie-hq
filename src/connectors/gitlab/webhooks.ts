@@ -24,7 +24,10 @@ const asObj = (v: unknown): Obj | undefined => (v && typeof v === 'object' ? (v 
 export function formatGitLabContext(objectKind: string, payload: Obj): NormalizedEventContext {
   const project = asObj(payload.project);
   const repo = (project?.path_with_namespace as string) || 'unknown/unknown';
-  const user = (asObj(payload.user)?.username as string) || 'unknown';
+  const user =
+    (asObj(payload.user)?.username as string) ||
+    (payload.user_username as string) ||
+    'unknown';
   const attrs = asObj(payload.object_attributes) ?? {};
   const mr = asObj(payload.merge_request);
 
@@ -39,7 +42,15 @@ export function formatGitLabContext(objectKind: string, payload: Obj): Normalize
       case 'reopen':
         return { ...base, eventType: 'pull_request', action: 'opened' };
       case 'update':
-        return { ...base, eventType: 'pull_request', action: 'synchronize' };
+        // GitLab's `update` action fires both for new commits pushed to the
+        // source branch AND for metadata-only edits (label/title/description/
+        // assignee/reviewer/milestone). GitHub's `synchronize` fires ONLY on
+        // new commits, so gate on `oldrev` (a commit SHA present only when the
+        // source branch actually received new commits) to avoid needless
+        // merge checks / card refreshes on trivial metadata edits.
+        return attrs.oldrev
+          ? { ...base, eventType: 'pull_request', action: 'synchronize' }
+          : { ...base, eventType: 'pull_request', action: 'update' };
       case 'close':
         return { ...base, eventType: 'pull_request', action: 'closed', state: 'closed' };
       case 'merge':
