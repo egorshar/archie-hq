@@ -119,3 +119,92 @@ describe('GitLabHost.listPRChecks', () => {
     expect(report.entries[1]).toMatchObject({ name: 'test', conclusion: 'failure', source: 'check_run' });
   });
 });
+
+describe('GitLabHost.getCheckRunById', () => {
+  it('fetches a log tail when the job failed', async () => {
+    process.env.GITLAB_BASE_URL = 'https://gl.example';
+    process.env.GITLAB_TOKEN = 't';
+    const fetchMock = vi.fn()
+      // job
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: 42, name: 'test', stage: 'test', status: 'failed', web_url: 'http://x/-/jobs/42',
+        commit: { id: 'sha1' }, started_at: 't1', finished_at: 't2',
+      }), { status: 200 }))
+      // trace
+      .mockResolvedValueOnce(new Response('some log output\nFailures:\n  boom', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const host = new GitLabHost();
+    const report = await host.getCheckRunById('group/proj', 42);
+    expect(report.conclusion).toBe('failure');
+    expect(report.logTail).toContain('Failures:');
+    expect(report.logTail).toContain('boom');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not fetch a trace when the job succeeded', async () => {
+    process.env.GITLAB_BASE_URL = 'https://gl.example';
+    process.env.GITLAB_TOKEN = 't';
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({
+      id: 42, name: 'test', stage: 'test', status: 'success', web_url: 'http://x/-/jobs/42',
+      commit: { id: 'sha1' }, started_at: 't1', finished_at: 't2',
+    }), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const host = new GitLabHost();
+    const report = await host.getCheckRunById('group/proj', 42);
+    expect(report.conclusion).toBe('success');
+    expect(report.logTail).toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('caps a long log tail to the last 3000 chars', async () => {
+    process.env.GITLAB_BASE_URL = 'https://gl.example';
+    process.env.GITLAB_TOKEN = 't';
+    const trace = 'Failures:\n' + 'x'.repeat(4000);
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: 42, name: 'test', stage: 'test', status: 'failed', web_url: 'http://x/-/jobs/42',
+        commit: { id: 'sha1' }, started_at: 't1', finished_at: 't2',
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(trace, { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const host = new GitLabHost();
+    const report = await host.getCheckRunById('group/proj', 42);
+    expect(report.logTail).toBeDefined();
+    expect(report.logTail!.length).toBe(3000);
+    expect(report.logTail).toBe(trace.slice(-3000));
+  });
+});
+
+describe('GitLabHost.getWorkflowRunById', () => {
+  it('maps the pipeline + jobs into a WorkflowRunReport, fetching log tails only for failed jobs', async () => {
+    process.env.GITLAB_BASE_URL = 'https://gl.example';
+    process.env.GITLAB_TOKEN = 't';
+    const fetchMock = vi.fn()
+      // pipeline
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: 99, status: 'failed', sha: 'shaX', ref: 'main', web_url: 'http://p/-/pipelines/99',
+      }), { status: 200 }))
+      // pipeline jobs
+      .mockResolvedValueOnce(new Response(JSON.stringify([
+        { id: 1, name: 'build', status: 'success', web_url: 'u1' },
+        { id: 2, name: 'test', status: 'failed', web_url: 'u2' },
+      ]), { status: 200 }))
+      // trace for the failed job only
+      .mockResolvedValueOnce(new Response('log\nFailures:\n  oops', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const host = new GitLabHost();
+    const report = await host.getWorkflowRunById('group/proj', 99);
+    expect(report.id).toBe(99);
+    expect(report.conclusion).toBe('failure');
+    expect(report.jobs).toHaveLength(2);
+    expect(report.jobs[0]).toMatchObject({ id: 1, name: 'build', conclusion: 'success', logTail: undefined });
+    expect(report.jobs[1]).toMatchObject({ id: 2, name: 'test', conclusion: 'failure' });
+    expect(report.jobs[1].logTail).toContain('Failures:');
+    expect(report.jobs[1].logTail).toContain('oops');
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+});
