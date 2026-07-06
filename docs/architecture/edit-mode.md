@@ -12,7 +12,7 @@ In readonly mode the clone is checked out on the base branch (`{ type: 'base' }`
 
 ### Edit Mode (After Approval)
 
-Once edit mode is approved for a task, the repo path's sandbox flips from read-only to read-write (`Write`, `Edit`, and write-capable `Bash` commands are now allowed against the clone), and the previously-disallowed MCP tools become available: `push_branch`, `create_pull_request`, `update_pr`, `add_pr_comment`, `add_review_comment`, `reply_to_review_comment`, `resolve_review_thread`, `request_re_review`, `merge_pull_request`, `close_pull_request`, and `create_branch`. The next time a repo agent is spawned, the clone is set up on a fresh feature branch (`{ type: 'new_branch', name: 'archie/{taskId}' }`). Edit mode is a one-way, permanent transition for the task — once approved, it cannot be revoked. Clones for tasks with `edit_allowed === true` are NOT removed on stop/complete (they hold local commits, branches, and PR state).
+Once edit mode is approved for a task, the repo path's sandbox flips from read-only to read-write (`Write`, `Edit`, and write-capable `Bash` commands are now allowed against the clone), and the previously-disallowed MCP tools become available: `push_branch`, `create_pull_request`, `update_pr`, `add_pr_comment`, `add_review_comment`, `reply_to_review_comment`, `resolve_review_thread`, `request_re_review`, `merge_pull_request`, `close_pull_request`, and `create_branch`. Note that `merge_pull_request` carries a second gate on top of edit mode: in repos without `autoMerge: true` it does not merge directly but posts a `merge` approval request the user must resolve (see [GitHub Integration → Merge Policy](github-integration.md#merge-policy-automerge)). The next time a repo agent is spawned, the clone is set up on a fresh feature branch (`{ type: 'new_branch', name: 'archie/{taskId}' }`). Edit mode is a one-way, permanent transition for the task — once approved, it cannot be revoked. Clones for tasks with `edit_allowed === true` are NOT removed on stop/complete (they hold local commits, branches, and PR state).
 
 ## Human-in-the-Loop Approval Flow
 
@@ -182,7 +182,7 @@ The full single allowed-tool list (set as `def.tools` on the repo agent definiti
 - `mcp__repo-tools__reply_to_review_comment`
 - `mcp__repo-tools__resolve_review_thread`
 - `mcp__repo-tools__request_re_review`
-- `mcp__repo-tools__merge_pull_request`
+- `mcp__repo-tools__merge_pull_request` — in non-auto-merge repos this tool adds its own `merge` approval gate on top of edit mode (it posts an approval request instead of merging)
 - `mcp__repo-tools__close_pull_request`
 - `mcp__repo-tools__create_branch`
 
