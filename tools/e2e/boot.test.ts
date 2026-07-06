@@ -1,6 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import {
   archieContainerState,
+  decidePortAction,
+  isConnectionRefused,
+  looksLikeArchie,
   parseArgs,
   preflight,
   renderDiagnostics,
@@ -144,17 +147,17 @@ describe('waitForHealth', () => {
 describe('archieContainerState', () => {
   it('parses NDJSON compose ps output', () => {
     const out = `${'{"Service":"other","State":"running"}'}\n${RUNNING_PS}\n`;
-    expect(archieContainerState(out)).toEqual({ found: true, state: 'running' });
+    expect(archieContainerState(out)).toEqual({ found: true, state: 'running', publishedPorts: [] });
   });
 
   it('parses array-shaped compose ps output', () => {
     const out = JSON.stringify([{ Service: 'archie', State: 'Exited' }]);
-    expect(archieContainerState(out)).toEqual({ found: true, state: 'exited' });
+    expect(archieContainerState(out)).toEqual({ found: true, state: 'exited', publishedPorts: [] });
   });
 
   it('reports not-found for empty or unrelated output', () => {
-    expect(archieContainerState('')).toEqual({ found: false });
-    expect(archieContainerState('{"Service":"db","State":"running"}')).toEqual({ found: false });
+    expect(archieContainerState('')).toEqual({ found: false, publishedPorts: [] });
+    expect(archieContainerState('{"Service":"db","State":"running"}')).toEqual({ found: false, publishedPorts: [] });
   });
 });
 
@@ -229,6 +232,81 @@ function bootDeps(overrides: Partial<BootDeps>): BootDeps & { logs: string[]; er
   };
 }
 
+describe('looksLikeArchie', () => {
+  it('accepts the /health payload shape (200 and shutting_down alike)', () => {
+    expect(looksLikeArchie('{"status":"ok","activeTasks":0}')).toBe(true);
+    expect(looksLikeArchie('{"status":"shutting_down","activeTasks":2,"git_sha":"abc"}')).toBe(true);
+  });
+
+  it('rejects non-Archie responses', () => {
+    expect(looksLikeArchie('')).toBe(false);
+    expect(looksLikeArchie('<html>It works!</html>')).toBe(false);
+    expect(looksLikeArchie('{"status":"ok"}')).toBe(false); // no activeTasks — some other JSON service
+    expect(looksLikeArchie('{"activeTasks":0}')).toBe(false);
+    expect(looksLikeArchie('null')).toBe(false);
+  });
+});
+
+describe('decidePortAction', () => {
+  it('proceeds on a free port', () => {
+    expect(decidePortAction({ kind: 'free' }, false)).toBe('proceed');
+  });
+
+  it("recreates when this project's own archie PUBLISHES the port (never reuse — code may be stale)", () => {
+    expect(decidePortAction({ kind: 'archie' }, true)).toBe('recreate');
+  });
+
+  it('relocates when a foreign archie holds the port — even if our own archie runs elsewhere', () => {
+    // ourArchieOnPort=false covers both "no archie of ours at all" and "ours
+    // publishes a different port"; existence alone must not read as ownership.
+    expect(decidePortAction({ kind: 'archie' }, false)).toBe('relocate');
+  });
+
+  it('relocates when a non-archie process holds the port', () => {
+    expect(decidePortAction({ kind: 'other' }, false)).toBe('relocate');
+    expect(decidePortAction({ kind: 'other' }, true)).toBe('relocate');
+  });
+});
+
+describe('archieContainerState — published ports', () => {
+  it('extracts PublishedPort (not TargetPort) and drops unpublished PublishedPort:0 entries', () => {
+    // Real compose ps shape from a live relocated boot: the EXPOSEd-but-unpublished
+    // target port shows up as PublishedPort:0 and must not count, and the
+    // published entry's Target/Published ports differ so the extraction can't
+    // read the wrong field.
+    const ps =
+      '{"Name":"archie-hq-archie-1","Service":"archie","State":"running","Publishers":[' +
+      '{"URL":"","TargetPort":3000,"PublishedPort":0,"Protocol":"tcp"},' +
+      '{"URL":"0.0.0.0","TargetPort":3000,"PublishedPort":53787,"Protocol":"tcp"}]}';
+    expect(archieContainerState(ps)).toEqual({ found: true, state: 'running', publishedPorts: [53787] });
+  });
+
+  it('reads missing/empty Publishers as no published ports', () => {
+    expect(archieContainerState(RUNNING_PS).publishedPorts).toEqual([]);
+    const nullPub = '{"Service":"archie","State":"running","Publishers":null}';
+    expect(archieContainerState(nullPub).publishedPorts).toEqual([]);
+  });
+});
+
+describe('isConnectionRefused', () => {
+  it('detects a plain ECONNREFUSED cause', () => {
+    expect(isConnectionRefused(Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNREFUSED' } }))).toBe(true);
+  });
+
+  it('detects dual-stack AggregateError causes with no top-level code', () => {
+    const cause = { errors: [{ code: 'ECONNREFUSED' }, { code: 'ECONNREFUSED' }] };
+    expect(isConnectionRefused(Object.assign(new TypeError('fetch failed'), { cause }))).toBe(true);
+  });
+
+  it('does not classify timeouts, DNS failures, or aborts as refused', () => {
+    expect(isConnectionRefused(Object.assign(new TypeError('fetch failed'), { cause: { code: 'ETIMEDOUT' } }))).toBe(false);
+    expect(isConnectionRefused(Object.assign(new TypeError('fetch failed'), { cause: { code: 'ENOTFOUND' } }))).toBe(false);
+    expect(isConnectionRefused(Object.assign(new TypeError('fetch failed'), { cause: { errors: [{ code: 'ETIMEDOUT' }] } }))).toBe(false);
+    expect(isConnectionRefused(new DOMException('aborted', 'TimeoutError'))).toBe(false);
+    expect(isConnectionRefused(new Error('anything'))).toBe(false);
+  });
+});
+
 describe('runBoot — orchestration ordering', () => {
   it('a failed compose-up prints diagnostics and returns non-zero with ZERO /health fetches', async () => {
     let fetches = 0;
@@ -269,6 +347,53 @@ describe('runBoot — orchestration ordering', () => {
     expect(code).toBe(0);
     expect(deps.logs.join('\n')).toContain('http://localhost:3000');
     expect(deps.logs.join('\n')).toContain('{"status":"ok"}');
+  });
+
+  it('attestation: a healthy instance reporting the expected git_sha passes', async () => {
+    const { exec } = fakeExec((_cmd, args) =>
+      args.includes('up') ? { code: 0, stdout: '', stderr: '' } : { code: 0, stdout: RUNNING_PS, stderr: '' },
+    );
+    const deps = bootDeps({
+      exec,
+      fetchHealth: async () => ({ status: 200, body: '{"status":"ok","activeTasks":0,"git_sha":"abc123"}' }),
+    });
+
+    const code = await runBoot(deps, { baseUrl: 'http://localhost:3000', timeoutSeconds: 600, expectedSha: 'abc123' });
+
+    expect(code).toBe(0);
+    expect(deps.logs.join('\n')).toContain('Attested: instance composed from abc123');
+  });
+
+  it('attestation: a healthy instance reporting a DIFFERENT git_sha fails the boot with diagnostics', async () => {
+    const { exec } = fakeExec((_cmd, args) =>
+      args.includes('up') ? { code: 0, stdout: '', stderr: '' } : { code: 0, stdout: RUNNING_PS, stderr: '' },
+    );
+    const deps = bootDeps({
+      exec,
+      fetchHealth: async () => ({ status: 200, body: '{"status":"ok","activeTasks":0,"git_sha":"stale99"}' }),
+    });
+
+    const code = await runBoot(deps, { baseUrl: 'http://localhost:3000', timeoutSeconds: 600, expectedSha: 'abc123' });
+
+    expect(code).toBe(1);
+    expect(deps.errors.join('\n')).toContain('git_sha=stale99');
+    expect(deps.errors.join('\n')).toContain('expected abc123');
+    expect(deps.errors.join('\n')).toContain('docker compose ps'); // diagnostics block rendered
+  });
+
+  it('attestation: a healthy instance with NO git_sha in /health fails when a SHA is expected', async () => {
+    const { exec } = fakeExec((_cmd, args) =>
+      args.includes('up') ? { code: 0, stdout: '', stderr: '' } : { code: 0, stdout: RUNNING_PS, stderr: '' },
+    );
+    const deps = bootDeps({
+      exec,
+      fetchHealth: async () => ({ status: 200, body: '{"status":"ok","activeTasks":0}' }),
+    });
+
+    const code = await runBoot(deps, { baseUrl: 'http://localhost:3000', timeoutSeconds: 600, expectedSha: 'abc123' });
+
+    expect(code).toBe(1);
+    expect(deps.errors.join('\n')).toContain('git_sha=(none)');
   });
 
   it('a transient compose ps failure (non-zero exit, empty stdout) skips the container check instead of aborting', async () => {
