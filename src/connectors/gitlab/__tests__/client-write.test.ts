@@ -245,6 +245,43 @@ describe('GitLabHost.listCodeScanningAlerts', () => {
     expect(alerts[0].state).toBe('fixed');
     expect(alerts[0].mostRecentInstance?.state).toBe('fixed');
   });
+
+  it('includes both detected and confirmed vulnerabilities as canonical open, excludes resolved', async () => {
+    setEnv();
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify([
+      {
+        id: 7, state: 'detected', report_type: 'sast', severity: 'high',
+        name: 'SQL Injection', description: 'desc', location: { file: 'src/db.ts', start_line: 10 },
+        web_url: 'https://gl.example/g/p/-/security/vulnerabilities/7',
+        created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-02T00:00:00Z',
+      },
+      {
+        id: 8, state: 'confirmed', report_type: 'sast', severity: 'critical',
+        name: 'RCE', description: 'desc2', location: { file: 'src/exec.ts', start_line: 20 },
+        web_url: 'https://gl.example/g/p/-/security/vulnerabilities/8',
+        created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-02T00:00:00Z',
+      },
+      {
+        id: 9, state: 'resolved', report_type: 'sast', severity: 'medium',
+        name: 'XSS', description: 'desc3', location: { file: 'src/ui.ts', start_line: 50 },
+        web_url: 'https://gl.example/g/p/-/security/vulnerabilities/9',
+        created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-02T00:00:00Z',
+      },
+    ]), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const alerts = await new GitLabHost().listCodeScanningAlerts('g/p', { state: 'open' });
+
+    // Both the detected and confirmed vulnerabilities canonicalize to 'open' and survive
+    // the filter; the resolved one is excluded.
+    expect(alerts.map((a) => a.number).sort()).toEqual([7, 8]);
+    expect(alerts.every((a) => a.state === 'open')).toBe(true);
+
+    // The outbound request must not filter by GitLab's native `state` query param —
+    // filtering happens client-side on the canonicalized state instead.
+    const [url] = fetchMock.mock.calls[0];
+    expect(String(url)).not.toContain('state=');
+  });
 });
 
 describe('GitLabHost.getCodeScanningAlert', () => {
