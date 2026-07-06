@@ -13,7 +13,6 @@
  * smuggling in new facts.
  */
 
-import { query } from '@anthropic-ai/claude-agent-sdk';
 import { readFile, writeFile, rm } from 'fs/promises';
 import { existsSync } from 'fs';
 import { join } from 'path';
@@ -30,6 +29,7 @@ import { rebuildIndex } from './entity-index.js';
 import { loadPrompt } from '../utils/prompt-loader.js';
 import { logger } from '../system/logger.js';
 import { recordHousekeepingNote } from './lifecycle.js';
+import { getLlmOneShot } from '../system/backends.js';
 import { parseLastTouched as parseLastTouchedFromAnnotations, stripLastTouched as stripLastTouchedFromAnnotations, appendLastTouched as appendLastTouchedFromAnnotations } from './annotations.js';
 import type { EntityRecord } from './types.js';
 
@@ -260,46 +260,15 @@ async function runHousekeeperAgent(fileContent: string): Promise<string> {
     prompt = `Consolidate this memory file by merging duplicates and dropping stale entries older than ${variables.STALENESS_DAYS} days. Do not introduce new facts.\n\n${fileContent}`;
   }
 
-  const agent = query({
+  const responseText = await getLlmOneShot().text({
     prompt,
-    options: {
-      model: 'sonnet' as any,
-      maxTurns: 1,
-      tools: [],
-      executable: 'node',
-      env: {
-        NODE_ENV: process.env.NODE_ENV || 'development',
-        ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
-        // Forward CA-trust to the spawned CLI (TLS-intercepting proxy); no-op when unset.
-        // Adds TLS trust only — not tools/permissions — so the minimal-env invariant holds.
-        ...(process.env.NODE_USE_SYSTEM_CA ? { NODE_USE_SYSTEM_CA: process.env.NODE_USE_SYSTEM_CA } : {}),
-        ...(process.env.NODE_EXTRA_CA_CERTS ? { NODE_EXTRA_CA_CERTS: process.env.NODE_EXTRA_CA_CERTS } : {}),
-        PATH: process.env.PATH,
-      },
-      stderr: (data: string) => {
-        logger.debug('memory', `housekeeping stderr: ${data.trim()}`);
-      },
+    model: 'sonnet',
+    maxTurns: 1,
+    stderr: (data: string) => {
+      logger.debug('memory', `housekeeping stderr: ${data.trim()}`);
     },
   });
-
-  let responseText = '';
-  for await (const event of agent) {
-    if (event.type === 'assistant') {
-      const content = (event as any).message?.content;
-      if (Array.isArray(content)) {
-        for (const block of content) {
-          if (block.type === 'text' && typeof block.text === 'string') {
-            responseText += block.text;
-          }
-        }
-      }
-    }
-    if (event.type === 'result' && event.subtype === 'success') {
-      const r = (event as any).result;
-      if (typeof r === 'string' && r.trim()) responseText = r;
-    }
-  }
-  return responseText.trim();
+  return (responseText ?? '').trim();
 }
 
 // ============================================================================
