@@ -16,7 +16,7 @@ import type { PrCardData } from '../../types/task.js';
 import { logger } from '../../system/logger.js';
 import { summarizeCi } from '../../system/pr-card-format.js';
 import { glRequest, glRequestAll } from './http.js';
-import { mapDetailedMergeStatus, mapMrState, mapPipelineStatusToConclusion, parseGitLabCheckRef } from './status-map.js';
+import { mapDetailedMergeStatus, mapMrState, mapPipelineStatusToConclusion } from './status-map.js';
 
 const NOT_IMPL = (name: string) => new Error(`GitLabHost.${name} not implemented until Plan 2`);
 
