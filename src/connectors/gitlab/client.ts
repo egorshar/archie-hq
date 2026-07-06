@@ -168,9 +168,103 @@ export class GitLabHost implements RepoHost {
         url: `${this.cloneUrl(repo).replace(/\.git$/, '')}/-/merge_requests/${prNumber}#note_${n.id}`,
       }));
   }
-  async listPRChecks(_repo: string, _prNumber: number): Promise<PRChecksReport> { throw NOT_IMPL('listPRChecks'); }
-  async getCheckRunById(_repo: string, _checkRunId: number): Promise<CheckRunReport> { throw NOT_IMPL('getCheckRunById'); }
-  async getWorkflowRunById(_repo: string, _runId: number): Promise<WorkflowRunReport> { throw NOT_IMPL('getWorkflowRunById'); }
+
+  private async fetchJobLogTail(repo: string, jobId: number): Promise<string | undefined> {
+    try {
+      const trace = await glRequest<string>({
+        path: `/projects/${this.projectId(repo)}/jobs/${jobId}/trace`, raw: true,
+      });
+      if (!trace) return undefined;
+      // Mirror the GitHub connector: prefer the tail from the first "Failures:" marker.
+      const marker = trace.indexOf('Failures:');
+      const slice = marker >= 0 ? trace.slice(marker) : trace;
+      return slice.length > 3000 ? slice.slice(-3000) : slice;
+    } catch {
+      return undefined;
+    }
+  }
+
+  async listPRChecks(repo: string, prNumber: number): Promise<PRChecksReport> {
+    const id = this.projectId(repo);
+    const mr = await glRequest<{ sha: string; head_pipeline?: { id: number } }>({
+      path: `/projects/${id}/merge_requests/${prNumber}`,
+    });
+    if (!mr.head_pipeline) {
+      return { headSha: mr.sha ?? '', entries: [] };
+    }
+    const jobs = await glRequestAll<{
+      id: number; name: string; status: string; stage: string; web_url: string | null;
+      started_at: string | null; finished_at: string | null;
+    }>({ path: `/projects/${id}/pipelines/${mr.head_pipeline.id}/jobs` });
+
+    return {
+      headSha: mr.sha ?? '',
+      entries: jobs.map((j) => ({
+        source: 'check_run' as const,
+        name: j.name,
+        app: j.stage,
+        status: j.status,
+        conclusion: mapPipelineStatusToConclusion(j.status),
+        url: j.web_url,
+        startedAt: j.started_at,
+        completedAt: j.finished_at,
+      })),
+    };
+  }
+
+  async getCheckRunById(repo: string, checkRunId: number): Promise<CheckRunReport> {
+    const id = this.projectId(repo);
+    const job = await glRequest<{
+      id: number; name: string; stage: string; status: string; web_url: string | null;
+      commit?: { id?: string }; started_at: string | null; finished_at: string | null;
+    }>({ path: `/projects/${id}/jobs/${checkRunId}` });
+    const conclusion = mapPipelineStatusToConclusion(job.status);
+    const logTail = conclusion === 'failure' ? await this.fetchJobLogTail(repo, job.id) : undefined;
+    return {
+      id: job.id,
+      name: job.name,
+      app: job.stage,
+      status: job.status,
+      conclusion,
+      url: job.web_url,
+      headSha: job.commit?.id ?? null,
+      startedAt: job.started_at,
+      completedAt: job.finished_at,
+      logTail,
+    };
+  }
+
+  async getWorkflowRunById(repo: string, runId: number): Promise<WorkflowRunReport> {
+    const id = this.projectId(repo);
+    const pipeline = await glRequest<{ id: number; status: string; sha: string | null; ref: string | null; web_url: string | null }>({
+      path: `/projects/${id}/pipelines/${runId}`,
+    });
+    const jobs = await glRequestAll<{ id: number; name: string; status: string; web_url: string | null }>({
+      path: `/projects/${id}/pipelines/${runId}/jobs`,
+    });
+    const jobEntries = [] as WorkflowRunReport['jobs'];
+    for (const j of jobs) {
+      const conclusion = mapPipelineStatusToConclusion(j.status);
+      jobEntries.push({
+        id: j.id,
+        name: j.name,
+        status: j.status,
+        conclusion,
+        url: j.web_url,
+        logTail: conclusion === 'failure' ? await this.fetchJobLogTail(repo, j.id) : undefined,
+      });
+    }
+    return {
+      id: pipeline.id,
+      name: `pipeline #${pipeline.id}`,
+      status: pipeline.status,
+      conclusion: mapPipelineStatusToConclusion(pipeline.status),
+      headSha: pipeline.sha,
+      headBranch: pipeline.ref,
+      url: pipeline.web_url,
+      jobs: jobEntries,
+    };
+  }
   async listAccessibleRepos(): Promise<Array<{ github: string; default_branch: string; description?: string }>> { throw NOT_IMPL('listAccessibleRepos'); }
   async resolveRepo(_repo: string): Promise<{ default_branch: string } | null> { throw NOT_IMPL('resolveRepo'); }
 
