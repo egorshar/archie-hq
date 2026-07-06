@@ -50,4 +50,4 @@ acceptance_criteria:
     method: deploy-only
     status: waived
     evidence: "Named post-merge step: operator (Egor) performs the first real merge-on-request via the Slack Approve button after deploy, also observing (a) exactly one 'ready' post per ready period and (b) the PM relaying per the updated engineering-team skill; outcome recorded as a PR comment"
-pr: null
+pr: 187
