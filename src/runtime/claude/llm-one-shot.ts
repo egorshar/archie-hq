@@ -30,8 +30,8 @@ function buildOptions(req: LlmTextRequest): Record<string, unknown> {
       ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
       PATH: process.env.PATH,
     },
-    maxTurns: req.maxTurns ?? 2,
   };
+  if (req.maxTurns !== undefined) opts.maxTurns = req.maxTurns;
   if (req.systemPrompt !== undefined) opts.systemPrompt = req.systemPrompt;
   if (req.allowedTools !== undefined) {
     opts.allowedTools = req.allowedTools;
