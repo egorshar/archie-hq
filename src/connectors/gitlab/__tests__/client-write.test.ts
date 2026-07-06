@@ -90,3 +90,51 @@ describe('GitLabHost.closePullRequest / updatePR / addPRComment', () => {
     expect(JSON.parse(init.body)).toEqual({ body: 'hello' });
   });
 });
+
+describe('GitLabHost.getPRReviews (D2 synthesis)', () => {
+  it('maps approvals to approved and unresolved reviewer discussions to changes_requested', async () => {
+    setEnv();
+    const fetchMock = vi.fn()
+      // MR (for author)
+      .mockResolvedValueOnce(new Response(JSON.stringify({ author: { username: 'author1' } }), { status: 200 }))
+      // approvals
+      .mockResolvedValueOnce(new Response(JSON.stringify({ approved_by: [{ user: { username: 'rev1' } }] }), { status: 200 }))
+      // discussions (paginated; one unresolved reviewer thread, one authored by the MR author, one resolved)
+      .mockResolvedValueOnce(new Response(JSON.stringify([
+        { id: 'd1', individual_note: false, notes: [{ author: { username: 'rev2' }, body: 'please fix', resolvable: true, resolved: false, created_at: '2026-01-01T00:00:00Z' }] },
+        { id: 'd2', individual_note: false, notes: [{ author: { username: 'author1' }, body: 'self note', resolvable: true, resolved: false, created_at: '2026-01-01T00:01:00Z' }] },
+        { id: 'd3', individual_note: false, notes: [{ author: { username: 'rev2' }, body: 'ok now', resolvable: true, resolved: true, created_at: '2026-01-01T00:02:00Z' }] },
+      ]), { status: 200, headers: {} }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const reviews = await new GitLabHost().getPRReviews('g/p', 12);
+    const approved = reviews.filter((r) => r.state === 'approved');
+    const changes = reviews.filter((r) => r.state === 'changes_requested');
+    expect(approved.map((r) => r.user)).toEqual(['rev1']);
+    // Only rev2's unresolved, non-author, resolvable discussion counts.
+    expect(changes).toHaveLength(1);
+    expect(changes[0].user).toBe('rev2');
+  });
+});
+
+describe('GitLabHost.getReviewThreads', () => {
+  it('maps resolvable discussions to ReviewThread with comments', async () => {
+    setEnv();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify([
+      {
+        id: 'disc1', individual_note: false,
+        notes: [{
+          id: 101, author: { username: 'rev2' }, body: 'line comment', resolvable: true, resolved: false,
+          created_at: '2026-01-01T00:00:00Z',
+          position: { new_path: 'src/a.ts', new_line: 42 },
+        }],
+      },
+      { id: 'plain', individual_note: true, notes: [{ id: 200, author: { username: 'x' }, body: 'not a thread', resolvable: false, resolved: false, created_at: '2026-01-01T00:00:00Z' }] },
+    ]), { status: 200 })));
+
+    const threads = await new GitLabHost().getReviewThreads('g/p', 12);
+    expect(threads).toHaveLength(1);
+    expect(threads[0]).toMatchObject({ threadId: 'disc1', isResolved: false, path: 'src/a.ts', line: 42 });
+    expect(threads[0].comments[0]).toMatchObject({ commentId: 101, author: 'rev2', body: 'line comment' });
+  });
+});
