@@ -26,3 +26,24 @@ export function repoCloneUrl(repo: string): string {
   }
   return `https://github.com/${repo}.git`;
 }
+
+/**
+ * The bot git identity for the active repo host, used to set the local git
+ * `user.name`/`user.email` (the committer) so pushes satisfy host push rules
+ * that require the committer email to be the token account's verified email.
+ * - GitLab: GITLAB_BOT_NAME / GITLAB_BOT_EMAIL (must match the token account's
+ *   verified/commit email, e.g. a `project_*_bot_*@noreply.<host>` address).
+ * - GitHub: derived from the App id/slug (mirrors getGitHubAppIdentity()).
+ * Returns null when the active host's identity env is not configured.
+ */
+export function repoBotIdentity(): { name: string; email: string } | null {
+  if (repoHostKind() === 'gitlab') {
+    const name = process.env.GITLAB_BOT_NAME;
+    const email = process.env.GITLAB_BOT_EMAIL;
+    return name && email ? { name, email } : null;
+  }
+  const appId = process.env.GITHUB_APP_ID;
+  const appSlug = process.env.GITHUB_APP_SLUG;
+  if (!appId || !appSlug) return null;
+  return { name: `${appSlug}[bot]`, email: `${appId}+${appSlug}[bot]@users.noreply.github.com` };
+}
