@@ -138,3 +138,67 @@ describe('GitLabHost.getReviewThreads', () => {
     expect(threads[0].comments[0]).toMatchObject({ commentId: 101, author: 'rev2', body: 'line comment' });
   });
 });
+
+describe('GitLabHost.resolveReviewThread', () => {
+  it('PUTs resolved=true on the discussion', async () => {
+    setEnv();
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({}), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    await new GitLabHost().resolveReviewThread('g/p', 12, 'disc1');
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toContain('/merge_requests/12/discussions/disc1');
+    expect(init.method).toBe('PUT');
+    expect(JSON.parse(init.body)).toEqual({ resolved: true });
+  });
+});
+
+describe('GitLabHost.replyToReviewComment', () => {
+  it('finds the discussion holding the note id and POSTs a reply note', async () => {
+    setEnv();
+    const fetchMock = vi.fn()
+      // discussions lookup
+      .mockResolvedValueOnce(new Response(JSON.stringify([
+        { id: 'discA', notes: [{ id: 500 }, { id: 501 }] },
+        { id: 'discB', notes: [{ id: 999 }] },
+      ]), { status: 200 }))
+      // reply POST
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: 502 }), { status: 201 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await new GitLabHost().replyToReviewComment('g/p', 12, 501, 'thanks');
+    const [url, init] = fetchMock.mock.calls[1];
+    expect(String(url)).toContain('/merge_requests/12/discussions/discA/notes');
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(init.body)).toEqual({ body: 'thanks' });
+  });
+
+  it('throws a clear error when no discussion holds the note id', async () => {
+    setEnv();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify([{ id: 'discB', notes: [{ id: 999 }] }]), { status: 200 })));
+    await expect(new GitLabHost().replyToReviewComment('g/p', 12, 501, 'x')).rejects.toThrow(/discussion/i);
+  });
+});
+
+describe('GitLabHost.requestReReview', () => {
+  it('is a logged no-op (reReviewRequest capability is false)', async () => {
+    setEnv();
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    await new GitLabHost().requestReReview('g/p', 12);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('GitLabHost.addReviewComment', () => {
+  it('POSTs a positioned discussion using the MR diff_refs', async () => {
+    setEnv();
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ diff_refs: { base_sha: 'b', head_sha: 'h', start_sha: 's' } }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: 1 }), { status: 201 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await new GitLabHost().addReviewComment('g/p', 12, 'src/a.ts', 42, 'nit');
+    const body = JSON.parse(fetchMock.mock.calls[1][1].body);
+    expect(body.position).toMatchObject({ position_type: 'text', new_path: 'src/a.ts', new_line: 42, base_sha: 'b', head_sha: 'h', start_sha: 's' });
+  });
+});
