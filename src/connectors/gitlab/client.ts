@@ -375,8 +375,91 @@ export class GitLabHost implements RepoHost {
     return { success: true, message: `Would push ${branch} to ${repo}` };
   }
 
-  async getPRReviews(): Promise<PRReview[]> { throw NOT_IMPL('getPRReviews'); }
-  async getReviewThreads(): Promise<ReviewThread[]> { throw NOT_IMPL('getReviewThreads'); }
+  /** MR author username, used to exclude self-authored discussions from D2 synthesis. */
+  private async mrAuthor(repo: string, prNumber: number): Promise<string | null> {
+    try {
+      const mr = await glRequest<{ author?: { username?: string } }>({
+        path: `/projects/${this.projectId(repo)}/merge_requests/${prNumber}`,
+      });
+      return mr.author?.username ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  async getPRReviews(repo: string, prNumber: number): Promise<PRReview[]> {
+    const id = this.projectId(repo);
+    const author = await this.mrAuthor(repo, prNumber);
+    const reviews: PRReview[] = [];
+
+    // Approvals → approved reviews (one per approver).
+    const approvals = await glRequest<{ approved_by?: Array<{ user?: { username?: string } }> }>({
+      path: `/projects/${id}/merge_requests/${prNumber}/approvals`,
+    }).catch(() => ({ approved_by: [] as Array<{ user?: { username?: string } }> }));
+    for (const a of approvals.approved_by ?? []) {
+      reviews.push({ id: `approval:${a.user?.username ?? 'unknown'}`, user: a.user?.username ?? 'unknown', state: 'approved', body: '', submittedAt: '' });
+    }
+
+    // D2: unresolved, resolvable discussions started by a non-author reviewer →
+    // one synthesized changes_requested review per such reviewer.
+    const discussions = await glRequestAll<{
+      id: string; individual_note?: boolean;
+      notes?: Array<{ author?: { username?: string }; body?: string; resolvable?: boolean; resolved?: boolean; created_at?: string }>;
+    }>({ path: `/projects/${id}/merge_requests/${prNumber}/discussions` });
+
+    const changeRequesters = new Map<string, { body: string; at: string }>();
+    for (const d of discussions) {
+      if (d.individual_note) continue;
+      const first = d.notes?.[0];
+      if (!first || !first.resolvable || first.resolved) continue;
+      const user = first.author?.username;
+      if (!user || user === author) continue;
+      if (!changeRequesters.has(user)) {
+        changeRequesters.set(user, { body: first.body ?? '', at: first.created_at ?? '' });
+      }
+    }
+    for (const [user, info] of changeRequesters) {
+      reviews.push({ id: `discussion:${user}`, user, state: 'changes_requested', body: info.body, submittedAt: info.at });
+    }
+
+    logger.system(`GitLab: MR !${prNumber} reviews: ${reviews.filter((r) => r.state === 'approved').length} approved, ${changeRequesters.size} changes_requested (synthesized)`);
+    return reviews;
+  }
+
+  async getReviewThreads(repo: string, prNumber: number): Promise<ReviewThread[]> {
+    const discussions = await glRequestAll<{
+      id: string; individual_note?: boolean;
+      notes?: Array<{
+        id: number; author?: { username?: string }; body?: string; resolvable?: boolean; resolved?: boolean;
+        created_at?: string; position?: { new_path?: string; new_line?: number | null };
+      }>;
+    }>({ path: `/projects/${this.projectId(repo)}/merge_requests/${prNumber}/discussions` });
+
+    const threads: ReviewThread[] = [];
+    for (const d of discussions) {
+      // Only resolvable (review) discussions become threads; individual_note=true are plain comments.
+      if (d.individual_note) continue;
+      const notes = d.notes ?? [];
+      const first = notes[0];
+      if (!first?.resolvable) continue;
+      const pos = first.position;
+      threads.push({
+        threadId: d.id,
+        isResolved: first.resolved === true,
+        isOutdated: false, // GitLab exposes outdated only via position drift; not modeled here.
+        path: pos?.new_path ?? '',
+        line: pos?.new_line ?? null,
+        comments: notes.map((n) => ({
+          commentId: n.id,
+          author: n.author?.username ?? 'unknown',
+          body: n.body ?? '',
+          createdAt: n.created_at ?? '',
+          url: `${this.cloneUrl(repo).replace(/\.git$/, '')}/-/merge_requests/${prNumber}#note_${n.id}`,
+        })),
+      });
+    }
+    return threads;
+  }
   async addReviewComment(): Promise<void> { throw NOT_IMPL('addReviewComment'); }
   async replyToReviewComment(): Promise<void> { throw NOT_IMPL('replyToReviewComment'); }
   async resolveReviewThread(): Promise<void> { throw NOT_IMPL('resolveReviewThread'); }
