@@ -24,13 +24,22 @@ describe('formatGitLabContext → canonical vocabulary', () => {
     expect(determineRouteAction(ctx)).toBe('merge_check');
   });
 
-  it('MR update → pull_request/synchronize → merge_check', () => {
+  it('MR update with oldrev (commits pushed) → pull_request/synchronize → merge_check', () => {
+    const ctx = formatGitLabContext('merge_request', {
+      object_kind: 'merge_request', project, user,
+      object_attributes: { iid: 5, action: 'update', source_branch: 'feat/x', oldrev: 'abc123' },
+    });
+    expect(ctx.action).toBe('synchronize');
+    expect(determineRouteAction(ctx)).toBe('merge_check');
+  });
+
+  it('MR update without oldrev (metadata-only edit) → pull_request/update → noop', () => {
     const ctx = formatGitLabContext('merge_request', {
       object_kind: 'merge_request', project, user,
       object_attributes: { iid: 5, action: 'update', source_branch: 'feat/x' },
     });
-    expect(ctx.action).toBe('synchronize');
-    expect(determineRouteAction(ctx)).toBe('merge_check');
+    expect(ctx.action).toBe('update');
+    expect(determineRouteAction(ctx)).toBe('noop');
   });
 
   it('MR merge → pull_request/closed state merged → existing_task', () => {
@@ -75,6 +84,13 @@ describe('formatGitLabContext → canonical vocabulary', () => {
     const ctx = formatGitLabContext('push', { object_kind: 'push', project, user, ref: 'refs/heads/feat/z' });
     expect(ctx).toMatchObject({ eventType: 'push', branch: 'feat/z' });
     expect(determineRouteAction(ctx)).toBe('merge_check');
+  });
+
+  it('push without nested user falls back to user_username for the actor', () => {
+    const ctx = formatGitLabContext('push', {
+      object_kind: 'push', project, ref: 'refs/heads/feat/z', user_username: 'pusher1',
+    });
+    expect(ctx.user).toBe('pusher1');
   });
 
   it('pipeline success → workflow_run completed success → merge_check', () => {
