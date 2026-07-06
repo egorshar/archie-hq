@@ -278,10 +278,19 @@ export function mountApiRoutes(app: Application): void {
           await task.handleResearchBudgetDenial();
         }
       } else if (mergeExpected) {
-        if (approve) {
-          await task.handleMergeApproval(cleanApprover, mergeExpected);
-        } else {
-          await task.handleMergeDenial(mergeExpected);
+        const disposition = approve
+          ? await task.handleMergeApproval(cleanApprover, mergeExpected)
+          : await task.handleMergeDenial(mergeExpected);
+        // A stale disposition means the identity gate rejected the resolution
+        // (empty or mismatched slot) and nothing happened — relay that instead
+        // of a false success, and emit no approval:resolved event.
+        if (disposition === 'stale') {
+          res.status(409).json({
+            ok: false,
+            stale: true,
+            error: `No pending merge approval for ${mergeExpected.github}#${mergeExpected.pr_number}`,
+          });
+          return;
         }
       } else {
         res.status(400).json({ error: `Unknown approval type: ${type}` });

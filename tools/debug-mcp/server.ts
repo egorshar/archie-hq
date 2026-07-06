@@ -187,7 +187,15 @@ server.tool(
     pr_number: z.number().optional().describe('Number of the pending PR (required for type "merge")'),
   },
   async ({ task_id, type, approve, github, pr_number }) => {
-    await client.approve(task_id, type, approve, { github, pr_number });
+    const { stale } = await client.approve(task_id, type, approve, { github, pr_number });
+    if (stale) {
+      return {
+        content: [{
+          type: 'text',
+          text: `STALE: ${type} resolution for ${task_id} did not match the pending request — nothing was approved or denied`,
+        }],
+      };
+    }
     const action = approve ? 'Approved' : 'Denied';
     return { content: [{ type: 'text', text: `${action} ${type} for ${task_id}` }] };
   },

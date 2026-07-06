@@ -66,6 +66,7 @@ import { registerMergeActionHandlers } from '../slack/events.js';
 import { mountApiRoutes } from '../api/routes.js';
 import { Task } from '../../tasks/task.js';
 import { getUserInfo, isExternalUser, updateMessage } from '../slack/client.js';
+import { emitEvent } from '../../system/event-bus.js';
 
 const EXPECTED = { github: 'org/backend', pr_number: 42 };
 const BUTTON_VALUE = 'task-123|org/backend#42';
@@ -206,6 +207,43 @@ describe('merge approval — Slack button and API route resolve identically (AC8
     );
     expect(vi.mocked(updateMessage)).not.toHaveBeenCalledWith(
       'C1', '111.222', expect.stringContaining('Merge approved'), [],
+    );
+  });
+
+  it('API stale merge resolution: 409 {ok:false, stale:true} and no approval:resolved event', async () => {
+    const task = makeFakeTask();
+    task.handleMergeApproval.mockResolvedValue('stale');
+    task.handleMergeDenial.mockResolvedValue('stale');
+    vi.mocked(Task.get).mockResolvedValue(task as unknown as Task);
+
+    const route = captureApproveRoute();
+
+    for (const approveFlag of [true, false]) {
+      const res = makeRes();
+      await route(makeReq({ type: 'merge', approve: approveFlag, github: 'org/backend', pr_number: 7 }), res);
+
+      // The identity gate rejected the resolution — the route must not report
+      // success nor tell event consumers the approval resolved.
+      expect(res.status).toHaveBeenCalledWith(409);
+      expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ ok: false, stale: true }));
+      expect(res.json).not.toHaveBeenCalledWith({ ok: true });
+    }
+    expect(vi.mocked(emitEvent)).not.toHaveBeenCalledWith(
+      'approval:resolved', expect.anything(), expect.anything(),
+    );
+  });
+
+  it('API resolved merge approval emits approval:resolved and returns ok', async () => {
+    const task = makeFakeTask();
+    vi.mocked(Task.get).mockResolvedValue(task as unknown as Task);
+
+    const route = captureApproveRoute();
+    const res = makeRes();
+    await route(makeReq({ type: 'merge', approve: true, github: 'org/backend', pr_number: 42 }), res);
+
+    expect(res.json).toHaveBeenCalledWith({ ok: true });
+    expect(vi.mocked(emitEvent)).toHaveBeenCalledWith(
+      'approval:resolved', 'task-123', { type: 'merge', approve: true },
     );
   });
 
