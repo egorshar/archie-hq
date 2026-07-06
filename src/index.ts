@@ -43,6 +43,7 @@ import { initEventPersistence } from './tasks/persistence.js';
 import { initReminderScheduler } from './system/reminder-scheduler.js';
 import { initTriggerScheduler } from './system/trigger-scheduler.js';
 import { initMemory } from './memory/index.js';
+import { assertBackendConfig, getBackendMatrix } from './system/backends.js';
 
 /**
  * Application configuration
@@ -92,6 +93,10 @@ async function main(): Promise<void> {
 
   try {
     const config = loadConfig();
+
+    assertBackendConfig();
+    const matrix = getBackendMatrix();
+    logger.system(`Backends: repoHost=${matrix.repoHost} runtime=${matrix.runtime}`);
 
     // Bootstrap: create workdir structure, clone/pull plugins
     await bootstrapWorkdir();
@@ -218,6 +223,7 @@ async function main(): Promise<void> {
         // Checkout attestation for the e2e harness (docker-compose passes the
         // composing shell's GIT_SHA); null when not composed with one.
         git_sha: process.env.GIT_SHA || null,
+        backends: getBackendMatrix(),
       });
     });
 
