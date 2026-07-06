@@ -312,12 +312,69 @@ export class GitLabHost implements RepoHost {
   }
 
   // ---- write/review methods: implemented in Plan 2 (throw for now) ----
-  async createPullRequest(): Promise<CreatePRResult> { throw NOT_IMPL('createPullRequest'); }
-  async updatePR(): Promise<void> { throw NOT_IMPL('updatePR'); }
-  async addPRComment(): Promise<void> { throw NOT_IMPL('addPRComment'); }
-  async closePullRequest(): Promise<void> { throw NOT_IMPL('closePullRequest'); }
-  async mergePullRequest(): Promise<{ success: boolean; message: string }> { throw NOT_IMPL('mergePullRequest'); }
-  async pushBranch(): Promise<{ success: boolean; message: string }> { throw NOT_IMPL('pushBranch'); }
+  async createPullRequest(repo: string, head: string, base: string, title: string, body: string): Promise<CreatePRResult> {
+    const mr = await glRequest<{ iid: number; web_url: string }>({
+      method: 'POST',
+      path: `/projects/${this.projectId(repo)}/merge_requests`,
+      body: { source_branch: head, target_branch: base, title, description: body },
+    });
+    logger.system(`GitLab: created MR !${mr.iid} for ${repo} (${head} -> ${base})`);
+    return { pr_number: mr.iid, pr_url: mr.web_url };
+  }
+
+  async updatePR(repo: string, prNumber: number, fields: { title?: string; body?: string; base?: string }): Promise<void> {
+    const patch: Record<string, string> = {};
+    if (fields.title !== undefined) patch.title = fields.title;
+    if (fields.body !== undefined) patch.description = fields.body;
+    if (fields.base !== undefined) patch.target_branch = fields.base;
+    await glRequest({ method: 'PUT', path: `/projects/${this.projectId(repo)}/merge_requests/${prNumber}`, body: patch });
+    logger.system(`GitLab: updated MR !${prNumber}`);
+  }
+
+  async closePullRequest(repo: string, prNumber: number): Promise<void> {
+    await glRequest({
+      method: 'PUT',
+      path: `/projects/${this.projectId(repo)}/merge_requests/${prNumber}`,
+      body: { state_event: 'close' },
+    });
+    logger.system(`GitLab: closed MR !${prNumber}`);
+  }
+
+  async addPRComment(repo: string, prNumber: number, comment: string): Promise<void> {
+    await glRequest({
+      method: 'POST',
+      path: `/projects/${this.projectId(repo)}/merge_requests/${prNumber}/notes`,
+      body: { body: comment },
+    });
+    logger.system(`GitLab: added note to MR !${prNumber}`);
+  }
+
+  async mergePullRequest(repo: string, prNumber: number, mergeMethod: 'merge' | 'squash' | 'rebase' = 'squash'): Promise<{ success: boolean; message: string }> {
+    // GitLab's merge endpoint has no 'rebase' merge; it exposes a boolean `squash`.
+    // Map for parity: 'squash' (Archie's default) → squash:true; 'merge'/'rebase' → squash:false.
+    const squash = mergeMethod === 'squash';
+    try {
+      await glRequest({
+        method: 'PUT',
+        path: `/projects/${this.projectId(repo)}/merge_requests/${prNumber}/merge`,
+        body: { squash },
+      });
+      logger.system(`GitLab: merged MR !${prNumber} (squash=${squash})`);
+      return { success: true, message: `MR !${prNumber} merged successfully` };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      logger.error('gitlab', `Failed to merge MR !${prNumber}: ${message}`);
+      return { success: false, message };
+    }
+  }
+
+  async pushBranch(repo: string, branch: string, worktreePath: string): Promise<{ success: boolean; message: string }> {
+    // Parity with the GitHub host: the actual push happens via git CLI in the
+    // worktree (host-agnostic); this method is a no-op acknowledgement.
+    logger.system(`GitLab: pushBranch called for ${repo}:${branch} from ${worktreePath}`);
+    return { success: true, message: `Would push ${branch} to ${repo}` };
+  }
+
   async getPRReviews(): Promise<PRReview[]> { throw NOT_IMPL('getPRReviews'); }
   async getReviewThreads(): Promise<ReviewThread[]> { throw NOT_IMPL('getReviewThreads'); }
   async addReviewComment(): Promise<void> { throw NOT_IMPL('addReviewComment'); }
