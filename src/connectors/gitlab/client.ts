@@ -460,10 +460,75 @@ export class GitLabHost implements RepoHost {
     }
     return threads;
   }
-  async addReviewComment(): Promise<void> { throw NOT_IMPL('addReviewComment'); }
-  async replyToReviewComment(): Promise<void> { throw NOT_IMPL('replyToReviewComment'); }
-  async resolveReviewThread(): Promise<void> { throw NOT_IMPL('resolveReviewThread'); }
-  async requestReReview(): Promise<void> { throw NOT_IMPL('requestReReview'); }
+  async resolveReviewThread(repo: string, prNumber: number, threadId: string): Promise<void> {
+    await glRequest({
+      method: 'PUT',
+      path: `/projects/${this.projectId(repo)}/merge_requests/${prNumber}/discussions/${threadId}`,
+      body: { resolved: true },
+    });
+    logger.system(`GitLab: resolved discussion ${threadId} on MR !${prNumber}`);
+  }
+
+  /** Find the discussion id that contains a given note id (GitLab replies target a discussion, not a note). */
+  private async findDiscussionIdForNote(repo: string, prNumber: number, noteId: number): Promise<string | null> {
+    const discussions = await glRequestAll<{ id: string; notes?: Array<{ id: number }> }>({
+      path: `/projects/${this.projectId(repo)}/merge_requests/${prNumber}/discussions`,
+    });
+    for (const d of discussions) {
+      if ((d.notes ?? []).some((n) => n.id === noteId)) return d.id;
+    }
+    return null;
+  }
+
+  async replyToReviewComment(repo: string, prNumber: number, commentId: number, comment: string): Promise<void> {
+    const discussionId = await this.findDiscussionIdForNote(repo, prNumber, commentId);
+    if (!discussionId) {
+      throw new Error(`GitLab: no discussion found containing note ${commentId} on MR !${prNumber}`);
+    }
+    await glRequest({
+      method: 'POST',
+      path: `/projects/${this.projectId(repo)}/merge_requests/${prNumber}/discussions/${discussionId}/notes`,
+      body: { body: comment },
+    });
+    logger.system(`GitLab: replied in discussion ${discussionId} on MR !${prNumber}`);
+  }
+
+  async addReviewComment(repo: string, prNumber: number, path: string, line: number, comment: string): Promise<void> {
+    // E2E-VERIFY: positioned diff note. Endpoint: POST /merge_requests/:iid/discussions
+    // with position { position_type:'text', new_path, new_line, base_sha, head_sha, start_sha }.
+    // The three shas come from the MR's diff_refs. Verify the field names + a real
+    // line maps correctly against the live instance (Plan 4 E2E).
+    const id = this.projectId(repo);
+    const mr = await glRequest<{ diff_refs?: { base_sha?: string; head_sha?: string; start_sha?: string } }>({
+      path: `/projects/${id}/merge_requests/${prNumber}`,
+    });
+    const refs = mr.diff_refs;
+    if (!refs?.base_sha || !refs?.head_sha || !refs?.start_sha) {
+      throw new Error(`GitLab: MR !${prNumber} has no diff_refs; cannot post a positioned review comment`);
+    }
+    await glRequest({
+      method: 'POST',
+      path: `/projects/${id}/merge_requests/${prNumber}/discussions`,
+      body: {
+        body: comment,
+        position: {
+          position_type: 'text',
+          new_path: path,
+          new_line: line,
+          base_sha: refs.base_sha,
+          head_sha: refs.head_sha,
+          start_sha: refs.start_sha,
+        },
+      },
+    });
+    logger.system(`GitLab: added review comment to ${path}:${line} on MR !${prNumber}`);
+  }
+
+  async requestReReview(repo: string, prNumber: number): Promise<void> {
+    // GitLab has no re-review request primitive; capability reReviewRequest=false.
+    // Degrade gracefully (P3): log and no-op rather than throwing on a normal path.
+    logger.system(`GitLab: requestReReview is a no-op on this host (MR !${prNumber}); reReviewRequest capability is false`);
+  }
   async listCodeScanningAlerts(_repo: string, _filters?: CodeScanningAlertFilters): Promise<CodeScanningAlert[]> { throw NOT_IMPL('listCodeScanningAlerts'); }
   async getCodeScanningAlert(_repo: string, _alertNumber: number): Promise<CodeScanningAlert> { throw NOT_IMPL('getCodeScanningAlert'); }
 }
