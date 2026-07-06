@@ -9,6 +9,7 @@ import type { RepoHost } from '../ports/repo-host.js';
 import type { AgentRuntime } from '../ports/agent-runtime.js';
 import type { LlmOneShot } from '../ports/llm-one-shot.js';
 import { getGitHubClient } from '../connectors/github/client.js';
+import { GitLabHost } from '../connectors/gitlab/client.js';
 import { claudeSdkRuntime } from '../runtime/claude/runtime.js';
 import { claudeLlmOneShot } from '../runtime/claude/llm-one-shot.js';
 import { logger } from './logger.js';
@@ -16,7 +17,7 @@ import { logger } from './logger.js';
 export type RepoHostKind = 'github' | 'gitlab';
 export type AgentRuntimeKind = 'claude' | 'opencode';
 
-const SUPPORTED_REPO_HOSTS: RepoHostKind[] = ['github']; // gitlab: Phase 1
+const SUPPORTED_REPO_HOSTS: RepoHostKind[] = ['github', 'gitlab'];
 const SUPPORTED_RUNTIMES: AgentRuntimeKind[] = ['claude']; // opencode: Phase 2
 
 export function resolveRepoHostKind(): RepoHostKind {
@@ -33,6 +34,15 @@ export function getBackendMatrix(): { repoHost: string; runtime: string } {
   return { repoHost: resolveRepoHostKind(), runtime: resolveAgentRuntimeKind() };
 }
 
+const REQUIRED_GITLAB_ENV = ['GITLAB_BASE_URL', 'GITLAB_TOKEN', 'GITLAB_WEBHOOK_SECRET'] as const;
+
+function assertGitLabEnv(): void {
+  const missing = REQUIRED_GITLAB_ENV.filter((k) => !process.env[k]);
+  if (missing.length > 0) {
+    throw new Error(`REPO_HOST=gitlab requires ${missing.join(', ')} to be set.`);
+  }
+}
+
 /**
  * Validate selected backends are supported in this build. Throw with an
  * actionable message otherwise. Call once at boot (see index.ts).
@@ -46,6 +56,7 @@ export function assertBackendConfig(): void {
     }
     throw new Error(`REPO_HOST="${host}" is invalid. Supported values: ${SUPPORTED_REPO_HOSTS.join(', ')}.`);
   }
+  if (host === 'gitlab') assertGitLabEnv();
   const runtime = resolveAgentRuntimeKind();
   if (!SUPPORTED_RUNTIMES.includes(runtime)) {
     const known: string[] = ['claude', 'opencode'];
@@ -54,6 +65,12 @@ export function assertBackendConfig(): void {
     }
     throw new Error(`AGENT_RUNTIME="${runtime}" is invalid. Supported values: ${SUPPORTED_RUNTIMES.join(', ')}.`);
   }
+}
+
+let gitlabSingleton: GitLabHost | null = null;
+export function getGitLabHost(): GitLabHost {
+  if (!gitlabSingleton) gitlabSingleton = new GitLabHost();
+  return gitlabSingleton;
 }
 
 /**
@@ -66,6 +83,8 @@ export function getRepoHost(): RepoHost | null {
   switch (host) {
     case 'github':
       return getGitHubClient();
+    case 'gitlab':
+      return getGitLabHost();
     default:
       // Unsupported hosts are rejected by assertBackendConfig() at boot; return
       // null defensively so a mis-sequenced call can't crash.
