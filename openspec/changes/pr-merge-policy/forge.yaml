@@ -2,8 +2,8 @@ run: pr-merge-policy
 source: { type: issue, ref: "139" }
 repo: sweatco/archie-hq
 branch: forge/pr-merge-policy
-stage: plan
-stage_rounds: {}
+stage: implement
+stage_rounds: { plan: 3 }
 acceptance_criteria:
   - id: AC1
     text: "WHEN a PR linked to a task is in a repo whose agent frontmatter lacks autoMerge: true, and an approval webhook arrives with the PR mergeable, THEN the system does not merge, and the PM posts exactly one Slack-thread notification that the PR is ready and can be merged on request — including when multiple merge-triggering webhooks (approval, synchronize, push, workflow_run) arrive for the same PR state."
