@@ -13,3 +13,16 @@ export function repoHostKind(): 'github' | 'gitlab' {
 export function repoEventPrefix(): 'github' | 'gitlab' {
   return repoHostKind();
 }
+
+/**
+ * Build a clone URL for the given repo, respecting REPO_HOST.
+ * - GitHub (default): https://github.com/<repo>.git
+ * - GitLab: <GITLAB_BASE_URL>/<repo>.git
+ */
+export function repoCloneUrl(repo: string): string {
+  if (repoHostKind() === 'gitlab') {
+    const base = (process.env.GITLAB_BASE_URL ?? '').replace(/\/+$/, '');
+    return `${base}/${repo}.git`;
+  }
+  return `https://github.com/${repo}.git`;
+}
