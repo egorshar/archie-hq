@@ -37,6 +37,7 @@ import type { RepoHost } from '../../ports/repo-host.js';
 import type { RepoHostCapabilities } from '../../ports/capabilities.js';
 import { GITHUB_CAPABILITIES } from '../../ports/capabilities.js';
 import { githubRepoToUrl } from './repo-clone.js';
+import { repoBotIdentity } from '../shared/repo-url.js';
 
 const execAsync = promisify(exec);
 
@@ -1148,13 +1149,19 @@ export function getGitHubAppIdentity(): { name: string; email: string } | null {
 }
 
 /**
- * Configure git identity for a repository using GitHub App bot credentials.
- * Should be called once on server startup for each base repo.
- * Worktrees inherit this config from the base repo.
+ * Configure git identity (the committer) for a repository using the active repo
+ * host's bot credentials. Host-aware: defaults to `repoBotIdentity()` so that
+ * under REPO_HOST=gitlab the committer is the GitLab bot's verified email
+ * (GITLAB_BOT_EMAIL) — GitLab push rules reject commits whose committer email
+ * isn't a verified email of the token account. Should be called once on server
+ * startup for each base repo (and per shared clone); worktrees inherit it.
+ * Callers may pass an explicit identity; `null` means "leave git's default".
  */
-export async function configureGitIdentity(repoPath: string): Promise<string | null> {
-  const identity = getGitHubAppIdentity();
-  if (identity) {
+export async function configureGitIdentity(
+  repoPath: string,
+  identity: { name: string; email: string } | null = repoBotIdentity(),
+): Promise<string | null> {
+  if (identity && identity.email) {
     await execAsync(`git config user.name "${identity.name}"`, { cwd: repoPath });
     await execAsync(`git config user.email "${identity.email}"`, { cwd: repoPath });
     return identity.name;
