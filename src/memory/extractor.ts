@@ -5,9 +5,9 @@
  * Returns structured MemoryUpdate arrays and task/activity summaries.
  */
 
-import { query } from '@anthropic-ai/claude-agent-sdk';
 import { loadPrompt } from '../utils/prompt-loader.js';
 import { logger } from '../system/logger.js';
+import { getLlmOneShot } from '../system/backends.js';
 import type { ExtractionResult, MemoryUpdate, EntityUpdate } from './types.js';
 
 // ============================================================================
@@ -231,55 +231,16 @@ export async function runExtraction(
   }
 
   try {
-    const agentQuery = query({
+    const responseText = await getLlmOneShot().text({
       prompt,
-      options: {
-        model: 'sonnet' as any,
-        maxTurns: 1,
-        tools: [],
-        executable: 'node',
-        env: {
-          NODE_ENV: process.env.NODE_ENV || 'development',
-          ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
-          // Forward CA-trust to the spawned CLI (TLS-intercepting proxy); no-op when unset.
-          // Adds TLS trust only — not tools/permissions — so the minimal-env invariant holds.
-          ...(process.env.NODE_USE_SYSTEM_CA ? { NODE_USE_SYSTEM_CA: process.env.NODE_USE_SYSTEM_CA } : {}),
-          ...(process.env.NODE_EXTRA_CA_CERTS ? { NODE_EXTRA_CA_CERTS: process.env.NODE_EXTRA_CA_CERTS } : {}),
-          PATH: process.env.PATH,
-        },
-        stderr: (data: string) => {
-          logger.debug('memory', `extraction stderr: ${data.trim()}`);
-        },
+      model: 'sonnet',
+      maxTurns: 1,
+      stderr: (data: string) => {
+        logger.debug('memory', `extraction stderr: ${data.trim()}`);
       },
     });
 
-    let responseText = '';
-
-    for await (const event of agentQuery) {
-      if (event.type === 'assistant') {
-        const content = (event as any).message?.content;
-        if (Array.isArray(content)) {
-          for (const block of content) {
-            if (block.type === 'text' && typeof block.text === 'string') {
-              responseText += block.text;
-            }
-          }
-        }
-      }
-      if (event.type === 'result') {
-        if (event.subtype === 'success') {
-          const resultText = (event as any).result;
-          if (typeof resultText === 'string' && resultText.trim()) {
-            responseText = resultText;
-          }
-        } else {
-          const errs = ((event as any).errors as string[] | undefined)?.join('; ') ?? '';
-          logger.warn('memory', `Extraction agent for task ${input.taskId} ended with subtype=${event.subtype}${errs ? `: ${errs}` : ''}`);
-        }
-      }
-    }
-
-    if (!responseText.trim()) {
+    if (responseText === null) {
       logger.warn('memory', `Extraction agent for task ${input.taskId} returned no text`);
       return null;
     }
