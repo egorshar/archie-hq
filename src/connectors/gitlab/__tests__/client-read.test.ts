@@ -208,3 +208,36 @@ describe('GitLabHost.getWorkflowRunById', () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 });
+
+describe('GitLabHost.listAccessibleRepos', () => {
+  it('maps projects to the canonical repo shape (github = group/project)', async () => {
+    process.env.GITLAB_BASE_URL = 'https://gl.example';
+    process.env.GITLAB_TOKEN = 't';
+    vi.stubGlobal('fetch', mockFetchOnce([
+      { path_with_namespace: 'group/backend', default_branch: 'main', description: 'svc' },
+      { path_with_namespace: 'group/mobile', default_branch: 'develop', description: null },
+    ]));
+    const host = new GitLabHost();
+    const repos = await host.listAccessibleRepos();
+    expect(repos[0]).toEqual({ github: 'group/backend', default_branch: 'main', description: 'svc' });
+    expect(repos[1].github).toBe('group/mobile');
+  });
+});
+
+describe('GitLabHost.resolveRepo', () => {
+  it('returns default_branch for a project', async () => {
+    process.env.GITLAB_BASE_URL = 'https://gl.example';
+    process.env.GITLAB_TOKEN = 't';
+    vi.stubGlobal('fetch', mockFetchOnce({ default_branch: 'main' }));
+    const host = new GitLabHost();
+    expect(await host.resolveRepo('group/backend')).toEqual({ default_branch: 'main' });
+  });
+
+  it('returns null when the project 404s', async () => {
+    process.env.GITLAB_BASE_URL = 'https://gl.example';
+    process.env.GITLAB_TOKEN = 't';
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('', { status: 404 })));
+    const host = new GitLabHost();
+    expect(await host.resolveRepo('group/missing')).toBeNull();
+  });
+});

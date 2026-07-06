@@ -14,6 +14,7 @@ import type {
 } from '../../ports/repo-host-types.js';
 import type { PrCardData } from '../../types/task.js';
 import { logger } from '../../system/logger.js';
+import { summarizeCi } from '../../system/pr-card-format.js';
 import { glRequest, glRequestAll } from './http.js';
 import { mapDetailedMergeStatus, mapMrState, mapPipelineStatusToConclusion, parseGitLabCheckRef } from './status-map.js';
 
@@ -120,7 +121,30 @@ export class GitLabHost implements RepoHost {
     };
   }
 
-  async getPRCardData(_repo: string, _prNumber: number): Promise<PrCardData> { throw NOT_IMPL('getPRCardData'); }
+  async getPRCardData(repo: string, prNumber: number): Promise<PrCardData> {
+    const id = this.projectId(repo);
+    const mr = await glRequest<{ iid: number; state: string; merged?: boolean; source_branch: string; sha: string; web_url: string }>({
+      path: `/projects/${id}/merge_requests/${prNumber}`,
+    });
+    let ci = { state: 'none' as PrCardData['ci'], passed: 0, total: 0 };
+    try {
+      const checks = await this.listPRChecks(repo, prNumber);
+      ci = summarizeCi(checks.entries);
+    } catch (error) {
+      logger.warn('gitlab', `Failed to fetch checks for MR !${prNumber} card`, error);
+    }
+    return {
+      repo,
+      prNumber,
+      url: mr.web_url,
+      headRef: mr.source_branch,
+      state: mapMrState(mr.state, mr.merged),
+      head_sha: mr.sha,
+      ci: ci.state,
+      ciPassed: ci.passed,
+      ciTotal: ci.total,
+    };
+  }
 
   async listPRs(repo: string, filters: PRListFilters = {}): Promise<PRListItem[]> {
     const id = this.projectId(repo);
@@ -265,8 +289,27 @@ export class GitLabHost implements RepoHost {
       jobs: jobEntries,
     };
   }
-  async listAccessibleRepos(): Promise<Array<{ github: string; default_branch: string; description?: string }>> { throw NOT_IMPL('listAccessibleRepos'); }
-  async resolveRepo(_repo: string): Promise<{ default_branch: string } | null> { throw NOT_IMPL('resolveRepo'); }
+  async listAccessibleRepos(): Promise<Array<{ github: string; default_branch: string; description?: string }>> {
+    const projects = await glRequestAll<{ path_with_namespace: string; default_branch: string | null; description: string | null }>({
+      path: '/projects', query: { membership: true, order_by: 'last_activity_at', sort: 'desc' },
+    });
+    return projects
+      .filter((p) => p.default_branch) // skip empty repos with no default branch
+      .map((p) => ({
+        github: p.path_with_namespace,
+        default_branch: p.default_branch as string,
+        ...(p.description ? { description: p.description } : {}),
+      }));
+  }
+  async resolveRepo(repo: string): Promise<{ default_branch: string } | null> {
+    try {
+      const project = await glRequest<{ default_branch: string | null }>({ path: `/projects/${this.projectId(repo)}` });
+      if (!project.default_branch) return null;
+      return { default_branch: project.default_branch };
+    } catch {
+      return null;
+    }
+  }
 
   // ---- write/review methods: implemented in Plan 2 (throw for now) ----
   async createPullRequest(): Promise<CreatePRResult> { throw NOT_IMPL('createPullRequest'); }
