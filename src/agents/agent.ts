@@ -10,7 +10,6 @@ import type { AgentDef, AgentHandle, McpToolMeta } from '../types/agent.js';
 import type { AgentName, AgentSessionState } from '../types/task.js';
 import type { SandboxOptions } from './sandbox.js';
 import { MessageQueue } from './message-queue.js';
-import { spawnAgent } from './spawn.js';
 import { logger } from '../system/logger.js';
 
 export class Agent {
@@ -164,7 +163,8 @@ export class Agent {
     // active mark so the agent doesn't linger "active" forever — which would wedge
     // quiescence/idle detection (the task would never park or recover).
     try {
-      await spawnAgent(this, task);
+      const { getAgentRuntime } = await import('../system/backends.js');
+      await getAgentRuntime().spawn(this, task);
     } catch (err) {
       task.updateAgentState(this.def.id, false);
       throw err;

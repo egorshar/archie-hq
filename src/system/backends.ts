@@ -6,7 +6,9 @@
  */
 
 import type { RepoHost } from '../ports/repo-host.js';
+import type { AgentRuntime } from '../ports/agent-runtime.js';
 import { getGitHubClient } from '../connectors/github/client.js';
+import { claudeSdkRuntime } from '../runtime/claude/runtime.js';
 import { logger } from './logger.js';
 
 export type RepoHostKind = 'github' | 'gitlab';
@@ -67,5 +69,22 @@ export function getRepoHost(): RepoHost | null {
       // null defensively so a mis-sequenced call can't crash.
       logger.warn('backends', `getRepoHost() called for unsupported host "${host}"`);
       return null;
+  }
+}
+
+/**
+ * The active AgentRuntime. Phase 0 supports only 'claude'; the default branch
+ * mirrors getRepoHost()'s defensive fallback (assertBackendConfig() rejects
+ * unsupported values at boot, so this only guards against a mis-sequenced call).
+ */
+export function getAgentRuntime(): AgentRuntime {
+  const runtime = resolveAgentRuntimeKind();
+  switch (runtime) {
+    case 'claude':
+      return claudeSdkRuntime;
+    default:
+      // Rejected by assertBackendConfig() at boot; default defensively.
+      logger.warn('backends', `getAgentRuntime() called for unsupported runtime "${runtime}"; defaulting to claude`);
+      return claudeSdkRuntime;
   }
 }
