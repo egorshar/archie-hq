@@ -22,11 +22,12 @@ import { appendAgentFinding } from '../../tasks/persistence.js';
 import { Task } from '../../tasks/task.js';
 import { AGENT_PROMPTS } from '../../agents/prompts.js';
 import { isAutoMergeRepo } from '../../agents/registry.js';
-import { createGitHubClient, type GitHubClient } from './client.js';
+import { getRepoHost } from '../../system/backends.js';
 import { isMergeReadyPerGithub } from './mergeability.js';
 import { logger } from '../../system/logger.js';
 import type { PRStatus } from '../../agents/tools.js';
 import type { BranchState } from '../../types/task.js';
+import type { RepoHost } from '../../ports/repo-host.js';
 
 interface LinkedPRStatus {
   github: string;
@@ -127,7 +128,7 @@ async function runMergeCheck(task: Task): Promise<MergeCheckResult> {
 
   const taskId = task.taskId;
 
-  const githubClient = createGitHubClient();
+  const githubClient = getRepoHost();
   if (!githubClient) {
     logger.warn('merge-orchestrator', 'GitHub client not configured');
     return result;
@@ -363,7 +364,7 @@ function findBranchStatesForPR(task: Task, github: string, prNumber: number): Br
  * Fetch status for all linked PRs
  */
 async function fetchAllPRStatuses(
-  githubClient: GitHubClient,
+  githubClient: RepoHost,
   linkedPRs: Array<{ github: string; prNumber: number }>
 ): Promise<LinkedPRStatus[]> {
   const results: LinkedPRStatus[] = [];
