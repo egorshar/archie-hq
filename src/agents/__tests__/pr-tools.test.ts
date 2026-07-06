@@ -605,6 +605,45 @@ describe('get_check_run', () => {
   });
 });
 
+describe('get_check_run — host-aware ref parsing', () => {
+  beforeEach(() => { vi.clearAllMocks(); });
+
+  it('routes a GitLab pipeline URL to getWorkflowRunById', async () => {
+    const host = {
+      kind: 'gitlab' as const,
+      getWorkflowRunById: vi.fn().mockResolvedValue({
+        id: 99, name: 'pipeline #99', status: 'failed', conclusion: 'failure',
+        headSha: 'abc', headBranch: 'feat/x', url: 'u', jobs: [],
+      }),
+      getCheckRunById: vi.fn(),
+    };
+    vi.mocked(getGitHubClient).mockReturnValue(host as any);
+
+    const tool = getRepoTool(makeAgent(), makeTask(), 'get_check_run');
+    const result = await tool({ ref: 'https://gl.example/org/backend/-/pipelines/99' }, {});
+
+    expect(host.getWorkflowRunById).toHaveBeenCalledWith('org/backend', 99);
+    expect(host.getCheckRunById).not.toHaveBeenCalled();
+    expect(result.content[0].text).toContain('pipeline #99');
+  });
+
+  it('routes a GitLab job id to getCheckRunById', async () => {
+    const host = {
+      kind: 'gitlab' as const,
+      getWorkflowRunById: vi.fn(),
+      getCheckRunById: vi.fn().mockResolvedValue({
+        id: 42, name: 'rspec', app: 'test', status: 'completed', conclusion: 'failure',
+        url: null, headSha: null, startedAt: null, completedAt: null,
+      }),
+    };
+    vi.mocked(getGitHubClient).mockReturnValue(host as any);
+
+    const tool = getRepoTool(makeAgent(), makeTask(), 'get_check_run');
+    await tool({ ref: '42' }, {});
+    expect(host.getCheckRunById).toHaveBeenCalledWith('org/backend', 42);
+  });
+});
+
 describe('code scanning tools — capability gating', () => {
   const makeHost = (securityAlerts: boolean) => ({
     kind: 'github' as const,
