@@ -13,7 +13,7 @@
 import { join } from 'path';
 import { mkdir, symlink, readdir, writeFile, stat } from 'fs/promises';
 import { existsSync } from 'fs';
-import { query } from '@anthropic-ai/claude-agent-sdk';
+import { query } from '../runtime/claude/sdk.js';
 import type { Agent } from './agent.js';
 import type { Task } from '../tasks/task.js';
 import { isRepoAgent, isPmAgent } from '../types/agent.js';
