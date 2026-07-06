@@ -18,6 +18,17 @@ import type {
   MergeableState,
   PRChecksReport,
   PRCheckEntry,
+  CreatePRResult,
+  PRListItem,
+  PRListFilters,
+  PRDetails,
+  CheckRunAnnotation,
+  CheckRunReport,
+  WorkflowJobEntry,
+  WorkflowRunReport,
+  CodeScanningAlertInstance,
+  CodeScanningAlert,
+  CodeScanningAlertFilters,
 } from '../../ports/repo-host-types.js';
 import type { PrCardData } from '../../types/task.js';
 import { summarizeCi } from '../../system/pr-card-format.js';
@@ -49,127 +60,26 @@ export interface GitHubClientConfig {
   installationId: number;
 }
 
-export interface CreatePRResult {
-  pr_number: number;
-  pr_url: string;
-}
-
-export interface PRListItem {
-  number: number;
-  title: string;
-  state: 'open' | 'closed';
-  head: string;
-  base: string;
-  author: string;
-  updated_at: string;
-  url: string;
-}
-
-export interface PRListFilters {
-  state?: 'open' | 'closed' | 'all';
-  base?: string;
-  sort?: 'created' | 'updated' | 'popularity' | 'long-running';
-  direction?: 'asc' | 'desc';
-  per_page?: number;
-}
-
-export interface PRDetails {
-  number: number;
-  title: string;
-  body: string;
-  state: 'open' | 'merged' | 'closed';
-  head: string;
-  base: string;
-  diff: string;
-  url: string;
-}
-
-export interface CheckRunAnnotation {
-  path: string;
-  startLine: number | null;
-  level: string;
-  message: string;
-  title?: string;
-}
-
-export interface CheckRunReport {
-  id: number;
-  name: string;
-  app: string;
-  status: string;
-  conclusion: PRCheckEntry['conclusion'];
-  url: string | null;
-  headSha: string | null;
-  startedAt: string | null;
-  completedAt: string | null;
-  output?: { title?: string; summary?: string; text?: string };
-  annotations?: CheckRunAnnotation[];
-  logTail?: string;
-}
-
-export interface WorkflowJobEntry {
-  id: number;
-  name: string;
-  status: string;
-  conclusion: PRCheckEntry['conclusion'];
-  url: string | null;
-  logTail?: string;
-}
-
-export interface WorkflowRunReport {
-  id: number;
-  name: string;
-  status: string;
-  conclusion: PRCheckEntry['conclusion'];
-  headSha: string | null;
-  headBranch: string | null;
-  url: string | null;
-  jobs: WorkflowJobEntry[];
-}
-
-export interface CodeScanningAlertInstance {
-  /** Git ref the instance was seen on, e.g. `refs/heads/main`. */
-  ref: string | null;
-  state: string | null;
-  path: string | null;
-  startLine: number | null;
-  endLine: number | null;
-  /** The alert message text for this instance. */
-  message: string | null;
-}
-
-export interface CodeScanningAlert {
-  number: number;
-  /** open / dismissed / fixed (GitHub may add others). */
-  state: string;
-  /** Analysis tool that produced the alert, e.g. `CodeQL`. */
-  tool: string;
-  ruleId: string | null;
-  ruleName: string | null;
-  ruleDescription: string | null;
-  /** Rule severity: none / note / warning / error. */
-  severity: string | null;
-  /** Security severity: low / medium / high / critical (when classified). */
-  securitySeverity: string | null;
-  url: string | null;
-  createdAt: string | null;
-  updatedAt: string | null;
-  dismissedReason: string | null;
-  dismissedComment: string | null;
-  mostRecentInstance: CodeScanningAlertInstance | null;
-}
-
-export interface CodeScanningAlertFilters {
-  /** Alert state filter. Defaults to `open` at the call site. */
-  state?: 'open' | 'dismissed' | 'fixed';
-  /** Git ref filter, e.g. `refs/heads/main` or a branch name. */
-  ref?: string;
-  /** Limit to a single tool, e.g. `CodeQL`. */
-  toolName?: string;
-  /** Severity filter (critical/high/medium/low or note/warning/error). */
-  severity?: string;
-  per_page?: number;
-}
+/*
+ * The canonical result/report shapes for the repo-host seam now live in the
+ * ports layer (src/ports/repo-host-types.ts) so the RepoHost port no longer
+ * depends on this connector, and a future GitLab host imports them from ports
+ * rather than from a sibling vendor connector. Re-exported here so this file's
+ * existing importers (`from './client.js'`) keep working unchanged.
+ */
+export type {
+  CreatePRResult,
+  PRListItem,
+  PRListFilters,
+  PRDetails,
+  CheckRunAnnotation,
+  CheckRunReport,
+  WorkflowJobEntry,
+  WorkflowRunReport,
+  CodeScanningAlertInstance,
+  CodeScanningAlert,
+  CodeScanningAlertFilters,
+};
 
 export interface ParsedCheckRef {
   /** `check_run` covers check-run permalinks and Actions job links (job id == check-run id). */

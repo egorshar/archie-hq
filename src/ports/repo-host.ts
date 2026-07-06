@@ -12,8 +12,6 @@ import type {
   ReviewThread,
   PRComment,
   PRChecksReport,
-} from './repo-host-types.js';
-import type {
   CreatePRResult,
   PRDetails,
   PRListItem,
@@ -22,7 +20,7 @@ import type {
   WorkflowRunReport,
   CodeScanningAlert,
   CodeScanningAlertFilters,
-} from '../connectors/github/client.js';
+} from './repo-host-types.js';
 import type { PrCardData } from '../types/task.js';
 
 export interface RepoHost {
