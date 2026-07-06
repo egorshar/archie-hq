@@ -1,5 +1,7 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { GitLabHost } from '../client.js';
+
+afterEach(() => vi.restoreAllMocks());
 
 describe('GitLabHost skeleton', () => {
   it('reports kind gitlab and least-capable defaults', () => {
@@ -12,5 +14,27 @@ describe('GitLabHost skeleton', () => {
     process.env.GITLAB_BASE_URL = 'https://gl.example';
     const host = new GitLabHost();
     expect(host.cloneUrl('group/proj')).toBe('https://gl.example/group/proj.git');
+  });
+});
+
+describe('GitLabHost.probeCapabilities', () => {
+  it('raises securityAlerts when /license reports Ultimate', async () => {
+    process.env.GITLAB_BASE_URL = 'https://gl.example';
+    process.env.GITLAB_TOKEN = 't';
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ plan: 'ultimate' }), { status: 200 })
+    ));
+    const host = new GitLabHost();
+    await host.probeCapabilities();
+    expect(host.capabilities().securityAlerts).toBe(true);
+  });
+
+  it('leaves securityAlerts false when /license is forbidden (Free/CE)', async () => {
+    process.env.GITLAB_BASE_URL = 'https://gl.example';
+    process.env.GITLAB_TOKEN = 't';
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('', { status: 403 })));
+    const host = new GitLabHost();
+    await host.probeCapabilities();
+    expect(host.capabilities().securityAlerts).toBe(false);
   });
 });

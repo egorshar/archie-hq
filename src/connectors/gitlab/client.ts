@@ -34,6 +34,24 @@ export class GitLabHost implements RepoHost {
     this.caps = next;
   }
 
+  /**
+   * Detect the licensed tier via GET /license and raise capabilities accordingly.
+   * Ultimate exposes the vulnerability API → securityAlerts=true. Free/CE returns
+   * 403/404 → stay least-capable. Any failure defaults to least-capable (R2).
+   */
+  async probeCapabilities(): Promise<void> {
+    try {
+      const license = await glRequest<{ plan?: string }>({ path: '/license' });
+      const plan = (license.plan ?? '').toLowerCase();
+      if (plan === 'ultimate') {
+        this.caps = { ...this.caps, securityAlerts: true };
+      }
+      logger.system(`GitLab: license plan=${plan || 'unknown'} → securityAlerts=${this.caps.securityAlerts}`);
+    } catch {
+      logger.system('GitLab: /license unavailable (Free/CE or restricted token) → capabilities stay least-capable');
+    }
+  }
+
   botIdentity(): { name: string; email: string } | null {
     const name = process.env.GITLAB_BOT_NAME;
     const email = process.env.GITLAB_BOT_EMAIL;
