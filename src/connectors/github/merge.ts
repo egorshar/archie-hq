@@ -39,23 +39,35 @@ interface LinkedPRStatus {
  *
  * Called from webhook handlers on: approval, push, CI success.
  * Notifies PM about results (conflicts, merges, failures).
+ *
+ * The Task is resolved exactly once per run and threaded through every step.
+ * For an inactive (parked) task each `Task.get` loads a fresh instance from
+ * disk, so marker writes on one instance would race the instance a PM
+ * notification activates — the marker must be set on, and flushed from, the
+ * same instance that gets activated.
  */
 export async function checkAndMergeLinkedPRs(taskId: string): Promise<void> {
-  const result = await triggerMergeCheck(taskId);
+  const task = await Task.get(taskId);
+  const result = await runMergeCheck(task);
 
   // Only notify PM if something noteworthy happened
   const newlyMerged = result.merged.filter((pr) => !pr.includes('already merged'));
 
   if (result.conflicts.length > 0) {
-    await notifyPMAboutConflicts(taskId, result.conflicts);
+    await notifyPMAboutConflicts(task, result.conflicts);
   } else if (newlyMerged.length > 0) {
-    await notifyPMAboutMerge(taskId, newlyMerged, []);
+    await notifyPMAboutMerge(task, newlyMerged, []);
   }
 
   // Held-ready PRs in non-auto repos: notify once per continuous ready period.
-  const notifiable = await markNewlyNotifiableReadyPRs(taskId, result.ready);
+  const notifiable = markNewlyNotifiableReadyPRs(task, result.ready);
   if (notifiable.length > 0) {
-    await notifyPMAboutReadyPRs(taskId, notifiable);
+    // Flush the marker synchronously before the PM reactivation. A debounced
+    // save is not enough: the activation makes this instance canonical and it
+    // saves constantly from then on, but any instance loaded elsewhere before
+    // the deferred write lands would miss the marker and re-notify.
+    await task.save(true);
+    await notifyPMAboutReadyPRs(task, notifiable);
   }
   // If only pending PRs, wait silently (retry on next webhook)
 }
@@ -66,11 +78,13 @@ export async function checkAndMergeLinkedPRs(taskId: string): Promise<void> {
  * BranchState entry as they are selected. Skips a PR whose merge-approval
  * prompt is currently pending — the user already holds an actionable prompt
  * for it, and a simultaneous "ready" nudge would be a confusing double prompt.
+ *
+ * Pure marker bookkeeping — the caller persists (synchronously, before any
+ * task activation) when the result is non-empty.
  */
-async function markNewlyNotifiableReadyPRs(taskId: string, readyPRs: string[]): Promise<string[]> {
+function markNewlyNotifiableReadyPRs(task: Task, readyPRs: string[]): string[] {
   if (readyPRs.length === 0) return [];
 
-  const task = await Task.get(taskId);
   const notifiable: string[] = [];
   for (const prRef of readyPRs) {
     // prRef is `<github>#<pr_number>` — split on the last '#' (repo names never contain one)
@@ -90,9 +104,6 @@ async function markNewlyNotifiableReadyPRs(taskId: string, readyPRs: string[]): 
     notifiable.push(prRef);
   }
 
-  if (notifiable.length > 0) {
-    task.debouncedSave();
-  }
   return notifiable;
 }
 
@@ -103,9 +114,18 @@ async function markNewlyNotifiableReadyPRs(taskId: string, readyPRs: string[]): 
  * notifying PM (since PM is calling this via a tool).
  */
 export async function triggerMergeCheck(taskId: string): Promise<MergeCheckResult> {
+  return runMergeCheck(await Task.get(taskId));
+}
+
+/**
+ * The merge-check body, operating on an already-resolved Task instance so a
+ * single run never mixes state across separately loaded instances (see
+ * checkAndMergeLinkedPRs).
+ */
+async function runMergeCheck(task: Task): Promise<MergeCheckResult> {
   const result: MergeCheckResult = { merged: [], pending: [], conflicts: [], ready: [] };
 
-  const task = await Task.get(taskId);
+  const taskId = task.taskId;
 
   const githubClient = createGitHubClient();
   if (!githubClient) {
@@ -327,7 +347,7 @@ async function fetchAllPRStatuses(
  * Logs to knowledge.log and sends message to PM
  */
 async function notifyPMAboutConflicts(
-  taskId: string,
+  task: Task,
   conflictedPRs: string[]
 ): Promise<void> {
   const prList = conflictedPRs.map((pr) => `- ${pr}`).join('\n');
@@ -336,11 +356,10 @@ async function notifyPMAboutConflicts(
     `The following PRs have merge conflicts that need resolution:\n${prList}\n\n` +
     `Please instruct the team to merge from the base branch and resolve conflicts.`;
 
-  logger.system(`Task ${taskId}: Notifying PM about conflicts`);
+  logger.system(`Task ${task.taskId}: Notifying PM about conflicts`);
 
-  await appendAgentFinding(taskId, 'system', message, 'blocker');
+  await appendAgentFinding(task.taskId, 'system', message, 'blocker');
 
-  const task = await Task.get(taskId);
   await task.sendMessage(AGENT_PROMPTS.existingTask, 'pm-agent');
 }
 
@@ -349,7 +368,7 @@ async function notifyPMAboutConflicts(
  * Logs to knowledge.log and sends message to PM
  */
 async function notifyPMAboutReadyPRs(
-  taskId: string,
+  task: Task,
   readyPRs: string[]
 ): Promise<void> {
   const prList = readyPRs.map((pr) => `- ${pr}`).join('\n');
@@ -358,11 +377,10 @@ async function notifyPMAboutReadyPRs(
     `The following PRs are approved and green, but their repos do not auto-merge:\n${prList}\n\n` +
     `Tell the user in the thread that the PR is ready and will be merged on their request.`;
 
-  logger.system(`Task ${taskId}: Notifying PM about ready PRs`);
+  logger.system(`Task ${task.taskId}: Notifying PM about ready PRs`);
 
-  await appendAgentFinding(taskId, 'system', message, 'decision');
+  await appendAgentFinding(task.taskId, 'system', message, 'decision');
 
-  const task = await Task.get(taskId);
   await task.sendMessage(AGENT_PROMPTS.existingTask, 'pm-agent');
 }
 
@@ -371,7 +389,7 @@ async function notifyPMAboutReadyPRs(
  * Logs to knowledge.log and sends message to PM
  */
 async function notifyPMAboutMerge(
-  taskId: string,
+  task: Task,
   mergedPRs: string[],
   failedPRs: string[]
 ): Promise<void> {
@@ -390,11 +408,10 @@ async function notifyPMAboutMerge(
     return;
   }
 
-  logger.system(`Task ${taskId}: Notifying PM about merge results`);
+  logger.system(`Task ${task.taskId}: Notifying PM about merge results`);
 
   const findingType = failedPRs.length > 0 ? 'blocker' : 'completion';
-  await appendAgentFinding(taskId, 'system', message, findingType);
+  await appendAgentFinding(task.taskId, 'system', message, findingType);
 
-  const task = await Task.get(taskId);
   await task.sendMessage(AGENT_PROMPTS.existingTask, 'pm-agent');
 }

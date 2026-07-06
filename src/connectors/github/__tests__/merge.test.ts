@@ -3,10 +3,11 @@
  *
  * Drives checkAndMergeLinkedPRs against a minimal fake task (no LLM, mocked
  * GitHubClient + registry) to prove: non-auto ready PRs are held and notified
- * exactly once per continuous ready period (AC1), auto repos merge as today
- * (AC2), mixed-policy tasks are evaluated per PR, the marker clears on
- * un-ready and survives reload, and a pending merge approval suppresses the
- * ready nudge.
+ * exactly once per continuous ready period (AC1) — including when every
+ * Task.get loads a fresh instance from persisted metadata, the parked-task
+ * production reality — auto repos merge as today (AC2), mixed-policy tasks
+ * are evaluated per PR, the marker clears on un-ready and survives reload,
+ * and a pending merge approval suppresses the ready nudge.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -53,6 +54,7 @@ type FakeTask = {
   taskId: string;
   metadata: Pick<TaskMetadata, 'repositories' | 'pending_merge_approval'>;
   debouncedSave: ReturnType<typeof vi.fn>;
+  save: ReturnType<typeof vi.fn>;
   sendMessage: ReturnType<typeof vi.fn>;
 };
 
@@ -64,8 +66,41 @@ function makeTask(
     taskId: 'task-123',
     metadata: { repositories, pending_merge_approval: pendingMergeApproval },
     debouncedSave: vi.fn(),
+    save: vi.fn().mockResolvedValue(undefined),
     sendMessage: vi.fn().mockResolvedValue(undefined),
   };
+}
+
+/**
+ * Multi-instance persistence harness, modeling the production reality for an
+ * inactive (parked) task: every `Task.get` call loads a *fresh* instance from
+ * the persisted metadata JSON — instances share nothing in memory. Only
+ * `save(true)` persists; `debouncedSave` is modeled as a lost write (in
+ * production it fires 500ms later, after any concurrently loaded instance has
+ * already read stale metadata, and the activated instance's own saves then
+ * clobber it). A shared single-instance `Task.get` mock hides exactly this
+ * class of bug — a marker set on one instance silently reaching another.
+ */
+function mockPersistedTask(repositories: TaskMetadata['repositories']): {
+  instances: FakeTask[];
+  persisted: () => Pick<TaskMetadata, 'repositories' | 'pending_merge_approval'>;
+} {
+  let persisted = JSON.stringify({ repositories });
+  const instances: FakeTask[] = [];
+  vi.mocked(Task.get).mockImplementation(async () => {
+    const task: FakeTask = {
+      taskId: 'task-123',
+      metadata: JSON.parse(persisted) as FakeTask['metadata'],
+      debouncedSave: vi.fn(),
+      save: vi.fn(async () => {
+        persisted = JSON.stringify(task.metadata);
+      }),
+      sendMessage: vi.fn().mockResolvedValue(undefined),
+    };
+    instances.push(task);
+    return task as unknown as Task;
+  });
+  return { instances, persisted: () => JSON.parse(persisted) as FakeTask['metadata'] };
 }
 
 function singlePRRepositories(github: string, prNumber: number): TaskMetadata['repositories'] {
@@ -94,9 +129,11 @@ beforeEach(() => {
 });
 
 describe('checkAndMergeLinkedPRs — non-auto policy (AC1)', () => {
-  it('holds a ready non-auto PR and notifies exactly once across a webhook burst', async () => {
-    const task = makeTask(singlePRRepositories('org/backend', 42));
-    vi.mocked(Task.get).mockResolvedValue(task as unknown as Task);
+  it('holds a ready non-auto PR and notifies exactly once across a webhook burst, with each Task.get loading a fresh instance', async () => {
+    // Regression for the parked-task marker race: with per-call fresh
+    // instances, a marker set on one instance is lost unless the run threads a
+    // single instance through and flushes it before the PM reactivation.
+    const world = mockPersistedTask(singlePRRepositories('org/backend', 42));
     mockGitHubClient.getPRStatus.mockResolvedValue(READY);
 
     await checkAndMergeLinkedPRs('task-123');
@@ -106,9 +143,20 @@ describe('checkAndMergeLinkedPRs — non-auto policy (AC1)', () => {
     const notifications = readyNotifications();
     expect(notifications).toHaveLength(1);
     expect(String(notifications[0]![2])).toContain('org/backend#42');
-    expect(task.sendMessage).toHaveBeenCalledTimes(1);
-    expect(task.sendMessage).toHaveBeenCalledWith(AGENT_PROMPTS.existingTask, 'pm-agent');
-    expect(branchState(task, 'backend-agent', 'feat/x').merge_ready_notified).toBe(true);
+
+    const notifiers = world.instances.filter((i) => i.sendMessage.mock.calls.length > 0);
+    expect(notifiers).toHaveLength(1);
+    const notifier = notifiers[0]!;
+    expect(notifier.sendMessage).toHaveBeenCalledTimes(1);
+    expect(notifier.sendMessage).toHaveBeenCalledWith(AGENT_PROMPTS.existingTask, 'pm-agent');
+
+    // The marker was set on the same instance that activated, and flushed
+    // synchronously (save(true)) before the activating sendMessage — a
+    // debounced write would be invisible to any instance loaded meanwhile.
+    expect(branchState(notifier, 'backend-agent', 'feat/x').merge_ready_notified).toBe(true);
+    expect(notifier.save).toHaveBeenCalledWith(true);
+    expect(notifier.save.mock.invocationCallOrder[0]!)
+      .toBeLessThan(notifier.sendMessage.mock.invocationCallOrder[0]!);
   });
 
   it('suppresses the ready nudge for a PR whose merge approval is pending', async () => {
@@ -145,25 +193,26 @@ describe('checkAndMergeLinkedPRs — non-auto policy (AC1)', () => {
     expect(readyNotifications()).toHaveLength(2);
   });
 
-  it('does not re-notify after a task reload — the marker is persisted metadata', async () => {
-    const task = makeTask(singlePRRepositories('org/backend', 42));
-    vi.mocked(Task.get).mockResolvedValue(task as unknown as Task);
+
+  it('does not re-notify after a task reload — the marker reaches the persisted metadata', async () => {
+    const world = mockPersistedTask(singlePRRepositories('org/backend', 42));
     mockGitHubClient.getPRStatus.mockResolvedValue(READY);
 
     await checkAndMergeLinkedPRs('task-123');
     expect(readyNotifications()).toHaveLength(1);
-    expect(task.debouncedSave).toHaveBeenCalled();
 
-    // Simulate restart: a fresh Task instance built from the persisted metadata JSON.
-    const reloaded = makeTask(
-      JSON.parse(JSON.stringify(task.metadata.repositories)) as TaskMetadata['repositories'],
-    );
-    vi.mocked(Task.get).mockResolvedValue(reloaded as unknown as Task);
+    // The marker must be in the persisted JSON — that is what any instance
+    // loaded after a restart (or any later webhook) is built from.
+    const persistedState =
+      world.persisted().repositories['backend-agent']![0]!.branch_states!['feat/x']!;
+    expect(persistedState.merge_ready_notified).toBe(true);
 
+    // Restart: the harness already builds every instance from the persisted
+    // JSON, so the next run is exactly a post-reload check.
     await checkAndMergeLinkedPRs('task-123');
 
     expect(readyNotifications()).toHaveLength(1);
-    expect(reloaded.sendMessage).not.toHaveBeenCalled();
+    expect(world.instances.at(-1)!.sendMessage).not.toHaveBeenCalled();
   });
 });
 
