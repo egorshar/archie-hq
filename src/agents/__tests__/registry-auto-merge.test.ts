@@ -6,7 +6,7 @@
  * PM-spawned dynamic agents are always false regardless of spec.
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { LoadedPlugin } from '../../system/plugin-loader.js';
 
 vi.mock('../../system/plugin-loader.js', () => ({
@@ -20,8 +20,9 @@ vi.mock('../../system/logger.js', () => ({
 }));
 
 import { getPlugins } from '../../system/plugin-loader.js';
-import { scanAgentDefs, synthesizeDynamicAgentDef } from '../registry.js';
-import { isRepoAgent } from '../../types/agent.js';
+import { logger } from '../../system/logger.js';
+import { scanAgentDefs, synthesizeDynamicAgentDef, isAutoMergeRepo, __setRegistryForTesting } from '../registry.js';
+import { isRepoAgent, type AgentDef, type RepoEntry } from '../../types/agent.js';
 
 function makePlugin(repos: Array<{ github: string; baseBranch?: string; autoMerge?: boolean }>): LoadedPlugin {
   return {
@@ -59,6 +60,73 @@ describe('scanAgentDefs — RepoEntry.autoMerge resolution', () => {
     const defs = scanAgentDefs();
     const backend = defs.find((d) => d.id === 'backend-agent')!;
     expect(backend.repo!.repos[0].autoMerge).toBe(true);
+  });
+});
+
+function repoAgentDef(key: string, repos: RepoEntry[]): AgentDef {
+  return {
+    id: `${key}-agent`,
+    key,
+    role: `${key} role`,
+    expertise: 'e',
+    pluginName: 'engineering',
+    visibility: 'global',
+    repo: { repos, primary: repos[0].github },
+  } as AgentDef;
+}
+
+describe('isAutoMergeRepo', () => {
+  beforeEach(() => {
+    vi.mocked(logger.warn).mockClear();
+  });
+
+  it('is false for a repo no registered agent declares', () => {
+    __setRegistryForTesting([
+      repoAgentDef('backend', [{ github: 'org/backend', baseBranch: 'main', autoMerge: true }]),
+    ]);
+    expect(isAutoMergeRepo('org/unknown')).toBe(false);
+  });
+
+  it('is true when the single declaring agent sets autoMerge: true', () => {
+    __setRegistryForTesting([
+      repoAgentDef('backend', [{ github: 'org/backend', baseBranch: 'main', autoMerge: true }]),
+    ]);
+    expect(isAutoMergeRepo('org/backend')).toBe(true);
+  });
+
+  it('is false when the single declaring agent leaves autoMerge off', () => {
+    __setRegistryForTesting([
+      repoAgentDef('backend', [{ github: 'org/backend', baseBranch: 'main', autoMerge: false }]),
+    ]);
+    expect(isAutoMergeRepo('org/backend')).toBe(false);
+  });
+
+  it('is true when two declaring agents both set true', () => {
+    __setRegistryForTesting([
+      repoAgentDef('backend', [{ github: 'org/shared', baseBranch: 'main', autoMerge: true }]),
+      repoAgentDef('mobile', [{ github: 'org/shared', baseBranch: 'main', autoMerge: true }]),
+    ]);
+    expect(isAutoMergeRepo('org/shared')).toBe(true);
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it('is false with a warn when two declaring agents disagree', () => {
+    __setRegistryForTesting([
+      repoAgentDef('backend', [{ github: 'org/shared', baseBranch: 'main', autoMerge: true }]),
+      repoAgentDef('mobile', [{ github: 'org/shared', baseBranch: 'main', autoMerge: false }]),
+    ]);
+    expect(isAutoMergeRepo('org/shared')).toBe(false);
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('is false when one agent declares the repo twice with mixed entries', () => {
+    __setRegistryForTesting([
+      repoAgentDef('backend', [
+        { github: 'org/backend', baseBranch: 'main', autoMerge: true },
+        { github: 'org/backend', baseBranch: 'develop', autoMerge: false },
+      ]),
+    ]);
+    expect(isAutoMergeRepo('org/backend')).toBe(false);
   });
 });
 
