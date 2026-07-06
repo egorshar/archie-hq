@@ -111,8 +111,6 @@ Respond with JSON only.`;
       return null;
     }
     result = parsed.data;
-
-    if (!result) return null;
     return cleanTitle(result.title);
   } catch (err) {
     logger.warn('title-generator', `unexpected failure: ${err}`);

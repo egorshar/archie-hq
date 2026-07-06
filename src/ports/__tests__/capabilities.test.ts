@@ -9,9 +9,11 @@ describe('capability descriptors', () => {
     expect(GITHUB_CAPABILITIES.nativeAutoMerge).toBe(false);
   });
 
-  it('claude runtime advertises OS sandbox, skills, 1M context', () => {
+  it('claude runtime advertises all five capabilities', () => {
     expect(CLAUDE_RUNTIME_CAPABILITIES.osSandbox).toBe(true);
     expect(CLAUDE_RUNTIME_CAPABILITIES.skills).toBe(true);
     expect(CLAUDE_RUNTIME_CAPABILITIES.oneMillionContext).toBe(true);
+    expect(CLAUDE_RUNTIME_CAPABILITIES.effort).toBe(true);
+    expect(CLAUDE_RUNTIME_CAPABILITIES.backgroundTasks).toBe(true);
   });
 });

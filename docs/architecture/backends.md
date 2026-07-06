@@ -28,7 +28,7 @@ Callers never import `GitHubClient` or the Claude SDK directly to reach these ca
 
 All four interfaces (plus the shared domain types) live under `src/ports/` and are re-exported from `src/ports/index.ts`.
 
-- `repo-host-types.ts` -- host-neutral domain types shared by `RepoHost` methods: `PRStatus`, `PRReview`, `ReviewThread`, `ReviewThreadComment`, `PRComment`, `PRChecksReport`, `PRCheckEntry`, `MergeableState`, `CheckConclusion`. Extracted verbatim from `src/agents/tools.ts`, which still re-exports them so existing importers are unaffected.
+- `repo-host-types.ts` -- host-neutral domain types shared by `RepoHost` methods: `PRStatus`, `PRReview`, `ReviewThread`, `ReviewThreadComment`, `PRComment`, `PRChecksReport`, `PRCheckEntry`, `MergeableState`, `CheckConclusion` (extracted from `src/agents/tools.ts`), plus the canonical result/report shapes `CreatePRResult`, `PRListItem`, `PRListFilters`, `PRDetails`, `CheckRunAnnotation`, `CheckRunReport`, `WorkflowJobEntry`, `WorkflowRunReport`, `CodeScanningAlertInstance`, `CodeScanningAlert`, `CodeScanningAlertFilters` (relocated out of `connectors/github/client.ts`). Both `tools.ts` and `client.ts` re-export their respective sets so existing importers are unaffected. These are plain data shapes with no vendor types embedded: GitHub produces them directly, and a future GitLab host maps its API responses into the same canonical shapes rather than importing from a sibling connector.
 - `capabilities.ts` -- `RepoHostCapabilities` and `RuntimeCapabilities` descriptors, plus the concrete `GITHUB_CAPABILITIES` and `CLAUDE_RUNTIME_CAPABILITIES` constants (see "Capability descriptors" below).
 - `repo-host.ts` -- the `RepoHost` interface: PR/MR lifecycle, reviews, CI checks, repo listing, and code-scanning alerts, keyed by `repo` as `"owner/name"`. Method names stay PR-oriented (`getPRStatus`, `createPullRequest`, ...) in Phase 0 -- neutral CR-renaming is a Phase 4 concern.
 - `repo-host-events.ts` -- `RepoHostEventSource` (signature verification, payload parsing, self-event detection) plus the host-neutral `NormalizedEventContext`, `InternalRouteAction`, and `RouteResult` types consumed by the shared router.
@@ -74,7 +74,7 @@ Two concrete implementations sit behind the SDK barrel:
 
 `RuntimeCapabilities` describes: `osSandbox` (built-in OS-level sandboxing), `skills` (native Skills support), `oneMillionContext` (1M-context model availability), `effort` (per-turn reasoning-effort control), and `backgroundTasks` (background/subagent tasks surfaced as events). `CLAUDE_RUNTIME_CAPABILITIES` sets all five to `true`.
 
-`RepoHost.capabilities()` and `AgentRuntime.capabilities()` return these descriptors on the active backend instance, so callers can branch on capability rather than on backend kind.
+`RepoHost.capabilities()` and `AgentRuntime.capabilities()` return these descriptors on the active backend instance, so callers can branch on capability rather than on backend kind. The `list_code_scanning_alerts` / `get_code_scanning_alert` tool handlers already do this: they short-circuit with a clear "not available on this repo host" message when `capabilities().securityAlerts` is `false`, so a less-capable host (e.g. GitLab CE) degrades gracefully instead of stubbing the methods (spec P3).
 
 ## Phase-0 scope: GitHub and Claude only
 
@@ -85,3 +85,11 @@ Phase 0 wires exactly one repo host (`github`) and one agent runtime (`claude`).
 - Any other value for either variable is rejected as invalid.
 
 The port interfaces (`RepoHost`, `RepoHostEventSource`, `AgentRuntime`, `LlmOneShot`) are already shaped to accommodate those future backends -- e.g. `kind: 'github' | 'gitlab'` and `kind: 'claude' | 'opencode'` -- but the resolver's supported-values lists are the actual gate. Widening `SUPPORTED_REPO_HOSTS` / `SUPPORTED_RUNTIMES` in `src/system/backends.ts` (plus adding the concrete implementation) is what turns on a new backend; the interfaces themselves do not need to change.
+
+## Intentionally deferred to the phase that first needs them
+
+A few seam details are deliberately left thin until the second implementation forces the decision, to avoid speculative abstraction:
+
+- **`cr-router` → `merge.ts` dependency (Phase 1).** `src/connectors/shared/cr-router.ts` imports `checkAndMergeLinkedPRs` from `connectors/github/merge.ts` -- a host-agnostic module depending on a specific connector. It works today because GitHub is the only host; Phase 1 inverts it (inject the merge orchestrator) when a second host's merge path exists.
+- **`askpassToken()` wiring (Phase 1).** The method is declared optional on `RepoHost` but is not yet wired into the `GIT_ASKPASS` clone flow, which stays script-driven until GitLab's token provider needs it.
+- **`getLlmOneShot()` runtime switch (Phase 2).** It always returns the Claude implementation today; it will branch on `AGENT_RUNTIME` once the opencode one-shot provider exists.
