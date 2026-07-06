@@ -76,11 +76,98 @@ export class GitLabHost implements RepoHost {
   }
 
   // ---- read methods: implemented in Tasks 4–6 (throw until then) ----
-  async getPRStatus(_repo: string, _prNumber: number): Promise<PRStatus> { throw NOT_IMPL('getPRStatus'); }
-  async getPRDetails(_repo: string, _prNumber: number): Promise<PRDetails> { throw NOT_IMPL('getPRDetails'); }
+  async getPRStatus(repo: string, prNumber: number): Promise<PRStatus> {
+    const id = this.projectId(repo);
+    const mr = await glRequest<{ state: string; merged?: boolean; detailed_merge_status?: string }>({
+      path: `/projects/${id}/merge_requests/${prNumber}`,
+    });
+    const approvals = await glRequest<{ approved?: boolean }>({
+      path: `/projects/${id}/merge_requests/${prNumber}/approvals`,
+    }).catch(() => ({ approved: false }));
+
+    const mergeableState = mapDetailedMergeStatus(mr.detailed_merge_status ?? '');
+    const status: PRStatus = {
+      state: mapMrState(mr.state, mr.merged),
+      mergeable: mergeableState === 'clean',
+      mergeableState,
+      approved: approvals.approved === true,
+    };
+    logger.system(`GitLab: MR !${prNumber} status: state=${status.state} mergeableState=${status.mergeableState} approved=${status.approved} (raw detailed_merge_status=${mr.detailed_merge_status})`);
+    return status;
+  }
+
+  async getPRDetails(repo: string, prNumber: number): Promise<PRDetails> {
+    const id = this.projectId(repo);
+    const mr = await glRequest<{
+      iid: number; title: string; description: string | null; state: string; merged?: boolean;
+      source_branch: string; target_branch: string; web_url: string;
+    }>({ path: `/projects/${id}/merge_requests/${prNumber}` });
+    const changes = await glRequest<{ changes?: Array<{ diff?: string; old_path?: string; new_path?: string }> }>({
+      path: `/projects/${id}/merge_requests/${prNumber}/changes`,
+    }).catch(() => ({ changes: [] }));
+    const diff = (changes.changes ?? [])
+      .map((c) => `--- ${c.old_path ?? ''}\n+++ ${c.new_path ?? ''}\n${c.diff ?? ''}`)
+      .join('\n');
+    return {
+      number: prNumber,
+      title: mr.title,
+      body: mr.description ?? '',
+      state: mapMrState(mr.state, mr.merged),
+      head: mr.source_branch,
+      base: mr.target_branch,
+      diff,
+      url: mr.web_url,
+    };
+  }
+
   async getPRCardData(_repo: string, _prNumber: number): Promise<PrCardData> { throw NOT_IMPL('getPRCardData'); }
-  async listPRs(_repo: string, _filters?: PRListFilters): Promise<PRListItem[]> { throw NOT_IMPL('listPRs'); }
-  async getPRComments(_repo: string, _prNumber: number): Promise<PRComment[]> { throw NOT_IMPL('getPRComments'); }
+
+  async listPRs(repo: string, filters: PRListFilters = {}): Promise<PRListItem[]> {
+    const id = this.projectId(repo);
+    // Canonical filters.state is open|closed|all; GitLab uses opened|closed|merged|all.
+    const stateMap: Record<string, string> = { open: 'opened', closed: 'closed', all: 'all' };
+    const items = await glRequestAll<{
+      iid: number; title: string; state: string; merged?: boolean;
+      source_branch: string; target_branch: string; author?: { username?: string };
+      updated_at: string; web_url: string;
+    }>({
+      path: `/projects/${id}/merge_requests`,
+      query: {
+        state: stateMap[filters.state ?? 'open'] ?? 'opened',
+        target_branch: filters.base,
+        order_by: 'updated_at',
+        sort: filters.direction ?? 'desc',
+      },
+    }, 1);
+    const limit = filters.per_page ?? 10;
+    return items.slice(0, limit).map((mr) => ({
+      number: mr.iid,
+      title: mr.title,
+      state: mr.state === 'opened' ? 'open' : 'closed',
+      head: mr.source_branch,
+      base: mr.target_branch,
+      author: mr.author?.username ?? 'unknown',
+      updated_at: mr.updated_at,
+      url: mr.web_url,
+    }));
+  }
+
+  async getPRComments(repo: string, prNumber: number): Promise<PRComment[]> {
+    const id = this.projectId(repo);
+    const notes = await glRequestAll<{
+      id: number; author?: { username?: string }; body: string; created_at: string;
+      system?: boolean; noteable_type?: string;
+    }>({ path: `/projects/${id}/merge_requests/${prNumber}/notes`, query: { sort: 'asc', order_by: 'created_at' } });
+    return notes
+      .filter((n) => !n.system)
+      .map((n) => ({
+        id: n.id,
+        author: n.author?.username ?? 'unknown',
+        body: n.body,
+        createdAt: n.created_at,
+        url: `${this.cloneUrl(repo).replace(/\.git$/, '')}/-/merge_requests/${prNumber}#note_${n.id}`,
+      }));
+  }
   async listPRChecks(_repo: string, _prNumber: number): Promise<PRChecksReport> { throw NOT_IMPL('listPRChecks'); }
   async getCheckRunById(_repo: string, _checkRunId: number): Promise<CheckRunReport> { throw NOT_IMPL('getCheckRunById'); }
   async getWorkflowRunById(_repo: string, _runId: number): Promise<WorkflowRunReport> { throw NOT_IMPL('getWorkflowRunById'); }
