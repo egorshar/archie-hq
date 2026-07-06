@@ -8,8 +8,7 @@
 
 import type { NormalizedEventContext, InternalRouteAction } from '../../ports/repo-host-events.js';
 import { logger } from '../../system/logger.js';
-// Phase 0: merge orchestrator still lives under github/; injected in Phase 1.
-import { checkAndMergeLinkedPRs } from '../github/merge.js';
+import { checkAndMergeLinkedPRs } from './merge.js';
 import { appendGitHubEvent } from '../../tasks/persistence.js';
 import { Task } from '../../tasks/task.js';
 import { AGENT_PROMPTS } from '../../agents/prompts.js';
