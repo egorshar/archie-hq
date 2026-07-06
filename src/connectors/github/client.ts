@@ -22,6 +22,10 @@ import type {
 import type { PrCardData } from '../../types/task.js';
 import { summarizeCi } from '../../system/pr-card-format.js';
 import { logger } from '../../system/logger.js';
+import type { RepoHost } from '../../ports/repo-host.js';
+import type { RepoHostCapabilities } from '../../ports/capabilities.js';
+import { GITHUB_CAPABILITIES } from '../../ports/capabilities.js';
+import { githubRepoToUrl } from './repo-clone.js';
 
 const execAsync = promisify(exec);
 
@@ -243,10 +247,12 @@ function extractFailureTail(text: string, maxChars = 15000): string {
     : '…(truncated)\n' + slice.slice(slice.length - maxChars);
 }
 
-export class GitHubClient {
+export class GitHubClient implements RepoHost {
   private app: App;
   private installationId: number;
   private octokit: Octokit | null = null;
+
+  readonly kind = 'github' as const;
 
   constructor(config: GitHubClientConfig) {
     this.app = new App({
@@ -254,6 +260,18 @@ export class GitHubClient {
       privateKey: config.privateKey,
     });
     this.installationId = config.installationId;
+  }
+
+  capabilities(): RepoHostCapabilities {
+    return GITHUB_CAPABILITIES;
+  }
+
+  botIdentity(): { name: string; email: string } | null {
+    return getGitHubAppIdentity();
+  }
+
+  cloneUrl(repo: string): string {
+    return githubRepoToUrl(repo);
   }
 
   /**
