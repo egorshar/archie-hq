@@ -28,7 +28,13 @@ export interface RepoHost {
   capabilities(): RepoHostCapabilities;
   botIdentity(): { name: string; email: string } | null;
   cloneUrl(repo: string): string;
-  /** Optional in Phase 0 — not yet wired into the GIT_ASKPASS flow (Phase 1). */
+  /**
+   * Typed accessor for a host's git auth token. `GitLabHost` implements it;
+   * `GitHubClient` does not. Not currently on the hot path: the GIT_ASKPASS
+   * flow (`scripts/git-askpass.sh`) is host-aware and reads credentials from
+   * the environment directly (`REPO_HOST` selects `$GITLAB_TOKEN` vs. a
+   * generated GitHub App token), so this method is never invoked.
+   */
   askpassToken?(): Promise<string>;
 
   // change requests (PR / MR)

@@ -789,7 +789,7 @@ function createPushBranchTool(agent: Agent, task: Task) {
         task.debouncedSave();
 
         const message = `${force ? 'Force-pushed' : 'Pushed'} ${branch} to origin (${resolved.github})`;
-        logger.system(`GitHub: ${message}`);
+        logger.system(`Repo: ${message}`);
         return ok(`Successfully pushed: ${message}`);
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Unknown error';
