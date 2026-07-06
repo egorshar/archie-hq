@@ -101,7 +101,10 @@ Respond with JSON only.`;
       maxTurns: 2,
       jsonSchema: titleJsonSchema,
     });
-    if (!raw) return null;
+    if (!raw) {
+      logger.warn('title-generator', 'haiku call failed');
+      return null;
+    }
     const parsed = TitleSchema.safeParse(raw);
     if (!parsed.success) {
       logger.warn('title-generator', `schema validation failed: ${parsed.error.message}`);
