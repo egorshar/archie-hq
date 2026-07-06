@@ -18,7 +18,7 @@ import type {
   MergeableState,
   PRChecksReport,
   PRCheckEntry,
-} from '../../agents/tools.js';
+} from '../../ports/repo-host-types.js';
 import type { PrCardData } from '../../types/task.js';
 import { summarizeCi } from '../../system/pr-card-format.js';
 import { logger } from '../../system/logger.js';
