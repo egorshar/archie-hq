@@ -211,8 +211,8 @@ export function parseExtractionResponse(
 
 /**
  * Run the memory extraction side-agent.
- * Builds prompt, calls Claude Agent SDK query() with sonnet + maxTurns 1,
- * collects text output, parses result.
+ * Builds prompt, runs a one-shot sonnet completion via getLlmOneShot().text()
+ * with maxTurns 1, collects text output, parses result.
  * Returns null on any error.
  *
  * @param input  - extraction context (memory + transcript + metadata)
