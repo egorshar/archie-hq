@@ -23,10 +23,11 @@
  * collapses every non-success SDK result subtype into a plain `null` return
  * (see runtime/claude/llm-one-shot.ts's json()) without surfacing *why* it
  * failed, so title-generator can no longer log a distinct "haiku call
- * failed: <subtype>" warning for that path — it only logs on schema
- * validation failure or on a thrown exception. The two tests below that used
- * to cover "call failed" subtypes are kept (title is still asserted null)
- * but no longer assert a warning was logged for that specific path.
+ * failed: <subtype>" warning for that path — it now logs a generic
+ * "haiku call failed" warning instead, restoring observability without the
+ * subtype detail. The two tests below that used to cover "call failed"
+ * subtypes are kept (title is still asserted null) and assert the generic
+ * warning was logged.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -138,10 +139,12 @@ describe('generateTaskTitle', () => {
   it('returns null when the one-shot call fails (error_during_execution)', async () => {
     // LlmOneShot.json() returns null for any non-success SDK result subtype
     // (see runtime/claude/llm-one-shot.ts); it no longer surfaces which
-    // subtype failed, so title-generator has nothing to warn about here.
+    // subtype failed, but title-generator still logs a generic warn on that
+    // path.
     state.jsonMock.mockResolvedValue(null);
     const title = await generateTaskTitle(makeThread());
     expect(title).toBeNull();
+    expect(warnSpy).toHaveBeenCalled();
   });
 
   it('returns null on error_max_structured_output_retries', async () => {
