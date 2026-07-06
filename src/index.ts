@@ -42,7 +42,7 @@ import { recoverActiveTasks } from './tasks/recovery.js';
 import { initEventPersistence } from './tasks/persistence.js';
 import { initReminderScheduler } from './system/reminder-scheduler.js';
 import { initMemory } from './memory/index.js';
-import { assertBackendConfig, getBackendMatrix } from './system/backends.js';
+import { assertBackendConfig, getBackendMatrix, resolveRepoHostKind, getGitLabHost } from './system/backends.js';
 
 /**
  * Application configuration
@@ -96,6 +96,10 @@ async function main(): Promise<void> {
     assertBackendConfig();
     const matrix = getBackendMatrix();
     logger.system(`Backends: repoHost=${matrix.repoHost} runtime=${matrix.runtime}`);
+
+    if (resolveRepoHostKind() === 'gitlab') {
+      await getGitLabHost().probeCapabilities();
+    }
 
     // Bootstrap: create workdir structure, clone/pull plugins
     await bootstrapWorkdir();
