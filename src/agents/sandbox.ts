@@ -10,7 +10,7 @@
  */
 
 import { resolve, normalize } from 'path';
-import type { HookCallbackMatcher, HookJSONOutput } from '@anthropic-ai/claude-agent-sdk';
+import type { HookCallbackMatcher, HookJSONOutput } from '../runtime/claude/sdk.js';
 
 // ---- Types ----
 

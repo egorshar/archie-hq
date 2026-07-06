@@ -14,8 +14,8 @@
 import crypto from 'node:crypto';
 import { mkdir, writeFile } from 'fs/promises';
 import { join } from 'path';
-import { query, tool, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
-import type { HookCallbackMatcher, HookJSONOutput } from '@anthropic-ai/claude-agent-sdk';
+import { query, tool, createSdkMcpServer } from '../runtime/claude/sdk.js';
+import type { HookCallbackMatcher, HookJSONOutput } from '../runtime/claude/sdk.js';
 import { z, toJSONSchema } from 'zod';
 import { logger } from '../system/logger.js';
 import { appendAgentFinding } from '../tasks/persistence.js';
