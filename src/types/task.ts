@@ -164,6 +164,12 @@ export interface BranchState {
   last_processed_comment_id?: number;  // triage tracking for this branch's PR
   stash_name?: string;                 // set if dirty work was auto-stashed when leaving
   pr_card?: PrCardState;               // PR-card message ref + change-detection fingerprint
+  /**
+   * Set when the "PR ready — merges on request" notification fired for this
+   * branch's PR (non-auto repos only), cleared when a merge check observes the
+   * PR no longer ready — so each continuous ready period notifies exactly once.
+   */
+  merge_ready_notified?: boolean;
 }
 
 /**
