@@ -34,6 +34,20 @@ export const GITHUB_CAPABILITIES: RepoHostCapabilities = {
   reReviewRequest: true,
 };
 
+/**
+ * GitLab defaults — least-capable baseline. reviewStates is false (GitLab has
+ * approvals + notes, not distinct approved/changes_requested states — synthesized
+ * in Plan 2). securityAlerts starts false and is raised only when the boot-time
+ * /license probe reports an Ultimate tier (spec R2). nativeAutoMerge exists
+ * ("merge when pipeline succeeds") but Archie keeps orchestrating by default.
+ */
+export const GITLAB_CAPABILITIES_DEFAULT: RepoHostCapabilities = {
+  reviewStates: false,
+  securityAlerts: false,
+  nativeAutoMerge: true,
+  reReviewRequest: false,
+};
+
 export const CLAUDE_RUNTIME_CAPABILITIES: RuntimeCapabilities = {
   osSandbox: true,
   skills: true,
