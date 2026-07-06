@@ -1,7 +1,13 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { GitLabHost } from '../client.js';
 
-afterEach(() => vi.restoreAllMocks());
+const ENV_SNAPSHOT = { ...process.env };
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+  process.env = { ...ENV_SNAPSHOT };
+});
 
 describe('GitLabHost skeleton', () => {
   it('reports kind gitlab and least-capable defaults', () => {
