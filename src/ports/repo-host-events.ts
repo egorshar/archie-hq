@@ -6,7 +6,9 @@
 
 /** Host-neutral normalized event, produced by each host's payload parser. */
 export interface NormalizedEventContext {
-  /** host-native event type string, e.g. 'pull_request', 'Merge Request Hook'. */
+  /** canonical (GitHub-semantic) event type — each host's parser maps its native
+   *  events into this vocabulary ('pull_request', 'pull_request_review',
+   *  'pull_request_review_comment', 'issue_comment', 'push', 'workflow_run', …). */
   eventType: string;
   action?: string;
   /** repo identifier "owner/name" (GitHub) / "group/project" (GitLab). */

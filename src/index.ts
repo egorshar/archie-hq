@@ -25,6 +25,7 @@ import type { Application, Request, Response } from 'express';
 
 import { mountSlackApp, type SlackLifecycle } from './connectors/slack/events.js';
 import { mountGitHubWebhook } from './connectors/github/events.js';
+import { mountGitLabWebhook } from './connectors/gitlab/events.js';
 import { mountApiRoutes } from './connectors/api/routes.js';
 import { mountOAuthRoutes } from './connectors/oauth/routes.js';
 import { getIsShuttingDown, setShuttingDown } from './system/shutdown.js';
@@ -53,6 +54,7 @@ interface AppConfig {
   slackAppToken?: string;
   port: number;
   githubWebhookSecret?: string;
+  gitlabWebhookSecret?: string;
 }
 
 /**
@@ -64,6 +66,7 @@ function loadConfig(): AppConfig {
   const slackAppToken = process.env.SLACK_APP_TOKEN;
   const port = parseInt(process.env.PORT || '3000', 10);
   const githubWebhookSecret = process.env.GITHUB_WEBHOOK_SECRET;
+  const gitlabWebhookSecret = process.env.GITLAB_WEBHOOK_SECRET;
 
   if (!process.env.ANTHROPIC_API_KEY) {
     throw new Error('ANTHROPIC_API_KEY environment variable is required');
@@ -75,6 +78,7 @@ function loadConfig(): AppConfig {
     slackAppToken,
     port,
     githubWebhookSecret,
+    gitlabWebhookSecret,
   };
 }
 
@@ -236,8 +240,14 @@ async function main(): Promise<void> {
     // Mount OAuth callback route (provider redirects land here)
     mountOAuthRoutes(app);
 
-    // Mount GitHub webhook (if configured)
-    if (config.githubWebhookSecret) {
+    // Mount the active repo host's webhook.
+    if (resolveRepoHostKind() === 'gitlab') {
+      if (config.gitlabWebhookSecret) {
+        mountGitLabWebhook(app, config.gitlabWebhookSecret);
+      } else {
+        logger.warn('Server', 'REPO_HOST=gitlab but GITLAB_WEBHOOK_SECRET is unset — GitLab webhook not mounted');
+      }
+    } else if (config.githubWebhookSecret) {
       mountGitHubWebhook(app, config.githubWebhookSecret);
     } else {
       logger.plain('GitHub App not configured — PR tools disabled');
