@@ -388,7 +388,8 @@ export class GitLabHost implements RepoHost {
         path: `/projects/${this.projectId(repo)}/merge_requests/${prNumber}`,
       });
       return mr.author?.username ?? null;
-    } catch {
+    } catch (error) {
+      logger.warn('gitlab', `Failed to fetch MR !${prNumber} author; self-exclusion in review synthesis is disabled for this call`, error);
       return null;
     }
   }
@@ -411,7 +412,10 @@ export class GitLabHost implements RepoHost {
     const discussions = await glRequestAll<{
       id: string; individual_note?: boolean;
       notes?: Array<{ author?: { username?: string }; body?: string; resolvable?: boolean; resolved?: boolean; created_at?: string }>;
-    }>({ path: `/projects/${id}/merge_requests/${prNumber}/discussions` });
+    }>({ path: `/projects/${id}/merge_requests/${prNumber}/discussions` }).catch((error) => {
+      logger.warn('gitlab', `Failed to fetch discussions for MR !${prNumber}; degrading to approvals-only reviews`, error);
+      return [];
+    });
 
     const changeRequesters = new Map<string, { body: string; at: string }>();
     for (const d of discussions) {
@@ -569,14 +573,21 @@ export class GitLabHost implements RepoHost {
   }
 
   async listCodeScanningAlerts(repo: string, filters: CodeScanningAlertFilters = {}): Promise<CodeScanningAlert[]> {
-    // GitLab vulnerability state vocabulary: detected|confirmed|dismissed|resolved.
-    // Map the canonical open|dismissed|fixed loosely; default to the detected set.
-    const stateMap: Record<string, string> = { open: 'detected', dismissed: 'dismissed', fixed: 'resolved' };
+    // GitLab's active vulnerability set spans BOTH detected and confirmed states, and
+    // glRequest's query helper can't emit GitLab's state[]=detected&state[]=confirmed
+    // array form. So fetch unfiltered and filter on the canonical side instead: every
+    // vulnerability is mapped through mapVulnerability (which already canonicalizes
+    // detected|confirmed -> open, resolved -> fixed, dismissed -> dismissed), then we
+    // filter by the canonical state if the caller asked for one.
+    // E2E-VERIFY: confirm the default (unfiltered) vulnerabilities listing returns all
+    // states against a live Ultimate instance.
     const vulns = await glRequestAll<any>({
       path: `/projects/${this.projectId(repo)}/vulnerabilities`,
-      query: { state: filters.state ? stateMap[filters.state] : undefined },
     });
-    const alerts = vulns.map((v) => this.mapVulnerability(v));
+    let alerts = vulns.map((v) => this.mapVulnerability(v));
+    if (filters.state) {
+      alerts = alerts.filter((a) => a.state === filters.state);
+    }
     logger.system(`GitLab: vulnerabilities for ${repo}: ${alerts.length}`);
     return alerts;
   }
