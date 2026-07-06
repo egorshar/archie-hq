@@ -86,13 +86,14 @@ export type PortAction =
 
 /**
  * Decide what to do with the target port before any compose invocation.
- * `archieInProject` is whether `docker compose ps` (this project) shows the
- * archie service — distinguishes our own instance (safe to tear down and
- * rebuild) from a foreign one (another worktree's project; not ours to stop).
+ * `ourArchieOnPort` is whether `docker compose ps` (this project) shows the
+ * archie service PUBLISHING the target port — mere existence isn't ownership:
+ * our own instance could sit on a different port while a foreign one (another
+ * worktree's project; not ours to stop) holds the target.
  */
-export function decidePortAction(probe: PortProbe, archieInProject: boolean): PortAction {
+export function decidePortAction(probe: PortProbe, ourArchieOnPort: boolean): PortAction {
   if (probe.kind === 'free') return 'proceed';
-  if (probe.kind === 'archie' && archieInProject) return 'recreate';
+  if (probe.kind === 'archie' && ourArchieOnPort) return 'recreate';
   return 'relocate';
 }
 
@@ -104,6 +105,8 @@ const FAILED_STATES = new Set(['exited', 'dead', 'restarting']);
 export interface ArchieContainerState {
   found: boolean;
   state?: string;
+  /** Host ports the archie container publishes (from compose ps `Publishers`). */
+  publishedPorts: number[];
 }
 
 /**
@@ -114,7 +117,7 @@ export interface ArchieContainerState {
  */
 export function archieContainerState(psOutput: string): ArchieContainerState {
   const trimmed = psOutput.trim();
-  if (!trimmed) return { found: false };
+  if (!trimmed) return { found: false, publishedPorts: [] };
 
   const entries: unknown[] = [];
   if (trimmed.startsWith('[')) {
@@ -122,7 +125,7 @@ export function archieContainerState(psOutput: string): ArchieContainerState {
       const arr: unknown = JSON.parse(trimmed);
       if (Array.isArray(arr)) entries.push(...(arr as unknown[]));
     } catch {
-      return { found: false };
+      return { found: false, publishedPorts: [] };
     }
   } else {
     for (const line of trimmed.split('\n')) {
@@ -142,10 +145,14 @@ export function archieContainerState(psOutput: string): ArchieContainerState {
     const name = typeof o['Name'] === 'string' ? o['Name'] : undefined;
     if (service === 'archie' || (service === undefined && name?.includes('archie'))) {
       const state = typeof o['State'] === 'string' ? o['State'].toLowerCase() : undefined;
-      return { found: true, state };
+      const publishers = Array.isArray(o['Publishers']) ? (o['Publishers'] as unknown[]) : [];
+      const publishedPorts = publishers
+        .map((p) => (typeof p === 'object' && p !== null ? (p as Record<string, unknown>)['PublishedPort'] : undefined))
+        .filter((p): p is number => typeof p === 'number' && p > 0);
+      return { found: true, state, publishedPorts };
     }
   }
-  return { found: false };
+  return { found: false, publishedPorts: [] };
 }
 
 // ---- Health wait (pure core, injected deps) ----
@@ -312,7 +319,10 @@ export async function runBoot(deps: BootDeps, opts: BootOpts): Promise<number> {
         deps.error(await collectDiagnostics(deps.exec));
         return 1;
       }
-      deps.log(`Attested: instance runs ${opts.expectedSha}`);
+      // "composed from", not "runs": /health echoes the env compose passed at
+      // container creation — with a -dirty tree it proves which checkout
+      // composed the instance, not the exact bytes running.
+      deps.log(`Attested: instance composed from ${opts.expectedSha}`);
     }
     deps.log(`Healthy: ${opts.baseUrl}`);
     deps.log(`/health body: ${outcome.body}`);
@@ -352,18 +362,28 @@ async function probePort(baseUrl: string): Promise<PortProbe> {
     return looksLikeArchie(await res.text()) ? { kind: 'archie' } : { kind: 'other' };
   } catch (err) {
     // Connection refused = nothing listens. Anything else responded, hung, or
-    // held the socket without speaking HTTP — treat as occupied.
-    const code = (err as { cause?: { code?: string } }).cause?.code;
-    return code === 'ECONNREFUSED' ? { kind: 'free' } : { kind: 'other' };
+    // held the socket without speaking HTTP — treat as occupied. On dual-stack
+    // localhost the refusal may arrive as an AggregateError over per-address
+    // errors with no top-level code, so check both shapes.
+    const cause = (err as { cause?: { code?: string; errors?: Array<{ code?: string } | undefined> } }).cause;
+    const refused =
+      cause?.code === 'ECONNREFUSED' ||
+      (Array.isArray(cause?.errors) && cause.errors.some((e) => e?.code === 'ECONNREFUSED'));
+    return refused ? { kind: 'free' } : { kind: 'other' };
   }
 }
 
-/** Ask the OS for a free TCP port (impure; main only). */
+/**
+ * Ask the OS for a free TCP port (impure; main only). Binds all interfaces,
+ * like docker's publish does. A race remains between releasing the port and
+ * compose binding it (the window spans the image build) — accepted: a lost
+ * race fails compose-up loudly with diagnostics, never silently.
+ */
 function pickFreePort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const srv = createServer();
     srv.once('error', reject);
-    srv.listen(0, '127.0.0.1', () => {
+    srv.listen(0, () => {
       const port = (srv.address() as AddressInfo).port;
       srv.close(() => resolve(port));
     });
@@ -414,28 +434,43 @@ async function main(): Promise<void> {
     }
   }
 
-  // Port preflight — before any compose invocation.
+  // Port preflight — before any compose invocation. Skipped entirely when the
+  // operator set ARCHIE_URL explicitly: that target (possibly remote) is
+  // theirs to manage, and relocating away from it would test the wrong thing.
   let baseUrl = resolveBaseUrl(process.env, dotenvText);
-  let port = new URL(baseUrl).port || '3000';
-  const probe = await probePort(baseUrl);
-  if (probe.kind !== 'free') {
-    const ps = await hostExec('docker', ['compose', 'ps', '--format', 'json']);
-    const action = decidePortAction(probe, ps.code === 0 && archieContainerState(ps.stdout).found);
-    if (action === 'recreate') {
-      console.log(`Port ${port} is held by this project's own archie — tearing it down to boot fresh from the current checkout ...`);
-      const down = await hostExec('docker', ['compose', 'down']);
-      if (down.code !== 0) {
-        console.error(`docker compose down failed (exit ${down.code}): ${down.stderr.trim()}`);
-        process.exit(1);
+  let port: string;
+  try {
+    port = new URL(baseUrl).port || '3000';
+  } catch {
+    console.error(`ARCHIE_URL is not a valid URL: ${baseUrl}`);
+    process.exit(2);
+  }
+  if (process.env.ARCHIE_URL) {
+    console.log(`ARCHIE_URL is set — targeting ${baseUrl} as-is (port preflight skipped).`);
+  } else {
+    const probe = await probePort(baseUrl);
+    if (probe.kind !== 'free') {
+      const ps = await hostExec('docker', ['compose', 'ps', '--format', 'json']);
+      const archie = ps.code === 0 ? archieContainerState(ps.stdout) : undefined;
+      const ourArchieOnPort = archie !== undefined && archie.found && archie.publishedPorts.includes(Number(port));
+      const action = decidePortAction(probe, ourArchieOnPort);
+      if (action === 'recreate') {
+        console.log(`Port ${port} is held by this project's own archie — tearing it down to boot fresh from the current checkout ...`);
+        const down = await hostExec('docker', ['compose', 'down']);
+        if (down.code !== 0) {
+          console.error(`docker compose down failed (exit ${down.code}): ${down.stderr.trim()}`);
+          process.exit(1);
+        }
+      } else {
+        const takenPort = port;
+        port = String(await pickFreePort());
+        baseUrl = `http://localhost:${port}`;
+        console.log(
+          `Port ${takenPort} is taken by a ${
+            probe.kind === 'archie' ? 'foreign archie instance' : 'non-archie process'
+          } — relocating to free port ${port}.`,
+        );
       }
-    } else {
-      port = String(await pickFreePort());
-      baseUrl = `http://localhost:${port}`;
-      console.log(
-        `Port ${new URL(resolveBaseUrl(process.env, dotenvText)).port || '3000'} is taken by a ${
-          probe.kind === 'archie' ? 'foreign archie instance' : 'non-archie process'
-        } — relocating to free port ${port}.`,
-      );
     }
   }
 

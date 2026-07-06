@@ -146,17 +146,17 @@ describe('waitForHealth', () => {
 describe('archieContainerState', () => {
   it('parses NDJSON compose ps output', () => {
     const out = `${'{"Service":"other","State":"running"}'}\n${RUNNING_PS}\n`;
-    expect(archieContainerState(out)).toEqual({ found: true, state: 'running' });
+    expect(archieContainerState(out)).toEqual({ found: true, state: 'running', publishedPorts: [] });
   });
 
   it('parses array-shaped compose ps output', () => {
     const out = JSON.stringify([{ Service: 'archie', State: 'Exited' }]);
-    expect(archieContainerState(out)).toEqual({ found: true, state: 'exited' });
+    expect(archieContainerState(out)).toEqual({ found: true, state: 'exited', publishedPorts: [] });
   });
 
   it('reports not-found for empty or unrelated output', () => {
-    expect(archieContainerState('')).toEqual({ found: false });
-    expect(archieContainerState('{"Service":"db","State":"running"}')).toEqual({ found: false });
+    expect(archieContainerState('')).toEqual({ found: false, publishedPorts: [] });
+    expect(archieContainerState('{"Service":"db","State":"running"}')).toEqual({ found: false, publishedPorts: [] });
   });
 });
 
@@ -251,17 +251,33 @@ describe('decidePortAction', () => {
     expect(decidePortAction({ kind: 'free' }, false)).toBe('proceed');
   });
 
-  it("recreates when this project's own archie holds the port (never reuse — code may be stale)", () => {
+  it("recreates when this project's own archie PUBLISHES the port (never reuse — code may be stale)", () => {
     expect(decidePortAction({ kind: 'archie' }, true)).toBe('recreate');
   });
 
-  it('relocates when a foreign archie holds the port (not ours to stop)', () => {
+  it('relocates when a foreign archie holds the port — even if our own archie runs elsewhere', () => {
+    // ourArchieOnPort=false covers both "no archie of ours at all" and "ours
+    // publishes a different port"; existence alone must not read as ownership.
     expect(decidePortAction({ kind: 'archie' }, false)).toBe('relocate');
   });
 
   it('relocates when a non-archie process holds the port', () => {
     expect(decidePortAction({ kind: 'other' }, false)).toBe('relocate');
     expect(decidePortAction({ kind: 'other' }, true)).toBe('relocate');
+  });
+});
+
+describe('archieContainerState — published ports', () => {
+  it('extracts PublishedPort entries from Publishers', () => {
+    const ps =
+      '{"Name":"archie-hq-archie-1","Service":"archie","State":"running","Publishers":[{"URL":"","TargetPort":3177,"PublishedPort":3177,"Protocol":"tcp"}]}';
+    expect(archieContainerState(ps)).toEqual({ found: true, state: 'running', publishedPorts: [3177] });
+  });
+
+  it('reads missing/empty Publishers as no published ports', () => {
+    expect(archieContainerState(RUNNING_PS).publishedPorts).toEqual([]);
+    const nullPub = '{"Service":"archie","State":"running","Publishers":null}';
+    expect(archieContainerState(nullPub).publishedPorts).toEqual([]);
   });
 });
 
@@ -319,7 +335,7 @@ describe('runBoot — orchestration ordering', () => {
     const code = await runBoot(deps, { baseUrl: 'http://localhost:3000', timeoutSeconds: 600, expectedSha: 'abc123' });
 
     expect(code).toBe(0);
-    expect(deps.logs.join('\n')).toContain('Attested: instance runs abc123');
+    expect(deps.logs.join('\n')).toContain('Attested: instance composed from abc123');
   });
 
   it('attestation: a healthy instance reporting a DIFFERENT git_sha fails the boot with diagnostics', async () => {
