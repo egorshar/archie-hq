@@ -13,7 +13,7 @@
 
 ## 3. Merge approval type and pending state (AC4, AC5 resolution side)
 
-- [ ] 3.1 Widen the `postInteractiveToUser` approvalType union (`src/tasks/task.ts:585`) to `'edit_mode' | 'research_budget' | 'merge'`
+- [x] 3.1 Widen the `postInteractiveToUser` approvalType union (`src/tasks/task.ts:585`) to `'edit_mode' | 'research_budget' | 'merge'`
 - [ ] 3.2 Add `pending_merge_approval?: { github: string; pr_number: number; requested_by: string; requested_at: string }` to `TaskMetadata` (`src/types/task.ts`, beside `edit_allowed`); round-trip persistence test in `src/tasks/__tests__/persistence.test.ts`
 - [ ] 3.3 Implement `Task.handleMergeApproval(approver, expected: {github, pr_number})` (mirror `handleEditModeApproval`, `task.ts:1232`, plus an atomic identity gate): **synchronous read-compare-clear** on `pending_merge_approval` — read the slot, compare it to `expected`, and clear it on match, with no await between the three steps; empty or mismatched slot → warn + return a stale disposition (no merge, slot untouched) so the calling adapter can mark the prompt stale; on match only: clear the requesting agent's parked teardown via `requested_by`, fetch PR status, merge via `GitHubClient.mergePullRequest` when `state === 'open' && isMergeReadyPerGithub(status)` — **no `approved` check** — append completion finding on success / decision finding with the exact reason on failure, save, reactivate PM via `sendMessage(AGENT_PROMPTS.existingTask, 'pm-agent')`
 - [ ] 3.4 Implement `Task.handleMergeDenial(expected)`: same synchronous read-compare-clear gate (empty or mismatched slot → warn + stale disposition, nothing cleared); on match clear slot + parked teardown, append `Merge denied by user — PR not merged` finding, reactivate PM; no GitHub calls

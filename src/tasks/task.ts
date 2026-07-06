@@ -582,7 +582,7 @@ export class Task {
    * approvals are also surfaced in the CLI via the `approval:requested` event
    * regardless of Slack delivery.
    */
-  async postInteractiveToUser(text: string, blocks: unknown[], approvalType: 'edit_mode' | 'research_budget', channelKey?: string): Promise<void> {
+  async postInteractiveToUser(text: string, blocks: unknown[], approvalType: 'edit_mode' | 'research_budget' | 'merge', channelKey?: string): Promise<void> {
     emitEvent('approval:requested', this.taskId, { text, approvalType });
 
     const ch = this.resolveSlackChannel(channelKey);
