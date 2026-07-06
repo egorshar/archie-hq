@@ -41,7 +41,7 @@
 
 ## 7. Debug MCP extension
 
-- [ ] 7.1 Widen the `approve` tool enum to `['edit_mode', 'research_budget', 'merge']` (`tools/debug-mcp/server.ts:184`), add optional `github`/`pr_number` parameters (required when `type: 'merge'`) forwarded verbatim in the API request body to satisfy the route's merge identity contract (task 6.2), and mention merge plus the identity requirement in the tool description
+- [x] 7.1 Widen the `approve` tool enum to `['edit_mode', 'research_budget', 'merge']` (`tools/debug-mcp/server.ts:184`), add optional `github`/`pr_number` parameters (required when `type: 'merge'`) forwarded verbatim in the API request body to satisfy the route's merge identity contract (task 6.2), and mention merge plus the identity requirement in the tool description
 - [ ] 7.2 Add `'merge'` to `ApprovalType` (`tools/debug-mcp/wait-for-task.ts:14`); extend `tools/debug-mcp/wait-for-task.test.ts` with a fake feed carrying `approvalType: 'merge'` → `APPROVAL_TYPE=merge` surfaced
 
 ## 8. Docs

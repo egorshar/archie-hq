@@ -97,11 +97,18 @@ export class ArchieClient {
     return (await res.json()) as EventsResult;
   }
 
-  async approve(taskId: string, type: string, approve: boolean): Promise<void> {
+  async approve(
+    taskId: string,
+    type: string,
+    approve: boolean,
+    // PR identity for merge-type approvals, forwarded verbatim in the request
+    // body (the API requires github + pr_number when type is "merge").
+    pr?: { github?: string; pr_number?: number },
+  ): Promise<void> {
     const res = await fetch(`${this.baseUrl}/api/tasks/${taskId}/approve`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ type, approve }),
+      body: JSON.stringify({ type, approve, github: pr?.github, pr_number: pr?.pr_number }),
     });
     if (!res.ok) throw new Error(`Failed to send approval: ${res.status} ${await res.text()}`);
   }
