@@ -10,7 +10,7 @@ import { GITLAB_CAPABILITIES_DEFAULT } from '../../ports/capabilities.js';
 import type {
   PRStatus, PRReview, ReviewThread, PRComment, PRChecksReport,
   CreatePRResult, PRDetails, PRListItem, PRListFilters,
-  CheckRunReport, WorkflowRunReport, CodeScanningAlert, CodeScanningAlertFilters,
+  CheckRunReport, WorkflowRunReport, WorkflowDispatchResult, CodeScanningAlert, CodeScanningAlertFilters,
 } from '../../ports/repo-host-types.js';
 import type { PrCardData } from '../../types/task.js';
 import { logger } from '../../system/logger.js';
@@ -295,6 +295,11 @@ export class GitLabHost implements RepoHost {
       jobs: jobEntries,
     };
   }
+
+  async dispatchWorkflow(_repo: string, _ref: string, _opts?: { workflow?: string; inputs?: Record<string, string> }): Promise<WorkflowDispatchResult> {
+    throw new Error('GitLabHost.dispatchWorkflow not implemented until Plan 1 Task 2');
+  }
+
   async listAccessibleRepos(): Promise<Array<{ github: string; default_branch: string; description?: string }>> {
     const projects = await glRequestAll<{ path_with_namespace: string; default_branch: string | null; description: string | null }>({
       path: '/projects', query: { membership: true, order_by: 'last_activity_at', sort: 'desc' },

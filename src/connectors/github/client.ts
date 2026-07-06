@@ -26,6 +26,7 @@ import type {
   CheckRunReport,
   WorkflowJobEntry,
   WorkflowRunReport,
+  WorkflowDispatchResult,
   CodeScanningAlertInstance,
   CodeScanningAlert,
   CodeScanningAlertFilters,
@@ -917,6 +918,12 @@ export class GitHubClient implements RepoHost {
       url: run.html_url ?? null,
       jobs,
     };
+  }
+
+  async dispatchWorkflow(_repo: string, _ref: string, _opts?: { workflow?: string; inputs?: Record<string, string> }): Promise<WorkflowDispatchResult> {
+    // GitHub Actions workflow_dispatch is not wired yet (workflowDispatch capability is false);
+    // the tool layer gates on the capability, so this is unreachable in normal flow.
+    throw new Error('dispatchWorkflow is not available on the GitHub repo host');
   }
 
   /**

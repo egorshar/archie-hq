@@ -18,6 +18,7 @@ import type {
   PRListFilters,
   CheckRunReport,
   WorkflowRunReport,
+  WorkflowDispatchResult,
   CodeScanningAlert,
   CodeScanningAlertFilters,
 } from './repo-host-types.js';
@@ -62,6 +63,12 @@ export interface RepoHost {
   listPRChecks(repo: string, prNumber: number): Promise<PRChecksReport>;
   getCheckRunById(repo: string, checkRunId: number): Promise<CheckRunReport>;
   getWorkflowRunById(repo: string, runId: number): Promise<WorkflowRunReport>;
+  /**
+   * Dispatch a CI workflow run on `ref` (canonical; GitHub `workflow_dispatch`).
+   * GitLab maps this to triggering a pipeline (opts.inputs → pipeline variables).
+   * Gated by capabilities().workflowDispatch.
+   */
+  dispatchWorkflow(repo: string, ref: string, opts?: { workflow?: string; inputs?: Record<string, string> }): Promise<WorkflowDispatchResult>;
 
   // repos
   // `github` is the canonical repo-identifier field, kept host-neutral in meaning

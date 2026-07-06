@@ -12,6 +12,8 @@ export interface RepoHostCapabilities {
   nativeAutoMerge: boolean;
   /** can request re-review from prior reviewers. */
   reReviewRequest: boolean;
+  /** can dispatch a CI workflow run / trigger a pipeline (GitHub workflow_dispatch; GitLab pipeline trigger). */
+  workflowDispatch: boolean;
 }
 
 export interface RuntimeCapabilities {
@@ -32,6 +34,7 @@ export const GITHUB_CAPABILITIES: RepoHostCapabilities = {
   securityAlerts: true,
   nativeAutoMerge: false,
   reReviewRequest: true,
+  workflowDispatch: false,
 };
 
 /**
@@ -46,6 +49,7 @@ export const GITLAB_CAPABILITIES_DEFAULT: RepoHostCapabilities = {
   securityAlerts: false,
   nativeAutoMerge: true,
   reReviewRequest: false,
+  workflowDispatch: true,
 };
 
 export const CLAUDE_RUNTIME_CAPABILITIES: RuntimeCapabilities = {
