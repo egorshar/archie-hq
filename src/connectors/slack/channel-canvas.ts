@@ -57,13 +57,27 @@ export async function ensureChannelCanvas(channelId: string): Promise<void> {
       if (!info || !ARCHIE_TITLE.test(title)) continue;
 
       const creator = info.user ?? '';
-      let external = false;
+      // Fail closed on unknown classification: a missing creator or a failed
+      // lookup (rate limit, missing scope) must never adopt an unvetted canvas
+      // into standing PM context — external content in a shared channel would
+      // become prompt injection. A previously classified entry is kept as-is;
+      // a new canvas is skipped and retried at the next TTL scan.
+      let external: boolean | null = null;
       if (creator) {
         try {
           external = isExternalUser(await getUserInfo(creator));
         } catch {
-          external = false; // fail-open: don't silently drop a canvas we couldn't classify
+          external = null;
         }
+      }
+      if (external === null) {
+        const prev = pre?.canvases.find((c) => c.file_id === tab.file_id);
+        if (prev) {
+          resolved.push({ fileId: tab.file_id, title, external: false, entry: prev });
+        } else {
+          logger.warn('channel-canvas', `creator classification unavailable for canvas ${tab.file_id} in ${channelId} — not adopting yet`);
+        }
+        continue;
       }
       if (external) {
         resolved.push({ fileId: tab.file_id, title, external: true });
@@ -155,4 +169,26 @@ export async function buildChannelCanvasPromptSection(metadata: TaskMetadata): P
     blocks.join('\n') +
     '\n</channel_project_context>'
   );
+}
+
+/**
+ * File ids the PM may fetch via `fetch_slack_reference` for a task: every
+ * adopted canvas itself plus the files it references, across the task's linked
+ * Slack channels. Anything outside this set is out of scope for the tool —
+ * without the allowlist, any file id the bot token can read would be
+ * exfiltratable into the task workspace.
+ */
+export async function collectCanvasFileAllowlist(metadata: TaskMetadata): Promise<Set<string>> {
+  const allowed = new Set<string>();
+  for (const ch of Object.values(metadata.channels)) {
+    if (ch.type !== 'slack') continue;
+    const store = await loadChannelStore(ch.channel_id);
+    if (!store) continue;
+    for (const c of store.canvases) {
+      if (c.external) continue;
+      allowed.add(c.file_id);
+      for (const id of c.fileIds) allowed.add(id);
+    }
+  }
+  return allowed;
 }
