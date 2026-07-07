@@ -332,3 +332,43 @@ describe('GitLabHost.dispatchWorkflow', () => {
     expect(JSON.parse(fetchMock.mock.calls[0][1].body).variables).toEqual([]);
   });
 });
+
+describe('GitLabHost.runManualJob', () => {
+  it('finds the named manual job in the MR pipeline and plays it', async () => {
+    setEnv();
+    const fetchMock = vi.fn()
+      // 1) GET merge_requests/:iid -> head_pipeline
+      .mockResolvedValueOnce(new Response(JSON.stringify({ sha: 'abc', head_pipeline: { id: 777 } }), { status: 200 }))
+      // 2) GET pipelines/:id/jobs -> jobs list
+      .mockResolvedValueOnce(new Response(JSON.stringify([
+        { id: 11, name: 'build', status: 'success', web_url: 'u/11' },
+        { id: 12, name: 'Ready to prod', status: 'manual', web_url: 'u/12' },
+      ]), { status: 200 }))
+      // 3) POST jobs/:id/play -> played job
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: 12, status: 'pending', web_url: 'u/12' }), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const res = await new GitLabHost().runManualJob('walli/sweed/web-ui-cashier-ci', 1667, 'Ready to prod');
+    expect(res).toEqual({ id: 12, url: 'u/12', status: 'pending' });
+
+    // the third call is the play POST on the found job id
+    const [url, init] = fetchMock.mock.calls[2];
+    expect(String(url)).toContain('/projects/walli%2Fsweed%2Fweb-ui-cashier-ci/jobs/12/play');
+    expect(init.method).toBe('POST');
+  });
+
+  it('throws when the named job is absent from the pipeline', async () => {
+    setEnv();
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ sha: 'abc', head_pipeline: { id: 777 } }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify([{ id: 11, name: 'build', status: 'success', web_url: 'u/11' }]), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(new GitLabHost().runManualJob('g/p', 5, 'Ready to prod')).rejects.toThrow(/Ready to prod/);
+  });
+
+  it('throws when the MR has no pipeline', async () => {
+    setEnv();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ sha: 'abc' }), { status: 200 })));
+    await expect(new GitLabHost().runManualJob('g/p', 5, 'Ready to prod')).rejects.toThrow(/no pipeline/i);
+  });
+});
