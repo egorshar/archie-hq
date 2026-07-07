@@ -19,6 +19,7 @@ import type {
   CheckRunReport,
   WorkflowRunReport,
   WorkflowDispatchResult,
+  ManualJobResult,
   CodeScanningAlert,
   CodeScanningAlertFilters,
 } from './repo-host-types.js';
@@ -69,6 +70,14 @@ export interface RepoHost {
    * Gated by capabilities().workflowDispatch.
    */
   dispatchWorkflow(repo: string, ref: string, opts?: { workflow?: string; inputs?: Record<string, string> }): Promise<WorkflowDispatchResult>;
+  /**
+   * Play a manual/gated CI job by name in a change request's pipeline (e.g. a
+   * "Ready to prod" release-deploy job). GitLab: resolve the MR's head pipeline,
+   * find the job named `jobName`, and play it. Gated by capabilities().manualJobs.
+   * GitHub has no clean equivalent (nearest is approving a pending deployment) —
+   * capability-off there.
+   */
+  runManualJob(repo: string, prNumber: number, jobName: string): Promise<ManualJobResult>;
 
   // repos
   // `github` is the canonical repo-identifier field, kept host-neutral in meaning

@@ -10,7 +10,7 @@ import { GITLAB_CAPABILITIES_DEFAULT } from '../../ports/capabilities.js';
 import type {
   PRStatus, PRReview, ReviewThread, PRComment, PRChecksReport,
   CreatePRResult, PRDetails, PRListItem, PRListFilters,
-  CheckRunReport, WorkflowRunReport, WorkflowDispatchResult, CodeScanningAlert, CodeScanningAlertFilters,
+  CheckRunReport, WorkflowRunReport, WorkflowDispatchResult, ManualJobResult, CodeScanningAlert, CodeScanningAlertFilters,
 } from '../../ports/repo-host-types.js';
 import type { PrCardData } from '../../types/task.js';
 import { logger } from '../../system/logger.js';
@@ -307,6 +307,10 @@ export class GitLabHost implements RepoHost {
     });
     logger.system(`GitLab: dispatched pipeline ${pipeline.id} on ${repo}@${ref} (${variables.length} vars)`);
     return { id: pipeline.id, url: pipeline.web_url };
+  }
+
+  async runManualJob(_repo: string, _prNumber: number, _jobName: string): Promise<ManualJobResult> {
+    throw new Error('GitLabHost.runManualJob not implemented until run_manual_job Task 2');
   }
 
   async listAccessibleRepos(): Promise<Array<{ github: string; default_branch: string; description?: string }>> {

@@ -8,10 +8,15 @@ describe('capability descriptors', () => {
     expect(GITHUB_CAPABILITIES.reReviewRequest).toBe(true);
     expect(GITHUB_CAPABILITIES.nativeAutoMerge).toBe(false);
     expect(GITHUB_CAPABILITIES.workflowDispatch).toBe(false);
+    expect(GITHUB_CAPABILITIES.manualJobs).toBe(false);
   });
 
   it('gitlab defaults advertise workflowDispatch', () => {
     expect(GITLAB_CAPABILITIES_DEFAULT.workflowDispatch).toBe(true);
+  });
+
+  it('gitlab defaults advertise manualJobs', () => {
+    expect(GITLAB_CAPABILITIES_DEFAULT.manualJobs).toBe(true);
   });
 
   it('claude runtime advertises all five capabilities', () => {

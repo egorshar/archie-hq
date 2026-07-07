@@ -14,6 +14,8 @@ export interface RepoHostCapabilities {
   reReviewRequest: boolean;
   /** can dispatch a CI workflow run / trigger a pipeline (GitHub workflow_dispatch; GitLab pipeline trigger). */
   workflowDispatch: boolean;
+  /** can play a manual/gated CI job by name in a change request's pipeline (GitLab manual jobs). */
+  manualJobs: boolean;
 }
 
 export interface RuntimeCapabilities {
@@ -35,6 +37,7 @@ export const GITHUB_CAPABILITIES: RepoHostCapabilities = {
   nativeAutoMerge: false,
   reReviewRequest: true,
   workflowDispatch: false,
+  manualJobs: false,
 };
 
 /**
@@ -50,6 +53,7 @@ export const GITLAB_CAPABILITIES_DEFAULT: RepoHostCapabilities = {
   nativeAutoMerge: true,
   reReviewRequest: false,
   workflowDispatch: true,
+  manualJobs: true,
 };
 
 export const CLAUDE_RUNTIME_CAPABILITIES: RuntimeCapabilities = {
