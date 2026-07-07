@@ -211,6 +211,16 @@ export interface WorkflowDispatchResult {
   url: string | null;
 }
 
+/**
+ * Result of playing a manual/gated CI job (canonical). GitLab returns the played
+ * job (id + web_url + status). GitHub has no 1:1 (capability-off), so fields may be null.
+ */
+export interface ManualJobResult {
+  id: number | string | null;
+  url: string | null;
+  status: string | null;
+}
+
 export interface CodeScanningAlertFilters {
   /** Alert state filter. Defaults to `open` at the call site. */
   state?: 'open' | 'dismissed' | 'fixed';

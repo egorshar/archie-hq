@@ -27,6 +27,7 @@ import type {
   WorkflowJobEntry,
   WorkflowRunReport,
   WorkflowDispatchResult,
+  ManualJobResult,
   CodeScanningAlertInstance,
   CodeScanningAlert,
   CodeScanningAlertFilters,
@@ -924,6 +925,12 @@ export class GitHubClient implements RepoHost {
     // GitHub Actions workflow_dispatch is not wired yet (workflowDispatch capability is false);
     // the tool layer gates on the capability, so this is unreachable in normal flow.
     throw new Error('dispatchWorkflow is not available on the GitHub repo host');
+  }
+
+  async runManualJob(_repo: string, _prNumber: number, _jobName: string): Promise<ManualJobResult> {
+    // GitHub has no play-a-manual-job-by-name equivalent (manualJobs capability is false);
+    // the tool layer gates on the capability, so this is unreachable in normal flow.
+    throw new Error('runManualJob is not available on the GitHub repo host');
   }
 
   /**
