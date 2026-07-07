@@ -24,6 +24,22 @@ Frontmatter flows: gray-matter parse in `scanPlugins()` (`plugin-loader.ts:240-3
 - No change to webhook arrival or debounce mechanics.
 - No generalization to per-tool approval gates (issue #168) — this is a single, narrow approval type; #168 can generalize later.
 
+## Revision R2 — reposition the explicit merge as auto-merge *arming* (supersedes parts of Decisions 3, 6, 7)
+
+**Why.** Live use exposed a defect. The explicit-request path merged (or reported "not ready") based on GitHub's mergeable state, reusing the shared `isMergeReadyPerGithub` helper whose `blocked`-but-`mergeable` tolerance is only safe when paired with an `approved` check. The auto orchestrator pairs it with `approved` (`merge.ts:174`); the explicit path deliberately dropped `approved` (AC5). Result: a PR blocked on required human review with CI incomplete (`mergeable:true` = no conflicts, `mergeableState:'blocked'`) was treated as *ready*, so the tool surfaced an Approve/Deny prompt for a PR GitHub would refuse to merge. `mergeable:true` means "no merge conflicts", not "checks/reviews pass".
+
+**Reframe.** In a non-auto repo, approving `merge_pull_request` now means **"merge this PR as soon as it is ready"**, not "merge it now". The human approval is the gate (issue #139's point); the actual merge is delegated to the existing merge orchestrator, which already merges linked PRs when they reach the ready condition on any merge-triggering webhook (approval, `synchronize`, `push`, `workflow_run`). This deletes all mergeable-state interpretation from the explicit path — the exact simplification the reframe buys.
+
+**Mechanic (reuses the orchestrator — no new merge engine):**
+- **Request time** (`merge_pull_request`, non-auto branch): drop the `isMergeReadyPerGithub` gate. Prompt for **any open PR** (still bail on closed/merged). Approving a not-yet-green PR is now correct — that is the feature. Slot/pause/identity/atomic-gate machinery is unchanged.
+- **Approval** (`Task.handleMergeApproval`): after the atomic identity gate, set a persisted per-PR `BranchState.merge_armed = true` for the approved PR, clear the slot + parked teardown, then trigger `checkAndMergeLinkedPRs(taskId)` once. If the PR is already clean it merges immediately (existing `notifyPMAboutMerge`); otherwise it stays armed and the task un-parks and winds down with the PM relaying "auto-merge armed — I'll merge it once checks pass". No mergeable-state check in the Task method itself.
+- **Orchestrator** (`runMergeCheck`): add an **armed bucket** alongside the existing auto bucket. An armed PR merges when `state === 'open' && mergeableState === 'clean'` — GitHub's authoritative "all required reviews + checks satisfied, no conflicts" signal, with **no** Archie `approved` floor (AC5) and **no** `blocked` tolerance (a blocked PR has an unsatisfied required gate; branch protection is the authority, per the brief). The auto-repo bucket keeps `approved && isMergeReadyPerGithub` unchanged. The `merge_armed` marker is cleared when the PR is observed merged or closed.
+- **Deny** unchanged: clears the slot, never arms.
+
+**Consequences.** `isMergeReadyPerGithub` (with its `blocked` tolerance) is now used **only** by the auto orchestrator bucket, where `approved` guards it — its doc comment says so. The explicit path never interprets `mergeableState` beyond `=== 'clean'` in the orchestrator's armed bucket. Decision 3 ("tool aligns to the orchestrator's looser condition") is **reversed**: the tool no longer calls `isMergeReadyPerGithub` at all. Decision 6's non-auto branch arms instead of gating on readiness; its auto branch (AC6, direct merge) reverts to a `clean`-only check. Decision 7's resolution arms + triggers a check instead of merging inline.
+
+**Independent defect fixed in the same revision — CLI approval 400.** The API route requires `github`+`pr_number` for `type:'merge'` (Decision 6/7 atomicity), and Slack encodes them in the button value, but the CLI approval path sent neither: `src/cli/api.ts` `sendApproval` posted only `{type, approve}`, and the `approval:requested` event (`task.ts:587`) carried only `{text, approvalType}`. A CLI Approve on a merge prompt 400'd (blank screen). Fix: the merge `approval:requested` event carries `github`+`pr_number`; the CLI captures them and `sendApproval` sends them; the CLI type unions widen to include `'merge'`. This is orthogonal to arming and needed regardless.
+
 ## Decisions
 
 ### 1. `autoMerge` lives on each repo entry, threaded through both explicit copy points
