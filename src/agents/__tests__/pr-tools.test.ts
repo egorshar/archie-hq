@@ -837,3 +837,33 @@ describe('dispatch_workflow — capability gating', () => {
     expect(result.content[0].text).toContain('https://gl/-/pipelines/42');
   });
 });
+
+describe('run_manual_job — capability + gating', () => {
+  const makeHost = (manualJobs: boolean) => ({
+    kind: 'gitlab' as const,
+    capabilities: vi.fn().mockReturnValue({
+      reviewStates: false, securityAlerts: false, nativeAutoMerge: true, reReviewRequest: false,
+      workflowDispatch: true, manualJobs,
+    }),
+    runManualJob: vi.fn().mockResolvedValue({ id: 12, url: 'https://gl/-/jobs/12', status: 'pending' }),
+  });
+  beforeEach(() => { vi.clearAllMocks(); });
+
+  it('short-circuits when manualJobs is off (no API call)', async () => {
+    const host = makeHost(false);
+    vi.mocked(getGitHubClient).mockReturnValue(host as any);
+    const tool = getRepoTool(makeAgent(), makeTask(), 'run_manual_job');
+    const result = await tool({ repo: 'g/p', pr_number: 1667, job_name: 'Ready to prod' }, {});
+    expect(result.content[0].text).toMatch(/not available/i);
+    expect(host.runManualJob).not.toHaveBeenCalled();
+  });
+
+  it('plays the job and returns its url when enabled', async () => {
+    const host = makeHost(true);
+    vi.mocked(getGitHubClient).mockReturnValue(host as any);
+    const tool = getRepoTool(makeAgent(), makeTask(), 'run_manual_job');
+    const result = await tool({ repo: 'walli/sweed/web-ui-cashier-ci', pr_number: 1667, job_name: 'Ready to prod' }, {});
+    expect(host.runManualJob).toHaveBeenCalledWith('walli/sweed/web-ui-cashier-ci', 1667, 'Ready to prod');
+    expect(result.content[0].text).toContain('https://gl/-/jobs/12');
+  });
+});

@@ -1373,6 +1373,39 @@ function createDispatchWorkflowTool(agent: Agent, task: Task) {
   );
 }
 
+function createRunManualJobTool(agent: Agent, task: Task) {
+  return tool(
+    'run_manual_job',
+    'Play a manual (gated) CI job by name in a merge/pull request\'s pipeline — e.g. a "Ready to prod" release-deploy job. ' +
+    'Pass the repo, the MR/PR number, and the exact job name. Runs in-process (no token in the agent). ' +
+    'Returns the played job\'s id, url, and status.',
+    {
+      // Free target repo (not resolveGithub): the caller plays a job on an arbitrary repo's MR,
+      // not necessarily its own bound repo — same rationale as dispatch_workflow.
+      repo: z.string().describe('Repo "group/project" (GitLab) or "owner/name" (GitHub) whose MR pipeline holds the job.'),
+      pr_number: z.number().describe('The merge/pull request number whose pipeline holds the manual job.'),
+      job_name: z.string().describe('Exact name of the manual job to play, e.g. "Ready to prod".'),
+    },
+    async (args) => {
+      const client = getRepoHost();
+      if (!client) throw new Error('Repo host not configured');
+      if (!client.capabilities().manualJobs) {
+        return err(`Running manual jobs is not available on this repo host (${client.kind}).`);
+      }
+      let res;
+      try {
+        res = await client.runManualJob(args.repo, args.pr_number, args.job_name);
+      } catch (e) {
+        return err(e instanceof Error ? e.message : String(e));
+      }
+      return ok(
+        `Played "${args.job_name}" on ${args.repo} !${args.pr_number}` +
+        (res.url ? ` — ${res.url}` : '') + (res.status ? ` (${res.status})` : ''),
+      );
+    },
+  );
+}
+
 function createGetCodeScanningAlertTool(agent: Agent, task: Task) {
   return tool(
     'get_code_scanning_alert',
@@ -2683,6 +2716,7 @@ export function createRepoToolsMcpServer(agent: Agent, task: Task) {
       createGetCodeScanningAlertTool(agent, task),
       // CI dispatch
       createDispatchWorkflowTool(agent, task),
+      createRunManualJobTool(agent, task),
       // PR write
       createPushBranchTool(agent, task),
       createPullRequestTool(agent, task),

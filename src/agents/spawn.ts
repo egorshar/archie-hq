@@ -210,6 +210,7 @@ export const REPO_TOOLS_REQUIRING_EDIT_MODE = [
   // CI dispatch — triggers a real pipeline/feature-stand deploy, so it's a
   // write action even though it doesn't touch git state directly.
   'mcp__repo-tools__dispatch_workflow',
+  'mcp__repo-tools__run_manual_job',
 ];
 
 /**

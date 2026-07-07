@@ -172,6 +172,7 @@ const SPAWN_REPO_TOOLS = [
   'mcp__repo-tools__get_code_scanning_alert',
   // CI dispatch
   'mcp__repo-tools__dispatch_workflow',
+  'mcp__repo-tools__run_manual_job',
   // PR write
   'mcp__repo-tools__push_branch',
   'mcp__repo-tools__create_pull_request',
@@ -232,6 +233,7 @@ describe('read-only edit-mode gate', () => {
     expect(REPO_TOOLS_REQUIRING_EDIT_MODE.sort()).toEqual(
       [
         'mcp__repo-tools__dispatch_workflow',
+        'mcp__repo-tools__run_manual_job',
         'mcp__repo-tools__push_branch',
         'mcp__repo-tools__create_pull_request',
         'mcp__repo-tools__update_pr',
