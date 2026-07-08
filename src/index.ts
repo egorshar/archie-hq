@@ -18,6 +18,7 @@ import 'dotenv/config';
 import { createRequire } from 'module';
 import http from 'node:http';
 import { readdirSync } from 'fs';
+import { cloneExists } from './connectors/github/repo-clone.js';
 const require = createRequire(import.meta.url);
 const express = require('express');
 
@@ -127,19 +128,27 @@ async function main(): Promise<void> {
     // be before any agent spawns so getProbeBaseUrl() is live at spawn time.
     startContextProbe();
 
-    // Clone repos declared by plugins (every entry across every repo agent,
-    // deduplicated by github identifier).
     const agentDefs = getAllAgentDefs();
     const repoDefs = agentDefs.filter(isRepoAgent);
-    const byGithub = new Map<string, { github: string; baseBranch: string }>();
-    for (const def of repoDefs) {
-      for (const entry of def.repo!.repos) {
-        if (!byGithub.has(entry.github)) {
-          byGithub.set(entry.github, { github: entry.github, baseBranch: entry.baseBranch });
+
+    // Repos are cloned LAZILY on first agent spawn (setupSharedClone →
+    // ensureBaseCache), so startup does no git and scales to any number of
+    // declared repos. Set ARCHIE_EAGER_CLONE=true to pre-warm every declared
+    // repo at startup instead (faster first task, but slow/fragile at scale).
+    if (/^(1|true|yes)$/i.test(process.env.ARCHIE_EAGER_CLONE ?? '')) {
+      const byGithub = new Map<string, { github: string; baseBranch: string }>();
+      for (const def of agentDefs.filter(isRepoAgent)) {
+        for (const entry of def.repo!.repos) {
+          if (!byGithub.has(entry.github)) {
+            byGithub.set(entry.github, { github: entry.github, baseBranch: entry.baseBranch });
+          }
         }
       }
+      logger.system(`Eager clone: pre-warming ${byGithub.size} declared repo(s)`);
+      await cloneRepos([...byGithub.values()]);
+    } else {
+      logger.system('Repos clone lazily on first agent spawn (set ARCHIE_EAGER_CLONE=true to pre-warm at startup)');
     }
-    await cloneRepos([...byGithub.values()]);
 
     // Log loaded plugins and agents
     const plugins = getPlugins();
@@ -176,8 +185,11 @@ async function main(): Promise<void> {
       logger.plain(`  [${def.pluginName}] ${def.id} (${def.visibility}) — ${def.role}`);
       const primary = def.repo!.primary;
       const primaryPath = join(REPOS_DIR, primary);
-      const gitName = await configureGitIdentity(primaryPath);
-      logger.plain(`    primary: ${primary} (${primaryPath})`);
+      // With lazy cloning the base repo may not exist yet — only configure the
+      // git identity if it's already cloned; otherwise it's set at spawn time.
+      const cloned = await cloneExists(primaryPath);
+      const gitName = cloned ? await configureGitIdentity(primaryPath) : null;
+      logger.plain(`    primary: ${primary} (${primaryPath})${cloned ? '' : ' [not cloned yet — lazy]'}`);
       if (gitName) {
         logger.plain(`    git: ${gitName}`);
       }
