@@ -1350,6 +1350,32 @@ export class Task {
   private async ensureAgentSpawned(agentName: AgentName): Promise<void> {
     let agent = this.agentProcesses.get(agentName);
 
+    // Reconcile a repo agent that booted read-only just as edit mode was
+    // approved. A repo agent's sandbox mount and repo-tool allowlist are frozen
+    // from edit_allowed at spawn time (spawn.ts), so it can't gain write access
+    // without a fresh spawn. handleEditModeApproval restarts the repo agents that
+    // are running at approval, but one still mid-boot then (no live handle yet)
+    // slips past its isRunning check, finishes booting read-only, and stays that
+    // way — create_branch and every other write is denied. Catch it here the
+    // moment work is next delivered: tear it down (abort + stop its queue, the
+    // pairing the rest of the teardown paths use) and drop it, so the fresh spawn
+    // below comes up writable. Sync its session across first so the replacement
+    // resumes the same SDK session rather than cold-starting. PM is not a repo
+    // agent, so it is never reconciled.
+    if (
+      agent &&
+      isRepoAgent(agent.def) &&
+      this.metadata.edit_allowed === true &&
+      agent.editModeAtSpawn === false
+    ) {
+      agent.handle?.abort();
+      agent.queue.stop();
+      this.metadata.agent_sessions[agentName] = { ...agent.session };
+      this.agentProcesses.delete(agentName);
+      logger.system(`Edit mode approved — restarting ${agentName} for a writable mount`);
+      agent = undefined;
+    }
+
     if (!agent) {
       const def = this.team.find((d) => d.id === agentName);
       if (!def) {

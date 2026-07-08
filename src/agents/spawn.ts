@@ -360,6 +360,11 @@ Shared folder: ${sharedPath} [READ-ONLY]
   } else if (isRepoAgent(def)) {
     // ---- Repo access attached ----
     const editAllowed = metadata.edit_allowed === true;
+    // Record what edit mode this process is being built under. The sandbox mount
+    // and repo-tool allowlist below are frozen from this snapshot, so Agent.spawn
+    // can compare it against the live flag to detect (and re-spawn) an agent that
+    // booted read-only just as edit mode was approved.
+    agent.editModeAtSpawn = editAllowed;
 
     // Ensure metadata.repositories[agentId] is an array; defaults to [primary]
     // on first spawn so single-repo behaviour matches the pre-v30 world.
