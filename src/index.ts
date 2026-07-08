@@ -131,11 +131,11 @@ async function main(): Promise<void> {
     const agentDefs = getAllAgentDefs();
     const repoDefs = agentDefs.filter(isRepoAgent);
 
-    // Repos are cloned LAZILY on first agent spawn (setupSharedClone →
-    // ensureBaseCache), so startup does no git and scales to any number of
-    // declared repos. Set ARCHIE_EAGER_CLONE=true to pre-warm every declared
-    // repo at startup instead (faster first task, but slow/fragile at scale).
-    if (/^(1|true|yes)$/i.test(process.env.ARCHIE_EAGER_CLONE ?? '')) {
+    // Repos may be cloned LAZILY on first agent spawn (setupSharedClone →
+    // ensureBaseCache).
+    // Set ARCHIE_EAGER_CLONE=false to not pre-warm every declared
+    // repo at startup.
+    if (process.env.ARCHIE_EAGER_CLONE !== 'false') {
       const byGithub = new Map<string, { github: string; baseBranch: string }>();
       for (const def of agentDefs.filter(isRepoAgent)) {
         for (const entry of def.repo!.repos) {
