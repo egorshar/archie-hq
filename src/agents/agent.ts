@@ -33,6 +33,17 @@ export class Agent {
    * keeping a single source of truth instead of duplicating per-tool path lists.
    */
   sandbox?: SandboxOptions;
+  /**
+   * Whether edit mode was in effect when this agent's *current* SDK process was
+   * spawned (repo agents only; `undefined` for non-repo agents and before the
+   * first spawn). A repo agent's sandbox mount and repo-tool allowlist are
+   * frozen from `metadata.edit_allowed` at spawn time, so a process that booted
+   * read-only can never write — it must be re-spawned. `Task.ensureAgentSpawned`
+   * reads this to restart an agent that booted read-only just as edit mode was
+   * approved — the mid-boot window `handleEditModeApproval`'s restart loop can't
+   * catch, because the agent has no live handle yet while it is still booting.
+   */
+  editModeAtSpawn?: boolean;
 
   /**
    * In-flight background task ids (SDK `task_started` → `task_notification`): a
