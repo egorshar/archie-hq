@@ -42,5 +42,12 @@ npm-debug.log*
 coverage/
 .nyc_output/
 
-# Opt-in extra CA for TLS-intercepting proxies (build needs it for npm; not a secret)
+# Keep the tracked placeholder in the build context so Dockerfile.dev's
+# `COPY secrets/` succeeds on a fresh clone. secrets/ is excluded above, and
+# extra-ca.crt is gitignored (absent until an operator drops one), so without
+# this the context's secrets/ would be empty and the COPY would fail with
+# "/secrets: not found". .gitkeep is tracked, so it's always present.
+!secrets/.gitkeep
+# Opt-in extra CA for TLS-intercepting proxies (build needs it for npm; not a secret).
+# When present it's a non-empty PEM; Dockerfile.dev's `[ -s ]` guard skips the empty case.
 !secrets/extra-ca.crt
