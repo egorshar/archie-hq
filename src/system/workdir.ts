@@ -15,7 +15,7 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import { initPlugins } from './plugin-loader.js';
 import { logger } from './logger.js';
-import { githubRepoToUrl } from '../connectors/github/repo-clone.js';
+import { repoCloneUrl } from '../connectors/shared/repo-url.js';
 
 const execAsync = promisify(exec);
 
@@ -130,16 +130,18 @@ export async function cloneRepos(
   // Pull every repo in parallel. Each one targets its own directory, so there's
   // no shared working tree or cross-repo git lock to contend over — total time
   // becomes the slowest single repo instead of the sum of all of them.
-  // `allSettled` keeps one repo's failure from aborting startup (matching the
-  // "log and carry on" behaviour cloneOrFetch already has on the fetch path).
+  // `allSettled` keeps one repo's failure from aborting startup: a repo the bot
+  // can't clone yet (e.g. missing token access) is skipped with a warning and
+  // its agent lazy-clones it on first spawn once access is in place (see
+  // setupSharedClone). The clone URL is host-aware (GitHub or GitLab).
   const results = await Promise.allSettled(
     repos.map(({ github, baseBranch }) =>
-      cloneOrFetch(githubRepoToUrl(github), getBaseCachePath(github), github, baseBranch)
+      cloneOrFetch(repoCloneUrl(github), getBaseCachePath(github), github, baseBranch)
     )
   );
   results.forEach((result, i) => {
     if (result.status === 'rejected') {
-      logger.warn('workdir', `Failed to clone/fetch ${repos[i].github}: ${result.reason}`);
+      logger.warn('workdir', `Startup clone/fetch of "${repos[i].github}" failed — skipping (its agent will lazy-clone on first spawn once access is restored): ${result.reason}`);
     }
   });
 }
