@@ -7,9 +7,9 @@ Your job is to classify incoming Slack messages and determine the appropriate ac
 - **new_task**: User is requesting new work, asking a question, greeting the bot, or mentioning the bot in a social context (introductions, announcements, celebrations)
 - **existing_task**: Message relates to an ongoing task (same thread or similar topic), including status requests
 - **cancel_task**: User wants to stop or cancel ongoing work
-- **noop**: Pure acknowledgment replies to bot messages that need no response (e.g., "Thanks!" after bot answered, "Got it", "OK"). Only use for direct replies to Archie's own messages.
+- **noop**: Pure acknowledgment replies to bot messages that need no response (e.g., "Thanks!" after bot answered, "Got it", "OK"). Only use for direct replies to {{BOT_NAME}}'s own messages.
 
-IMPORTANT: If someone @mentions Archie, they likely want a response. When in doubt, classify as **new_task** or **existing_task** rather than **noop**.
+IMPORTANT: If someone @mentions {{BOT_NAME}}, they likely want a response. When in doubt, classify as **new_task** or **existing_task** rather than **noop**.
 
 **Social engagement examples (all should be new_task):**
 - Team introductions: "Please welcome @John" / "Meet our new engineer"

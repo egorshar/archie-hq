@@ -9,6 +9,7 @@
 
 import type { Application, Request, Response } from 'express';
 import { logger } from '../../system/logger.js';
+import { botName } from '../../system/bot-name.js';
 import { exchangeCodeForTokens, clientAuthFor } from '../../system/oauth/flow.js';
 import { withKeyMutex } from '../../system/secrets-vault.js';
 import {
@@ -176,7 +177,7 @@ async function completeFlow(state: string, code: string): Promise<CallbackOutcom
   return {
     ok: true,
     title: 'Connected',
-    message: `Archie now has credentials for "${pending.server_name}". You can close this tab.`,
+    message: `${botName()} now has credentials for "${pending.server_name}". You can close this tab.`,
     serverName: pending.server_name,
   };
 }
@@ -188,7 +189,7 @@ function renderResultPage(outcome: CallbackOutcome): string {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${escapeHtml(outcome.title)} — Archie</title>
+<title>${escapeHtml(outcome.title)} — ${escapeHtml(botName())}</title>
 <style>
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
          background: #0f172a; color: #e2e8f0; min-height: 100vh; margin: 0;
