@@ -8,50 +8,10 @@
  * re-validates with its own schema, per the port contract). All opencode
  * imports are confined to this module (spec R4).
  */
-import { createOpencode } from '@opencode-ai/sdk';
 import type { LlmOneShot, LlmTextRequest, LlmJsonRequest } from '../../ports/llm-one-shot.js';
 import { logger } from '../../system/logger.js';
 import { resolveOpencodeModel } from './model.js';
-
-type OpencodeClient = Awaited<ReturnType<typeof createOpencode>>['client'];
-
-let clientPromise: Promise<OpencodeClient> | null = null;
-
-/** Lazily start (once) and reuse the embedded opencode server's client. */
-function getClient(): Promise<OpencodeClient> {
-  if (!clientPromise) {
-    // port 0 → an ephemeral free port (the SDK parses the actual URL the server
-    // prints). Avoids colliding with the default 4096 when a prior embedded
-    // server lingers or multiple instances run.
-    clientPromise = createOpencode({ port: 0 })
-      .then((r) => r.client)
-      .catch((err) => {
-        clientPromise = null; // allow a later call to retry a failed startup
-        throw err;
-      });
-  }
-  return clientPromise;
-}
-
-/** Concatenate the text parts of a session.prompt() response, or null on error. */
-function readText(res: { data?: any; error?: unknown }): string | null {
-  if (res?.error) {
-    logger.error('opencode', `prompt HTTP error: ${JSON.stringify(res.error)}`);
-    return null;
-  }
-  const info = res?.data?.info;
-  if (info?.error) {
-    logger.error('opencode', `prompt failed: ${info.error.name ?? 'error'}`);
-    return null;
-  }
-  const parts = Array.isArray(res?.data?.parts) ? res.data.parts : [];
-  const text = parts
-    .filter((p: any) => p?.type === 'text' && typeof p.text === 'string')
-    .map((p: any) => p.text)
-    .join('')
-    .trim();
-  return text ? text : null;
-}
+import { getOpencodeClient, concatPromptText } from './server.js';
 
 export class OpencodeLlmOneShot implements LlmOneShot {
   readonly kind = 'opencode' as const;
@@ -59,7 +19,7 @@ export class OpencodeLlmOneShot implements LlmOneShot {
   async text(req: LlmTextRequest): Promise<string | null> {
     try {
       const model = resolveOpencodeModel(req.model);
-      const client = await getClient();
+      const client = await getOpencodeClient();
       const created = await client.session.create({ body: { title: 'archie-one-shot' } });
       const sessionId = (created as any)?.data?.id;
       if (!sessionId) {
@@ -74,7 +34,7 @@ export class OpencodeLlmOneShot implements LlmOneShot {
           ...(req.systemPrompt ? { system: req.systemPrompt } : {}),
         },
       });
-      return readText(res as any);
+      return concatPromptText(res);
     } catch (err) {
       logger.error('opencode', `one-shot text() failed: ${(err as Error).message}`);
       return null;
