@@ -186,72 +186,78 @@ async function extractTaskUsernames(taskId: string): Promise<import('../memory/t
   }
 }
 
-// ---- Main spawner ----
+// ---- Runtime-neutral launch context ----
 
 /**
- * Spawn an agent. Branches on the agent's capabilities (PM coordinator vs. repo
- * access vs. plain plugin) for all behavior. Sets agent.handle on success.
+ * A single attached repository as mounted for a repo agent's spawn: its clone
+ * location, the read-only base-repo objects path (for the alternates-based
+ * sandbox allowlist), and the branch it's currently checked out to.
  */
-export async function spawnAgent(agent: Agent, task: Task): Promise<void> {
+export interface RepoMount {
+  github: string;
+  clonePath: string;
+  baseObjectsPath: string;
+  currentBranch: string;
+  baseBranch: string;
+}
+
+/**
+ * The runtime-neutral result of preparing an agent for launch: the enriched
+ * system prompt, workspace cwd, extra directories the agent needs visibility
+ * into, and the filesystem/network sandbox boundaries. Shared by every
+ * AgentRuntime (Claude today; opencode later) so the prompt/workspace/sandbox
+ * computation is written once.
+ */
+export interface AgentLaunchContext {
+  systemPrompt: string;
+  cwd: string;
+  additionalDirectories: string[];
+  sandboxOpts: SandboxOptions;
+  /**
+   * Repo-agent extras (undefined for PM/plugin agents). The Claude assembly in
+   * spawnAgent uses these to build the repo-tools MCP server and the read-only
+   * disallowedTools list; the future opencode tool bridge (P2-B) will reuse them.
+   */
+  repo?: { editAllowed: boolean; repoMounts: RepoMount[]; allClonePaths: string[] };
+}
+
+/**
+ * Compute the runtime-neutral launch context for an agent: workspace setup,
+ * the branch-specific system prompt (PM coordinator vs. repo access vs. plain
+ * plugin), the additional directories the agent needs, the filesystem sandbox,
+ * and organizational-memory prompt enrichment. Also sets `agent.sandbox` — the
+ * single source of truth in-process tools validate paths against.
+ *
+ * `claudeReadDirs`/`claudeWriteDirs` are Claude-session-specific paths (the
+ * SDK's config/tmp dirs); callers for other runtimes pass `[]`.
+ */
+export async function prepareAgentContext(
+  agent: Agent,
+  task: Task,
+  opts: { claudeReadDirs: string[]; claudeWriteDirs: string[] },
+): Promise<AgentLaunchContext> {
   const { def } = agent;
   const taskId = task.taskId;
   const metadata = task.metadata;
   const sharedPath = getSharedPath(taskId);
-
-  // Mark active before any heavy work (clone setup, MCP init) to prevent
-  // false idle detection — recovery fires at 3s, MCP connections can take longer
-  task.updateAgentState(def.id, true);
-
-  // ---- SDK config/tmp dirs (agent reads tool-results from here) ----
-  // Only create for new tasks. Old tasks recovering won't have <taskId>/claude/
-  // on disk — skip to avoid breaking their sandbox config during transition.
-
-  const claudeBaseDir = join(getTaskPath(taskId), 'claude', def.key);
-  const claudeConfigDir = join(claudeBaseDir, 'session');
-  const claudeTmpDir = join(claudeBaseDir, 'tmp');
-  const hasClaudeDirs = existsSync(claudeBaseDir);
-  if (!agent.session.session_id) {
-    // Fresh spawn — create dirs
-    await mkdir(claudeConfigDir, { recursive: true });
-    await mkdir(claudeTmpDir, { recursive: true });
-  }
-  const useClaudeDirs = hasClaudeDirs || !agent.session.session_id;
+  const { claudeReadDirs, claudeWriteDirs } = opts;
 
   // ---- Shared scaffolding (all agents) ----
   //
-  // Every agent gets a workspace, the same research-tools server, the same base
-  // tool set, and the same base filesystem boundaries. Repo access and the PM
-  // coordinator role are layered on top of this.
+  // Every agent gets a workspace and the same base filesystem boundaries. Repo
+  // access and the PM coordinator role are layered on top of this.
 
   const workspace = await setupAgentWorkspace(taskId, agent);
   const cwd = workspace;
-  // Default non-PM agents to sonnet with the 1M context window. The `[1m]`
-  // suffix is how the SDK enables it (it strips the suffix and adds the
-  // `context-1m-2025-08-07` beta); plain `sonnet` caps at 200K and overflows
-  // on the large injected system prompt. Opus is 1M natively, no suffix needed.
-  // (Resolution shared with the footer via resolveAgentModel.)
-  const model = resolveAgentModel(def);
-  const tools = def.tools;
 
   const pluginPaths = def.pluginPath ? [def.pluginPath] : [];
   const pluginReadPaths = [...pluginPaths, ...(def.pluginDataPath ? [def.pluginDataPath] : [])];
-  const claudeReadDirs = useClaudeDirs ? [claudeConfigDir, claudeTmpDir] : [];
-  const claudeWriteDirs = useClaudeDirs ? [claudeTmpDir] : [];
   const protectedWorkspaceFiles = [
     join(workspace, '.claude', 'settings.json'),
     join(workspace, '.claude', 'skills'),
     join(workspace, '.claude', 'hooks'),
     join(workspace, 'CLAUDE.md'),
   ];
-
-  const researchServer = createResearchMcpServer({
-    getTaskId: () => taskId,
-    getResearchesDir: () => join(getTaskPath(taskId), 'researches'),
-    getCallerAgentId: () => def.id,
-    checkResearchBudget: () => task.checkResearchBudget(),
-    incrementResearchCount: () => task.incrementResearchCount(),
-    onResearchBudgetExceeded: () => task.onResearchBudgetExceeded(agent),
-  });
 
   // ---- Per-agent config ----
   //
@@ -261,18 +267,6 @@ export async function spawnAgent(agent: Agent, task: Task): Promise<void> {
 
   let systemPrompt: string;
   let additionalDirectories: string[] = [sharedPath, ...pluginPaths];
-  // Cron* are harness tools that only live for the current Claude session — they
-  // die when the agent's ephemeral subprocess exits (which is every time a turn
-  // ends), so a scheduled job never fires. An agent reaching for them to "monitor"
-  // or "check back later" silently gets nothing (observed: task-20260617-1454-i1a08v
-  // set a self-re-arming cron that died at turn-end and never woke for 6 days).
-  // Block them so agents use the durable `set_reminder` instead. Native recurring
-  // triggers are planned separately.
-  let disallowedTools: string[] = [
-    'WebSearch', 'WebFetch',
-    'CronCreate', 'CronList', 'CronDelete',
-    ...(def.disallowedTools || []),
-  ];
   let sandboxOpts: SandboxOptions = {
     cwd,
     denyReadPaths: [WORKDIR],
@@ -281,13 +275,7 @@ export async function spawnAgent(agent: Agent, task: Task): Promise<void> {
     denyWritePaths: [sharedPath, ...pluginPaths, ...protectedWorkspaceFiles],
     allowedNetworkDomains: def.allowedNetworkDomains,
   };
-  // Base servers every agent gets; branches add their own (repo-tools, the PM
-  // coordinator servers, etc.) on top.
-  const mcpServers: Record<string, any> = {
-    ...(def.mcpServers || {}),
-    'agent-tools': createBaseAgentMcpServer(agent, task),
-    'research-tools': researchServer,
-  };
+  let repo: AgentLaunchContext['repo'];
 
   if (isPmAgent(def)) {
     // ---- PM coordinator ----
@@ -364,10 +352,6 @@ Shared folder: ${sharedPath} [READ-ONLY]
     if (def.pmOverlayPrompt) {
       systemPrompt = `${systemPrompt}\n\n${def.pmOverlayPrompt}`;
     }
-
-    mcpServers['comms-tools'] = createCommsMcpServer(agent, task);
-    mcpServers['orchestration-tools'] = createOrchestrationMcpServer(agent, task);
-    mcpServers['scheduling-tools'] = createSchedulingMcpServer(agent, task);
   } else if (isRepoAgent(def)) {
     // ---- Repo access attached ----
     const editAllowed = metadata.edit_allowed === true;
@@ -398,7 +382,7 @@ Shared folder: ${sharedPath} [READ-ONLY]
     }
 
     // Set up each declared repo: prepare clone, hydrate branch state.
-    const repoMounts: Array<{ github: string; clonePath: string; baseObjectsPath: string; currentBranch: string; baseBranch: string }> = [];
+    const repoMounts: RepoMount[] = [];
     for (const entry of def.repo!.repos) {
       const att = attached.find((a) => a.github === entry.github)!;
       const baseBranch = entry.baseBranch || 'main';
@@ -480,26 +464,7 @@ Shared folder: ${sharedPath} [READ-ONLY]
 
     const allClonePaths = repoMounts.map((m) => m.clonePath);
     additionalDirectories = [...allClonePaths, ...additionalDirectories];
-    mcpServers['repo-tools'] = createRepoToolsMcpServer(agent, task);
-
-    disallowedTools = [
-      ...disallowedTools,
-      ...(editAllowed
-        ? []
-        : [
-            'mcp__repo-tools__push_branch',
-            'mcp__repo-tools__create_pull_request',
-            'mcp__repo-tools__update_pr',
-            'mcp__repo-tools__add_pr_comment',
-            'mcp__repo-tools__add_review_comment',
-            'mcp__repo-tools__reply_to_review_comment',
-            'mcp__repo-tools__resolve_review_thread',
-            'mcp__repo-tools__request_re_review',
-            'mcp__repo-tools__merge_pull_request',
-            'mcp__repo-tools__close_pull_request',
-            'mcp__repo-tools__create_branch',
-          ]),
-    ];
+    repo = { editAllowed, repoMounts, allClonePaths };
 
     // Repo agents extend the base sandbox with every attached clone (RW in edit
     // mode) plus per-repo read-only/protected paths.
@@ -529,16 +494,6 @@ Shared folder: ${sharedPath} [READ-ONLY]
     systemPrompt = await generatePluginAgentPrompt(agent, task);
   }
 
-  // Plugin agents carry the domain/admin MCP servers that sometimes need a
-  // local file's bytes (e.g. uploading an image). Give them the file bridge
-  // so they can forward file contents into those calls without routing bytes
-  // through the model. Bounded to servers the agent already has.
-  if (shouldAttachFileBridge(def)) {
-    // The bridge resolves targets from this same live map at call time, so it
-    // sees OAuth-bound headers and never reaches servers dropped below.
-    mcpServers['file-bridge'] = createFileBridgeMcpServer(agent, task, mcpServers);
-  }
-
   // ---- Organizational memory injection (read path; gated by ARCHIE_MEMORY_INJECT, default off) ----
   const taskTitle = metadata.title ?? undefined;
   const memorySelectors = isPmAgent(def)
@@ -553,6 +508,120 @@ Shared folder: ${sharedPath} [READ-ONLY]
   // `share_artifact`, `post_to_user` artifact_paths) can validate paths against
   // the same boundaries the OS sandbox + filesystem-guard hooks enforce.
   agent.sandbox = sandboxOpts;
+
+  return { systemPrompt, cwd, additionalDirectories, sandboxOpts, repo };
+}
+
+// ---- Main spawner ----
+
+/**
+ * Spawn an agent. Branches on the agent's capabilities (PM coordinator vs. repo
+ * access vs. plain plugin) for all behavior. Sets agent.handle on success.
+ */
+export async function spawnAgent(agent: Agent, task: Task): Promise<void> {
+  const { def } = agent;
+  const taskId = task.taskId;
+  const metadata = task.metadata;
+
+  // Mark active before any heavy work (clone setup, MCP init) to prevent
+  // false idle detection — recovery fires at 3s, MCP connections can take longer
+  task.updateAgentState(def.id, true);
+
+  // ---- SDK config/tmp dirs (agent reads tool-results from here) ----
+  // Only create for new tasks. Old tasks recovering won't have <taskId>/claude/
+  // on disk — skip to avoid breaking their sandbox config during transition.
+
+  const claudeBaseDir = join(getTaskPath(taskId), 'claude', def.key);
+  const claudeConfigDir = join(claudeBaseDir, 'session');
+  const claudeTmpDir = join(claudeBaseDir, 'tmp');
+  const hasClaudeDirs = existsSync(claudeBaseDir);
+  if (!agent.session.session_id) {
+    // Fresh spawn — create dirs
+    await mkdir(claudeConfigDir, { recursive: true });
+    await mkdir(claudeTmpDir, { recursive: true });
+  }
+  const useClaudeDirs = hasClaudeDirs || !agent.session.session_id;
+
+  // Default non-PM agents to sonnet with the 1M context window. The `[1m]`
+  // suffix is how the SDK enables it (it strips the suffix and adds the
+  // `context-1m-2025-08-07` beta); plain `sonnet` caps at 200K and overflows
+  // on the large injected system prompt. Opus is 1M natively, no suffix needed.
+  // (Resolution shared with the footer via resolveAgentModel.)
+  const model = resolveAgentModel(def);
+  const tools = def.tools;
+
+  const researchServer = createResearchMcpServer({
+    getTaskId: () => taskId,
+    getResearchesDir: () => join(getTaskPath(taskId), 'researches'),
+    getCallerAgentId: () => def.id,
+    checkResearchBudget: () => task.checkResearchBudget(),
+    incrementResearchCount: () => task.incrementResearchCount(),
+    onResearchBudgetExceeded: () => task.onResearchBudgetExceeded(agent),
+  });
+
+  const claudeReadDirs = useClaudeDirs ? [claudeConfigDir, claudeTmpDir] : [];
+  const claudeWriteDirs = useClaudeDirs ? [claudeTmpDir] : [];
+
+  const ctx = await prepareAgentContext(agent, task, { claudeReadDirs, claudeWriteDirs });
+  const { systemPrompt, cwd, additionalDirectories, sandboxOpts } = ctx;
+
+  // Base MCP servers every agent gets; the PM coordinator and repo agents add
+  // their own on top.
+  const mcpServers: Record<string, any> = {
+    ...(def.mcpServers || {}),
+    'agent-tools': createBaseAgentMcpServer(agent, task),
+    'research-tools': researchServer,
+  };
+  // Cron* are harness tools that only live for the current Claude session — they
+  // die when the agent's ephemeral subprocess exits (which is every time a turn
+  // ends), so a scheduled job never fires. An agent reaching for them to "monitor"
+  // or "check back later" silently gets nothing (observed: task-20260617-1454-i1a08v
+  // set a self-re-arming cron that died at turn-end and never woke for 6 days).
+  // Block them so agents use the durable `set_reminder` instead. Native recurring
+  // triggers are planned separately.
+  let disallowedTools: string[] = [
+    'WebSearch', 'WebFetch',
+    'CronCreate', 'CronList', 'CronDelete',
+    ...(def.disallowedTools || []),
+  ];
+
+  if (isPmAgent(def)) {
+    mcpServers['comms-tools'] = createCommsMcpServer(agent, task);
+    mcpServers['orchestration-tools'] = createOrchestrationMcpServer(agent, task);
+    mcpServers['scheduling-tools'] = createSchedulingMcpServer(agent, task);
+  }
+
+  if (ctx.repo) {
+    mcpServers['repo-tools'] = createRepoToolsMcpServer(agent, task);
+    disallowedTools = [
+      ...disallowedTools,
+      ...(ctx.repo.editAllowed
+        ? []
+        : [
+            'mcp__repo-tools__push_branch',
+            'mcp__repo-tools__create_pull_request',
+            'mcp__repo-tools__update_pr',
+            'mcp__repo-tools__add_pr_comment',
+            'mcp__repo-tools__add_review_comment',
+            'mcp__repo-tools__reply_to_review_comment',
+            'mcp__repo-tools__resolve_review_thread',
+            'mcp__repo-tools__request_re_review',
+            'mcp__repo-tools__merge_pull_request',
+            'mcp__repo-tools__close_pull_request',
+            'mcp__repo-tools__create_branch',
+          ]),
+    ];
+  }
+
+  // Plugin agents carry the domain/admin MCP servers that sometimes need a
+  // local file's bytes (e.g. uploading an image). Give them the file bridge
+  // so they can forward file contents into those calls without routing bytes
+  // through the model. Bounded to servers the agent already has.
+  if (shouldAttachFileBridge(def)) {
+    // The bridge resolves targets from this same live map at call time, so it
+    // sees OAuth-bound headers and never reaches servers dropped below.
+    mcpServers['file-bridge'] = createFileBridgeMcpServer(agent, task, mcpServers);
+  }
 
   // Inject OAuth Bearer tokens into any HTTP/SSE MCP servers that have
   // a vault record. Drops entries whose tokens can't be refreshed.
