@@ -6,6 +6,7 @@ import { fetchTaskDetail, fetchTaskEvents, sendMessage, sendApproval } from '../
 import { MessageInput } from './MessageInput.js';
 import type { PrCardData } from '../../types/task.js';
 import { prCardSubtitle, CLI_PR_CARD_EMOJI } from '../../system/pr-card-format.js';
+import { renderMarkdown } from '../markdown.js';
 
 /**
  * Render a PR card from a `pr_card` event's data. Two lines: a colored title row
@@ -126,6 +127,8 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
   // Reserve lines: header(1) + agents(1) + margin(1) + indicator/gap(2) + input(1)
   const reservedLines = 6;
   const logHeight = Math.max(5, termHeight - reservedLines);
+  // Wrap width for rendered markdown (leave a small margin inside the log box).
+  const mdWidth = Math.max(40, (stdout?.columns ?? 80) - 2);
 
   // Build log lines with inline approvals
   const logLines: { node: React.ReactNode; approval?: { approvalType: 'edit_mode' | 'research_budget' | 'merge' | 'trigger' | 'max_mode'; eventIndex: number; github?: string; pr_number?: number; ref?: string } }[] = [];
@@ -150,7 +153,7 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
       switch (event.type) {
         case 'message':
           logLines.push({
-            node: (() => { const p = formatMessageParts(event.data.from as string, event.data.to as string, event.data.destination as string | undefined); const footer = event.data.footer as string | undefined; return <><Text dimColor>[{p.label}]</Text>{p.mention ? <Text color="cyan">{p.mention}</Text> : null} {event.data.message as string}{footer ? <Text dimColor>{'\n'}{footer}</Text> : null}</>; })(),
+            node: (() => { const p = formatMessageParts(event.data.from as string, event.data.to as string, event.data.destination as string | undefined); const footer = event.data.footer as string | undefined; return <><Text dimColor>[{p.label}]</Text>{p.mention ? <Text color="cyan">{p.mention}</Text> : null} <Text>{renderMarkdown(event.data.message as string, mdWidth)}</Text>{footer ? <Text dimColor>{'\n'}{footer}</Text> : null}</>; })(),
           });
           break;
         case 'pr_card': {
@@ -161,7 +164,7 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
         }
         case 'agent:log':
           logLines.push({
-            node: <Text dimColor>[{event.agentName}] {event.data.finding as string}</Text>,
+            node: <Text><Text dimColor>[{event.agentName}] </Text>{renderMarkdown(event.data.finding as string, mdWidth)}</Text>,
           });
           break;
         case 'agent:bg_task': {
