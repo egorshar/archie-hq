@@ -36,6 +36,7 @@
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@octokit/app": "^16.1.2",
     "@octokit/webhooks": "^14.2.0",
+    "@opencode-ai/sdk": "1.17.16",
     "@slack/bolt": "^4.6.0",
     "@slack/web-api": "^7.19.0",
     "chrono-node": "^2.9.0",

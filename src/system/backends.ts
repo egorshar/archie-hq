@@ -12,6 +12,7 @@ import { getGitHubClient } from '../connectors/github/client.js';
 import { GitLabHost } from '../connectors/gitlab/client.js';
 import { claudeSdkRuntime } from '../runtime/claude/runtime.js';
 import { claudeLlmOneShot } from '../runtime/claude/llm-one-shot.js';
+import { opencodeLlmOneShot } from '../runtime/opencode/llm-one-shot.js';
 import { logger } from './logger.js';
 
 export type RepoHostKind = 'github' | 'gitlab';
@@ -112,9 +113,11 @@ export function getAgentRuntime(): AgentRuntime {
 
 /**
  * The active LlmOneShot (one-shot prompt→text/JSON calls). Tied to the agent
- * runtime selection today (both are LLM-provider bindings) — Phase 0 has
- * only one provider, so this always resolves to the Claude SDK impl.
+ * runtime selection: opencode when AGENT_RUNTIME=opencode, otherwise the Claude
+ * SDK impl (default). AGENT_RUNTIME=opencode is still gated by
+ * assertBackendConfig() until the full opencode AgentRuntime lands (Phase 2),
+ * so this branch is exercised via unit tests / direct calls for now.
  */
 export function getLlmOneShot(): LlmOneShot {
-  return claudeLlmOneShot;
+  return resolveAgentRuntimeKind() === 'opencode' ? opencodeLlmOneShot : claudeLlmOneShot;
 }
