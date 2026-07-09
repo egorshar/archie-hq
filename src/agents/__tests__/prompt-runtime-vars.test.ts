@@ -21,16 +21,32 @@ describe('runtimePromptVars', () => {
 });
 
 describe('claude-render byte-identical regression', () => {
-  it('claude render of pm-agent still contains the exact Skill-tool instruction', async () => {
+  it('claude render of pm-agent still contains the exact Skill-tool instructions (all 4 templated clauses)', async () => {
     const out = await loadPrompt('pm-agent', {
       ...runtimePromptVars('claude'),
       TEAM_LIST: '',
       TEAM_EXPERTISE: '',
       PM_INTEGRATIONS: '',
     });
+    // Line-19 guidance paragraph (Task 4 original scope).
     expect(out).toContain(
       'You have domain-specific skills available via the `Skill` tool. Before delegating to any team member, you MUST load the relevant skill first — it contains the workflow, decision framework, and coordination patterns for that domain. Never delegate without first loading and reading the skill. If you\'re unsure which skill applies, list available skills by calling the `Skill` tool.'
     );
+    // The three additional clause-level Skill-tool instructions (Task 4 fix).
+    expect(out).toContain('- If NO: I must call `Skill` tool to load it before proceeding');
+    expect(out).toContain('- Action: [Load skill via `Skill` tool / Already loaded, using workflow from it]');
+    expect(out).toContain('- Load the relevant domain skill via `Skill` tool (e.g. engineering, marketing)');
+    expect(out).not.toContain('{{');
+  });
+
+  it('opencode render of pm-agent has NO `Skill`-tool reference and no unresolved vars', async () => {
+    const out = await loadPrompt('pm-agent', {
+      ...runtimePromptVars('opencode'),
+      TEAM_LIST: '',
+      TEAM_EXPERTISE: '',
+      PM_INTEGRATIONS: '',
+    });
+    expect(out).not.toMatch(/`Skill`/);
     expect(out).not.toContain('{{');
   });
 
@@ -62,6 +78,14 @@ describe('claude-render byte-identical regression', () => {
     expect(out).toContain('- **Glob** — Search for files by pattern');
     expect(out).toContain('- **Grep** — Search file contents by regex');
     expect(out).toContain('- **Skill** — Load and use domain-specific skills from your skills directory');
+    expect(out).not.toContain('{{');
+  });
+
+  it('opencode render of plugin-agent has NO `Skill`-tool reference and no unresolved vars', async () => {
+    const out = await loadPrompt('plugin-agent', runtimePromptVars('opencode'));
+    expect(out).not.toMatch(/`Skill`/);
+    // The Skill bullet is softened to a tool-free domain-guidance line.
+    expect(out).toContain('- Domain guidance is available in your context (AGENTS.md and the task briefing)');
     expect(out).not.toContain('{{');
   });
 });

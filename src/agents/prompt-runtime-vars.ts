@@ -20,6 +20,35 @@ const CLAUDE_SKILL_GUIDANCE =
 const OPENCODE_SKILL_GUIDANCE =
   'Domain-specific guidance for your team members is provided in your context (AGENTS.md and the task briefing). Consult it before delegating so you apply each domain\'s workflow and coordination patterns. There is no separate skill-loading step.';
 
+// Clause-level Skill-tool neutralization (design §4.4: "soften prompts that
+// reference the `Skill` tool"). Each var covers one distinct grammatical context
+// where a prompt tells the model to call the native `Skill` tool — which doesn't
+// exist under opencode (capabilities.skills = false). A single paragraph var
+// (SKILL_GUIDANCE) can't fit these mid-sentence/mid-checklist spots, so each gets
+// its own clause. CLAUDE values are the EXACT pre-change text (byte-identical
+// render); OPENCODE values are tool-free and point at the same in-context guidance
+// as OPENCODE_SKILL_GUIDANCE.
+
+// prompts/pm-agent.md — Skill Resolution reasoning checklist item.
+const CLAUDE_SKILL_CHECK_ACTION = 'If NO: I must call `Skill` tool to load it before proceeding';
+const OPENCODE_SKILL_CHECK_ACTION =
+  'If NO: consult the domain guidance in my context (AGENTS.md and the task briefing) before proceeding';
+
+// prompts/pm-agent.md — Skill Resolution analysis-template "Action" line.
+const CLAUDE_SKILL_RESOLUTION_ACTION =
+  'Action: [Load skill via `Skill` tool / Already loaded, using workflow from it]';
+const OPENCODE_SKILL_RESOLUTION_ACTION =
+  'Action: [Consult domain guidance in my context (AGENTS.md and the task briefing) / Already consulted, using its workflow]';
+
+// prompts/pm-agent.md — "New task from Slack" decision-framework first step.
+const CLAUDE_SKILL_DELEGATION_STEP = 'Load the relevant domain skill via `Skill` tool (e.g. engineering, marketing)';
+const OPENCODE_SKILL_DELEGATION_STEP =
+  'Consult the relevant domain guidance in your context (AGENTS.md and the task briefing; e.g. engineering, marketing)';
+
+// prompts/plugin-agent.md — Available Tools bullet (text after the "- " marker).
+const CLAUDE_SKILL_TOOL_BULLET = '**Skill** — Load and use domain-specific skills from your skills directory';
+const OPENCODE_SKILL_TOOL_BULLET = 'Domain guidance is available in your context (AGENTS.md and the task briefing)';
+
 export function runtimePromptVars(kind: RuntimeKind): Record<string, string> {
   const claude = kind === 'claude';
   return {
@@ -30,5 +59,9 @@ export function runtimePromptVars(kind: RuntimeKind): Record<string, string> {
     TOOL_WRITE: claude ? 'Write' : 'write',
     TOOL_BASH: claude ? 'Bash' : 'bash',
     SKILL_GUIDANCE: claude ? CLAUDE_SKILL_GUIDANCE : OPENCODE_SKILL_GUIDANCE,
+    SKILL_CHECK_ACTION: claude ? CLAUDE_SKILL_CHECK_ACTION : OPENCODE_SKILL_CHECK_ACTION,
+    SKILL_RESOLUTION_ACTION: claude ? CLAUDE_SKILL_RESOLUTION_ACTION : OPENCODE_SKILL_RESOLUTION_ACTION,
+    SKILL_DELEGATION_STEP: claude ? CLAUDE_SKILL_DELEGATION_STEP : OPENCODE_SKILL_DELEGATION_STEP,
+    SKILL_TOOL_BULLET: claude ? CLAUDE_SKILL_TOOL_BULLET : OPENCODE_SKILL_TOOL_BULLET,
   };
 }

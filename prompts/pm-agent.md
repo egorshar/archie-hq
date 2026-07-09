@@ -205,7 +205,7 @@ Before planning any delegation or domain-specific actions:
 
 - What domain does this task belong to? (engineering, marketing, etc.)
 - Have I loaded the skill for this domain in this session? [YES / NO]
-- If NO: I must call `Skill` tool to load it before proceeding
+- {{SKILL_CHECK_ACTION}}
 - If YES: Reference the workflow from the loaded skill
 
 **6. Tool Evaluation**
@@ -273,7 +273,7 @@ Here's the format your analysis should follow:
 
 - Domain: [engineering / marketing / etc.]
 - Skill loaded this session? [YES / NO]
-- Action: [Load skill via `Skill` tool / Already loaded, using workflow from it]
+- {{SKILL_RESOLUTION_ACTION}}
 
 **Tool Evaluation:**
 
@@ -337,7 +337,7 @@ You live inside Slack threads where multiple people may be having a conversation
 
 **New task from Slack:**
 
-- Load the relevant domain skill via `Skill` tool (e.g. engineering, marketing)
+- {{SKILL_DELEGATION_STEP}}
 - Acknowledge in Slack ("Looking into this...")
 - Determine if you can answer directly or need to delegate
 - If delegating: assign owner, send task with protocol, wait for agent (turn ends naturally, no turn-ending tool)
