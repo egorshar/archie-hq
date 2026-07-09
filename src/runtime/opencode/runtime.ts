@@ -13,7 +13,61 @@ import type { Agent } from '../../agents/agent.js';
 import type { Task } from '../../tasks/task.js';
 import { prepareAgentContext } from '../../agents/spawn.js';
 import { logger } from '../../system/logger.js';
-import { getOpencodeClient, concatPromptText, sharedRegistry } from './server.js';
+import { getOpencodeClient, concatPromptText, sharedRegistry, type OpencodeClient } from './server.js';
+
+/**
+ * Detect opencode's "session does not exist" signal from a prompt result — a
+ * stale stored session_id after a server restart / session GC. Checks the HTTP
+ * error status and the prompt info error name (the two places concatPromptText
+ * already inspects). Session-not-found is the ONE recoverable case; other
+ * errors surface normally. (Confirm the exact status/name against the P2-C spike.)
+ */
+export function isSessionNotFound(res: unknown): boolean {
+  const r = res as { error?: any; data?: { info?: { error?: { name?: string } } } };
+  if (r?.error?.status === 404) return true;
+  const name = r?.data?.info?.error?.name;
+  return typeof name === 'string' && /session.*not.*found|not.*found.*session/i.test(name);
+}
+
+/**
+ * Issue one prompt with session-not-found recovery: on a not-found result,
+ * discard the stale session, create a fresh one (re-register with the bridge),
+ * and retry the SAME prompt exactly once. A second not-found gives up (returns
+ * the failed result). Clearing agent.session.session_id here also means an outer
+ * recovery re-spawn starts fresh — removing the infinite "not found → recover →
+ * repeat" hot-loop at its source.
+ */
+export async function promptWithRecovery(args: {
+  client: OpencodeClient;
+  agent: Agent;
+  task: Task;
+  sessionId: string;
+  readOnly: boolean;
+  body: { parts: { type: 'text'; text: string }[]; system: string };
+  signal: AbortSignal;
+}): Promise<{ res: unknown; sessionId: string }> {
+  const { client, agent, task, readOnly, body, signal } = args;
+  let sessionId = args.sessionId;
+
+  let res = await client.session.prompt({ path: { id: sessionId }, body, signal });
+  if (!isSessionNotFound(res)) return { res, sessionId };
+
+  logger.warn(agent.def.id, `opencode session ${sessionId} not found — resetting and retrying once`);
+  sharedRegistry.delete(sessionId);
+  agent.session.session_id = undefined;
+  const created = await client.session.create({ body: { title: `archie-${task.taskId}-${agent.def.id}` } });
+  const fresh = (created as any)?.data?.id;
+  if (!fresh) {
+    logger.error(agent.def.id, 'opencode session.create returned no id during recovery');
+    return { res, sessionId };
+  }
+  sessionId = fresh;
+  agent.session.session_id = sessionId;
+  sharedRegistry.set(sessionId, { task, agent, readOnly });
+
+  res = await client.session.prompt({ path: { id: sessionId }, body, signal });
+  return { res, sessionId };
+}
 
 export class OpencodeRuntime implements AgentRuntime {
   readonly kind = 'opencode' as const;
@@ -108,11 +162,12 @@ export class OpencodeRuntime implements AgentRuntime {
           // `@hey-api` fetch-client convention) rather than a second argument.
           // No `body.model` here — opencode ignores it (spike.md §5); the model
           // is set once, server-wide, via `config.model` in server.ts.
-          const res = await client.session.prompt({
-            path: { id: sessionId },
+          const { res, sessionId: activeId } = await promptWithRecovery({
+            client, agent, task, sessionId, readOnly,
             body: { parts: [{ type: 'text', text }], system: systemPrompt },
             signal: abortController.signal,
           });
+          sessionId = activeId;
 
           if (firstResponse) {
             firstResponse = false;

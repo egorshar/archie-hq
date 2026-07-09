@@ -25,7 +25,7 @@ const { prepareAgentContext } = vi.hoisted(() => ({ prepareAgentContext: vi.fn()
 vi.mock('../../../agents/spawn.js', () => ({ prepareAgentContext }));
 
 import { MessageQueue } from '../../../agents/message-queue.js';
-import { OpencodeRuntime } from '../runtime.js';
+import { OpencodeRuntime, isSessionNotFound, promptWithRecovery } from '../runtime.js';
 
 function makeAgent() {
   return {
@@ -225,5 +225,61 @@ describe('OpencodeRuntime.spawn', () => {
     expect(seenSignal!.aborted).toBe(false);
     agent.handle.abort();
     expect(seenSignal!.aborted).toBe(true);
+  });
+});
+
+describe('isSessionNotFound', () => {
+  it('true on an HTTP 404 error result', () => {
+    expect(isSessionNotFound({ error: { status: 404 } })).toBe(true);
+  });
+  it('true when the prompt info error names a missing session', () => {
+    expect(isSessionNotFound({ data: { info: { error: { name: 'SessionNotFoundError' } } } })).toBe(true);
+  });
+  it('false on a normal successful result', () => {
+    expect(isSessionNotFound({ data: { info: {}, parts: [{ type: 'text', text: 'ok' }] } })).toBe(false);
+  });
+  it('false on an unrelated error', () => {
+    expect(isSessionNotFound({ data: { info: { error: { name: 'ProviderAuthError' } } } })).toBe(false);
+  });
+});
+
+describe('promptWithRecovery', () => {
+  it('resets the session and retries once on not-found', async () => {
+    const prompt = vi.fn()
+      .mockResolvedValueOnce({ error: { status: 404 } })
+      .mockResolvedValueOnce({ data: { info: {}, parts: [{ type: 'text', text: 'ok' }] } });
+    const create = vi.fn().mockResolvedValue({ data: { id: 'S2' } });
+    const client = { session: { prompt, create } } as any;
+    const agent = { def: { id: 'pm' }, session: { session_id: 'S1' } } as any;
+    const task = { taskId: 'T1' } as any;
+
+    const { res, sessionId } = await promptWithRecovery({
+      client, agent, task, sessionId: 'S1', readOnly: false,
+      body: { parts: [{ type: 'text', text: 'hi' }], system: 's' },
+      signal: new AbortController().signal,
+    });
+
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(prompt).toHaveBeenCalledTimes(2);
+    expect(sessionId).toBe('S2');
+    expect(agent.session.session_id).toBe('S2');
+    expect((res as any).data.parts[0].text).toBe('ok'); // res is the successful retry
+  });
+
+  it('gives up after a second not-found (no third prompt)', async () => {
+    const prompt = vi.fn().mockResolvedValue({ error: { status: 404 } });
+    const create = vi.fn().mockResolvedValue({ data: { id: 'S2' } });
+    const client = { session: { prompt, create } } as any;
+    const agent = { def: { id: 'pm' }, session: { session_id: 'S1' } } as any;
+    const task = { taskId: 'T1' } as any;
+
+    await promptWithRecovery({
+      client, agent, task, sessionId: 'S1', readOnly: false,
+      body: { parts: [{ type: 'text', text: 'hi' }], system: 's' },
+      signal: new AbortController().signal,
+    });
+
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(prompt).toHaveBeenCalledTimes(2); // initial + one retry, then stop
   });
 });
