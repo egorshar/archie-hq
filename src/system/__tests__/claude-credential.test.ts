@@ -1,8 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-const readFileSyncMock = vi.fn();
-vi.mock('fs', () => ({ readFileSync: (...a: unknown[]) => readFileSyncMock(...a) }));
-vi.mock('os', () => ({ homedir: () => '/home/test' }));
 const systemMock = vi.fn();
 vi.mock('../logger.js', () => ({ logger: { system: (m: string) => systemMock(m) } }));
 
@@ -16,7 +13,6 @@ const savedApiKey = process.env.ANTHROPIC_API_KEY;
 const savedToken = process.env.CLAUDE_CODE_OAUTH_TOKEN;
 
 beforeEach(() => {
-  readFileSyncMock.mockReset();
   systemMock.mockReset();
   delete process.env.ANTHROPIC_API_KEY;
   delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
@@ -35,7 +31,6 @@ describe('resolveClaudeCredential', () => {
     const r = resolveClaudeCredential();
     expect(r.kind).toBe('api_key');
     expect(r.env).toEqual({ ANTHROPIC_API_KEY: 'sk-test' });
-    expect(readFileSyncMock).not.toHaveBeenCalled();
   });
 
   it('resolves oauth_token_env from CLAUDE_CODE_OAUTH_TOKEN when no api key', () => {
@@ -43,7 +38,6 @@ describe('resolveClaudeCredential', () => {
     const r = resolveClaudeCredential();
     expect(r.kind).toBe('oauth_token_env');
     expect(r.env).toEqual({ CLAUDE_CODE_OAUTH_TOKEN: 'oauth-env' });
-    expect(readFileSyncMock).not.toHaveBeenCalled();
   });
 
   it('prefers api key over env token', () => {
@@ -52,25 +46,14 @@ describe('resolveClaudeCredential', () => {
     expect(resolveClaudeCredential().kind).toBe('api_key');
   });
 
-  it('reads host login access token when no env credentials', () => {
-    readFileSyncMock.mockReturnValue(
-      JSON.stringify({ claudeAiOauth: { accessToken: 'host-tok' } }),
-    );
-    const r = resolveClaudeCredential();
-    expect(r.kind).toBe('oauth_token_host');
-    expect(r.env).toEqual({ CLAUDE_CODE_OAUTH_TOKEN: 'host-tok' });
-  });
-
-  it('falls through to none on missing/unreadable credentials file', () => {
-    readFileSyncMock.mockImplementation(() => { throw new Error('ENOENT'); });
+  it('resolves none when no credential is set', () => {
     expect(resolveClaudeCredential().kind).toBe('none');
   });
 
-  it('falls through to none on malformed json or missing field', () => {
-    readFileSyncMock.mockReturnValue('{ not json');
-    expect(resolveClaudeCredential().kind).toBe('none');
-    readFileSyncMock.mockReturnValue(JSON.stringify({ claudeAiOauth: {} }));
-    expect(resolveClaudeCredential().kind).toBe('none');
+  it('treats a whitespace-only value as absent', () => {
+    process.env.ANTHROPIC_API_KEY = '   ';
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = 'oauth-env';
+    expect(resolveClaudeCredential().kind).toBe('oauth_token_env');
   });
 });
 
@@ -81,14 +64,12 @@ describe('claudeCredentialEnv', () => {
   });
 
   it('returns {} when nothing resolves', () => {
-    readFileSyncMock.mockImplementation(() => { throw new Error('ENOENT'); });
     expect(claudeCredentialEnv()).toEqual({});
   });
 });
 
 describe('assertClaudeCredentialAvailable', () => {
   it('throws when no credential is available', () => {
-    readFileSyncMock.mockImplementation(() => { throw new Error('ENOENT'); });
     expect(() => assertClaudeCredentialAvailable()).toThrow(/No Claude credential/);
   });
 

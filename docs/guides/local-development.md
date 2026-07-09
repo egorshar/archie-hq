@@ -33,11 +33,9 @@ npm run cli
 
 ### Claude authentication
 
-Archie auto-detects a Claude credential in priority order: `ANTHROPIC_API_KEY`, then `CLAUDE_CODE_OAUTH_TOKEN`, then an interactive `claude login`.
+Archie auto-detects a Claude credential in priority order: `ANTHROPIC_API_KEY`, then `CLAUDE_CODE_OAUTH_TOKEN`.
 
-To use a Claude subscription instead of an API key, run `claude setup-token` and set the printed token as `CLAUDE_CODE_OAUTH_TOKEN`. This token is durable and works for long-running use.
-
-Alternatively, a prior `claude login` on this machine is picked up automatically (best-effort). Its token is short-lived and not refreshed by Archie, so prefer `setup-token` for anything long-lived.
+To use a Claude subscription instead of an API key, run `claude setup-token` and set the printed token as `CLAUDE_CODE_OAUTH_TOKEN`.
 
 ## Prerequisites
 
