@@ -60,7 +60,7 @@ async function main() {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${bridge.token}` },
       body: JSON.stringify({ sessionId: sid, tool: 'push_branch', args: {} }),
-    }).then((r) => r.json());
+    }).then((r) => r.json()) as any;
     results.RO_push_rejected = push.ok === false && /read-only/i.test(String(push.error));
     results.RO_push_resp = push;
 
