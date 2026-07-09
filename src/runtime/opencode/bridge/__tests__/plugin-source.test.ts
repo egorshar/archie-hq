@@ -107,10 +107,10 @@ describe('bridge plugin source', () => {
         'sess-rw': { readOnly: false, blockedTools: [] },
       };
       const fetchMock = vi.fn(async (url: string, init?: any) => {
-        if (url.includes('/tools')) return { json: async () => [] };
+        if (url.includes('/tools')) return { ok: true, json: async () => [] };
         if (url.includes('/policy')) {
           const sid = new URL(url).searchParams.get('sessionId')!;
-          return { json: async () => policyResponses[sid], _init: init };
+          return { ok: true, json: async () => policyResponses[sid], _init: init };
         }
         throw new Error('unexpected fetch ' + url);
       });
@@ -123,7 +123,7 @@ describe('bridge plugin source', () => {
 
       // Blocked tool in a RO session throws.
       await expect(before({ tool: 'edit', sessionID: 'sess-ro' }, {})).rejects.toThrow(
-        'read-only mode: edit is not permitted',
+        'read-only mode: edit not permitted',
       );
       // A non-blocked tool in the same RO session does not throw.
       await expect(before({ tool: 'read', sessionID: 'sess-ro' }, {})).resolves.toBeUndefined();
@@ -140,15 +140,20 @@ describe('bridge plugin source', () => {
       vi.unstubAllGlobals();
     });
 
-    it('fails open (does not throw) when the policy fetch itself errors', async () => {
+    it('fails CLOSED (blocks builtins, allows read) when the policy fetch itself errors, and does not cache it', async () => {
       dir = await mkdtemp(join(tmpdir(), 'archie-bridge-plugin-guard-err-'));
       const src = renderBridgePlugin('http://127.0.0.1:1', 'tok');
       const file = join(dir, 'plugin.mjs');
       await writeFile(file, src, 'utf8');
 
+      let policyShouldFail = true;
       const fetchMock = vi.fn(async (url: string) => {
-        if (url.includes('/tools')) return { json: async () => [] };
-        throw new Error('network down');
+        if (url.includes('/tools')) return { ok: true, json: async () => [] };
+        if (url.includes('/policy')) {
+          if (policyShouldFail) throw new Error('network down');
+          return { ok: true, json: async () => ({ readOnly: false, blockedTools: [] }) };
+        }
+        throw new Error('unexpected fetch ' + url);
       });
       vi.stubGlobal('fetch', fetchMock);
 
@@ -156,7 +161,74 @@ describe('bridge plugin source', () => {
       const plugin = await mod.ArchieBridgePlugin({});
       const before = plugin['tool.execute.before'];
 
+      // Bridge unreachable: built-in write tool is blocked (fail closed)...
+      await expect(before({ tool: 'edit', sessionID: 'sess-x' }, {})).rejects.toThrow(
+        'read-only mode: edit not permitted',
+      );
+      // ...but read tools stay allowed even while failing closed.
+      await expect(before({ tool: 'read', sessionID: 'sess-x' }, {})).resolves.toBeUndefined();
+
+      // The fail-closed result must NOT have been cached: once the bridge
+      // recovers, the very next call sees the real (permissive) policy.
+      policyShouldFail = false;
       await expect(before({ tool: 'edit', sessionID: 'sess-x' }, {})).resolves.toBeUndefined();
+
+      vi.unstubAllGlobals();
+    });
+
+    it('fails CLOSED on a non-2xx /policy response (e.g. 404 unknown session during a startup race), and does not cache it', async () => {
+      dir = await mkdtemp(join(tmpdir(), 'archie-bridge-plugin-guard-404-'));
+      const src = renderBridgePlugin('http://127.0.0.1:1', 'tok');
+      const file = join(dir, 'plugin.mjs');
+      await writeFile(file, src, 'utf8');
+
+      let policyOk = false;
+      const fetchMock = vi.fn(async (url: string) => {
+        if (url.includes('/tools')) return { ok: true, json: async () => [] };
+        if (url.includes('/policy')) {
+          if (!policyOk) return { ok: false, status: 404, json: async () => ({ ok: false, error: 'unknown session' }) };
+          return { ok: true, json: async () => ({ readOnly: false, blockedTools: [] }) };
+        }
+        throw new Error('unexpected fetch ' + url);
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      const mod = await import(pathToFileURL(file).href);
+      const plugin = await mod.ArchieBridgePlugin({});
+      const before = plugin['tool.execute.before'];
+
+      await expect(before({ tool: 'edit', sessionID: 'sess-y' }, {})).rejects.toThrow(
+        'read-only mode: edit not permitted',
+      );
+      await expect(before({ tool: 'read', sessionID: 'sess-y' }, {})).resolves.toBeUndefined();
+
+      // Not cached: once the session resolves (later /policy calls return 2xx), edit is allowed.
+      policyOk = true;
+      await expect(before({ tool: 'edit', sessionID: 'sess-y' }, {})).resolves.toBeUndefined();
+
+      vi.unstubAllGlobals();
+    });
+
+    it('fails CLOSED on a malformed 2xx /policy body (missing/non-array blockedTools)', async () => {
+      dir = await mkdtemp(join(tmpdir(), 'archie-bridge-plugin-guard-malformed-'));
+      const src = renderBridgePlugin('http://127.0.0.1:1', 'tok');
+      const file = join(dir, 'plugin.mjs');
+      await writeFile(file, src, 'utf8');
+
+      const fetchMock = vi.fn(async (url: string) => {
+        if (url.includes('/tools')) return { ok: true, json: async () => [] };
+        if (url.includes('/policy')) return { ok: true, json: async () => ({ readOnly: true }) }; // no blockedTools
+        throw new Error('unexpected fetch ' + url);
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      const mod = await import(pathToFileURL(file).href);
+      const plugin = await mod.ArchieBridgePlugin({});
+      const before = plugin['tool.execute.before'];
+
+      await expect(before({ tool: 'edit', sessionID: 'sess-z' }, {})).rejects.toThrow(
+        'read-only mode: edit not permitted',
+      );
 
       vi.unstubAllGlobals();
     });

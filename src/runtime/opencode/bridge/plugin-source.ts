@@ -20,6 +20,7 @@
  */
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { RO_BUILTIN_BLOCK } from './server.js';
 
 const PLUGIN_FILENAME = 'archie-bridge.ts';
 
@@ -35,6 +36,10 @@ import { tool } from "@opencode-ai/plugin";
 
 const BRIDGE_URL = ${JSON.stringify(bridgeUrl)};
 const BRIDGE_TOKEN = ${JSON.stringify(token)};
+// Fail-closed default: baked from the bridge's own RO_BUILTIN_BLOCK so the
+// generated plugin blocks these built-ins whenever /policy can't be
+// authoritatively resolved (bridge unreachable, non-2xx, or malformed body).
+const FAIL_CLOSED_BLOCKED_TOOLS = ${JSON.stringify(RO_BUILTIN_BLOCK)};
 
 function schemaFor(spec) {
   let base;
@@ -99,29 +104,41 @@ export const ArchieBridgePlugin = async (pluginCtx) => {
   // on every tool call.
   const policyCache = new Map();
 
+  // Fail-closed choice: any time the policy cannot be AUTHORITATIVELY
+  // resolved — the fetch throws, the response isn't 2xx, or the body is
+  // missing/malformed — we return the baked FAIL_CLOSED_BLOCKED_TOOLS
+  // default rather than an empty allow-list. Built-in edit/write/bash/etc.
+  // are the only thing this guard protects (they run in the opencode child
+  // and never touch the bridge's own /tool dispatch backstop), so failing
+  // open here would be a full read-only bypass. Read built-ins are never in
+  // that set, so they stay usable even while failing closed. Only a
+  // well-formed 2xx response is cached — a transient failure must retry on
+  // the next call instead of pinning the session unguarded (or over-blocked)
+  // for its remaining lifetime.
   async function resolvePolicy(sessionID) {
     if (policyCache.has(sessionID)) return policyCache.get(sessionID);
-    let policy;
+    let r;
     try {
-      const r = await fetch(BRIDGE_URL + "/policy?sessionId=" + encodeURIComponent(sessionID), {
+      r = await fetch(BRIDGE_URL + "/policy?sessionId=" + encodeURIComponent(sessionID), {
         headers: { authorization: "Bearer " + BRIDGE_TOKEN },
       });
-      const j = await r.json();
-      policy = { blockedTools: Array.isArray(j && j.blockedTools) ? j.blockedTools : [] };
-      policyCache.set(sessionID, policy);
     } catch {
-      // Fail-safe choice: if the policy fetch itself errors, allow the call
-      // through rather than blocking every built-in tool for the session.
-      // This only happens if the bridge (not just this one call) is
-      // unreachable — in that state every bridged custom tool is already
-      // failing too, so blocking built-ins here buys nothing but a worse
-      // failure mode (an agent stuck unable to even read). The bridge's own
-      // /tool dispatch rejection of write repo-tools remains the backstop
-      // for the tools that go through it. Deliberately NOT cached, so the
-      // next call retries instead of staying unguarded for the session's
-      // remaining lifetime.
-      policy = { blockedTools: [] };
+      return { blockedTools: FAIL_CLOSED_BLOCKED_TOOLS };
     }
+    if (!r.ok) {
+      return { blockedTools: FAIL_CLOSED_BLOCKED_TOOLS };
+    }
+    let j;
+    try {
+      j = await r.json();
+    } catch {
+      return { blockedTools: FAIL_CLOSED_BLOCKED_TOOLS };
+    }
+    if (!j || !Array.isArray(j.blockedTools)) {
+      return { blockedTools: FAIL_CLOSED_BLOCKED_TOOLS };
+    }
+    const policy = { blockedTools: j.blockedTools };
+    policyCache.set(sessionID, policy);
     return policy;
   }
 
@@ -130,7 +147,7 @@ export const ArchieBridgePlugin = async (pluginCtx) => {
     "tool.execute.before": async (input, output) => {
       const policy = await resolvePolicy(input.sessionID);
       if (policy.blockedTools.includes(input.tool)) {
-        throw new Error("read-only mode: " + input.tool + " is not permitted");
+        throw new Error("read-only mode: " + input.tool + " not permitted");
       }
     },
   };
