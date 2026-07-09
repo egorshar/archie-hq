@@ -90,7 +90,7 @@ describe('OpencodeRuntime.spawn', () => {
     agent.queue.addMessage('go');
     await new Promise((r) => setTimeout(r, 0));
 
-    expect(registrySet).toHaveBeenCalledWith('sess-1', { task, agent });
+    expect(registrySet).toHaveBeenCalledWith('sess-1', { task, agent, readOnly: false });
   });
 
   it('registers a resumed session (no session.create call) under its existing id', async () => {
@@ -102,7 +102,7 @@ describe('OpencodeRuntime.spawn', () => {
     await new Promise((r) => setTimeout(r, 0));
 
     expect(create).not.toHaveBeenCalled();
-    expect(registrySet).toHaveBeenCalledWith('sess-existing', { task, agent });
+    expect(registrySet).toHaveBeenCalledWith('sess-existing', { task, agent, readOnly: false });
   });
 
   it('de-registers the session from the bridge registry when the queue stops', async () => {
@@ -111,7 +111,7 @@ describe('OpencodeRuntime.spawn', () => {
     await new OpencodeRuntime().spawn(agent as any, task as any);
     agent.queue.addMessage('go');
     await new Promise((r) => setTimeout(r, 0));
-    expect(registrySet).toHaveBeenCalledWith('sess-1', { task, agent });
+    expect(registrySet).toHaveBeenCalledWith('sess-1', { task, agent, readOnly: false });
 
     agent.queue.stop();
     await agent.handle.running;

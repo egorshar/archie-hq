@@ -97,7 +97,7 @@ describe('opencode server singleton', () => {
     createOpencode.mockResolvedValue({ client: {}, server: {} });
     const { sharedRegistry } = await import('../server.js');
     expect(sharedRegistry.get('nope')).toBeUndefined();
-    const session = { task: {} as any, agent: {} as any };
+    const session = { task: {} as any, agent: {} as any, readOnly: false };
     sharedRegistry.set('sess-1', session);
     expect(sharedRegistry.get('sess-1')).toBe(session);
     sharedRegistry.delete('sess-1');

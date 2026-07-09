@@ -73,7 +73,11 @@ export class OpencodeRuntime implements AgentRuntime {
         // control-tool calls (post_to_user / report_completion /
         // request_edit_mode) resolve to this Task/Agent pair; evicted in the
         // `finally` below regardless of how the turn loop exits.
-        sharedRegistry.set(sessionId, { task, agent });
+        // readOnly is hardcoded false here — wiring the repo agent's real edit
+        // mode into this entry is a later B.2 task (Runtime wiring, per
+        // docs/superpowers/specs/2026-07-09-opencode-ro-repo-tools-p2b2-design.md
+        // §Components 4); this task only adds the field + the /policy read path.
+        sharedRegistry.set(sessionId, { task, agent, readOnly: false });
 
         while (!agent.queue.isStopped()) {
           let msg;

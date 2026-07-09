@@ -95,6 +95,15 @@ const TOOL_DESCRIPTORS: ToolDescriptor[] = [
   },
 ];
 
+/**
+ * opencode built-in write-shaped tool names to block for read-only sessions.
+ * A conservative superset (spike decision — b2-spike.md): the live
+ * plugin-guard adversarial test (a later task) confirms/extends this against
+ * opencode's actual `config.tools` enumeration. Read built-ins (`read`,
+ * `grep`, `glob`, `list`, `webfetch`) are deliberately NOT included.
+ */
+export const RO_BUILTIN_BLOCK: readonly string[] = ['edit', 'write', 'bash', 'patch', 'multiedit', 'apply_patch'];
+
 const MAX_BODY_BYTES = 1 * 1024 * 1024; // 1 MB — loopback-only, generous for control-tool payloads.
 
 class BodyTooLargeError extends Error {
@@ -216,6 +225,30 @@ function handleToolsList(res: ServerResponse): void {
 }
 
 /**
+ * `GET /policy?sessionId=<id>` — tells the opencode plugin guard whether the
+ * session is read-only and, if so, which built-in tools to block. Queried
+ * (and cached) per-session by the plugin's `tool.execute.before` hook rather
+ * than looked up locally, because the plugin runs in the opencode server
+ * child and never sees Archie's in-memory `SessionRegistry`.
+ */
+function handlePolicyRequest(req: IncomingMessage, res: ServerResponse, registry: SessionRegistry): void {
+  const url = new URL(req.url ?? '', 'http://127.0.0.1');
+  const sessionId = url.searchParams.get('sessionId');
+  if (!sessionId) {
+    sendJson(res, 400, { ok: false, error: 'sessionId query param is required' });
+    return;
+  }
+
+  const session = registry.get(sessionId);
+  if (!session) {
+    sendJson(res, 404, { ok: false, error: `unknown session: ${sessionId}` });
+    return;
+  }
+
+  sendJson(res, 200, { readOnly: session.readOnly, blockedTools: session.readOnly ? RO_BUILTIN_BLOCK : [] });
+}
+
+/**
  * Start the bridge's loopback-only HTTP listener.
  *
  * Binds `127.0.0.1` on an ephemeral port (0), mints a fresh bearer token, and
@@ -229,7 +262,8 @@ export function startBridgeServer(registry: SessionRegistry): Promise<BridgeHand
     const server = createServer((req, res) => {
       void (async () => {
         try {
-          if (req.method === 'GET' && req.url === '/tools') {
+          const pathname = req.url ? new URL(req.url, 'http://127.0.0.1').pathname : '';
+          if (req.method === 'GET' && pathname === '/tools') {
             if (!isAuthorized(req, token)) {
               sendJson(res, 401, { ok: false, error: 'unauthorized' });
               return;
@@ -237,7 +271,15 @@ export function startBridgeServer(registry: SessionRegistry): Promise<BridgeHand
             handleToolsList(res);
             return;
           }
-          if (req.method === 'POST' && req.url === '/tool') {
+          if (req.method === 'GET' && pathname === '/policy') {
+            if (!isAuthorized(req, token)) {
+              sendJson(res, 401, { ok: false, error: 'unauthorized' });
+              return;
+            }
+            handlePolicyRequest(req, res, registry);
+            return;
+          }
+          if (req.method === 'POST' && pathname === '/tool') {
             if (!isAuthorized(req, token)) {
               sendJson(res, 401, { ok: false, error: 'unauthorized' });
               return;

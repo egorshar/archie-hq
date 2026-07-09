@@ -12,6 +12,14 @@ import type { Agent } from '../../../agents/agent.js';
 export interface BridgeSession {
   task: Task;
   agent: Agent;
+  /**
+   * Whether this session is restricted to read-only tool use. Derived at
+   * spawn time from the repo agent's edit mode (see
+   * `docs/superpowers/specs/2026-07-09-opencode-ro-repo-tools-p2b2-design.md`
+   * §Components 1); the bridge's `/policy` endpoint surfaces this to the
+   * opencode plugin guard so it can block write-shaped built-in tools.
+   */
+  readOnly: boolean;
 }
 
 export class SessionRegistry {

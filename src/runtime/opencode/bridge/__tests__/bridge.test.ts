@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { SessionRegistry } from '../registry.js';
-import { startBridgeServer, type BridgeHandle } from '../server.js';
+import { startBridgeServer, RO_BUILTIN_BLOCK, type BridgeHandle } from '../server.js';
 
 function fakeSession() {
   const posted: any[] = [];
@@ -29,7 +29,7 @@ describe('bridge server', () => {
 
   it('rejects a non-whitelisted tool name', async () => {
     const { task, agent } = fakeSession();
-    registry.set('s1', { task, agent });
+    registry.set('s1', { task, agent, readOnly: false });
     const res = await fetch(`${handle.url}/tool`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${handle.token}` }, body: JSON.stringify({ sessionId: 's1', tool: 'rm_rf', args: {} }) });
     const body: any = await res.json();
     expect(body.ok).toBe(false);
@@ -40,7 +40,7 @@ describe('bridge server', () => {
     'rejects prototype-chain tool name %s exactly like an unknown tool',
     async (toolName) => {
       const { task, agent } = fakeSession();
-      registry.set('s1', { task, agent });
+      registry.set('s1', { task, agent, readOnly: false });
       const res = await fetch(`${handle.url}/tool`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${handle.token}` },
@@ -96,7 +96,7 @@ describe('bridge server', () => {
     // anything else on the stub — a minimal, real exercise of the unwrap.
     const task: any = { taskId: 't1', isActive: false };
     const agent: any = { def: { id: 'pm-agent' } };
-    registry.set('s1', { task, agent });
+    registry.set('s1', { task, agent, readOnly: false });
     const res = await fetch(`${handle.url}/tool`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${handle.token}` },
@@ -120,6 +120,45 @@ describe('bridge server', () => {
       const body: any = await res.json();
       expect(Array.isArray(body)).toBe(true);
       expect(body.some((t: any) => t.name === 'post_to_user')).toBe(true);
+    });
+  });
+
+  describe('GET /policy', () => {
+    it('rejects a request without the bearer token', async () => {
+      const res = await fetch(`${handle.url}/policy?sessionId=s1`);
+      expect(res.status).toBe(401);
+    });
+
+    it('returns readOnly:true with the RO_BUILTIN_BLOCK set for a read-only session', async () => {
+      const { task, agent } = fakeSession();
+      registry.set('s1', { task, agent, readOnly: true });
+      const res = await fetch(`${handle.url}/policy?sessionId=s1`, { headers: { authorization: `Bearer ${handle.token}` } });
+      expect(res.status).toBe(200);
+      const body: any = await res.json();
+      expect(body).toEqual({ readOnly: true, blockedTools: RO_BUILTIN_BLOCK });
+    });
+
+    it('returns readOnly:false with an empty blockedTools set for an edit-mode session', async () => {
+      const { task, agent } = fakeSession();
+      registry.set('s1', { task, agent, readOnly: false });
+      const res = await fetch(`${handle.url}/policy?sessionId=s1`, { headers: { authorization: `Bearer ${handle.token}` } });
+      expect(res.status).toBe(200);
+      const body: any = await res.json();
+      expect(body).toEqual({ readOnly: false, blockedTools: [] });
+    });
+
+    it('returns not-ok for an unknown session instead of throwing', async () => {
+      const res = await fetch(`${handle.url}/policy?sessionId=nope`, { headers: { authorization: `Bearer ${handle.token}` } });
+      expect(res.status).toBe(404);
+      const body: any = await res.json();
+      expect(body.ok).toBe(false);
+    });
+
+    it('returns not-ok when sessionId is missing from the query string', async () => {
+      const res = await fetch(`${handle.url}/policy`, { headers: { authorization: `Bearer ${handle.token}` } });
+      expect(res.status).toBe(400);
+      const body: any = await res.json();
+      expect(body.ok).toBe(false);
     });
   });
 });
