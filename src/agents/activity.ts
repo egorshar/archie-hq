@@ -160,28 +160,6 @@ export function deriveActivity(
   return integrationPhrase(toolName, server, here, ctx);
 }
 
-/**
- * Walk an SDK `assistant` event and return the fragment for its last surfaced
- * tool call (a single event can carry several parallel tool_use blocks). Returns
- * null when the event has no status-worthy tool call.
- */
-export function deriveActivityFromEvent(event: unknown, ctx: ActivityContext): string | null {
-  const e = event as { type?: string; message?: { content?: unknown } } | null;
-  if (!e || e.type !== 'assistant') return null;
-  const content = e.message?.content;
-  if (!Array.isArray(content)) return null;
-
-  let phrase: string | null = null;
-  for (const block of content) {
-    if (block && (block as { type?: string }).type === 'tool_use') {
-      const b = block as { name: string; input?: unknown };
-      const p = deriveActivity(b.name, b.input ?? {}, ctx);
-      if (p) phrase = p;
-    }
-  }
-  return phrase;
-}
-
 // ---- helpers ----
 
 function parseMcpTool(toolName: string): { server: string; tool: string } | null {

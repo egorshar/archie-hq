@@ -868,8 +868,7 @@ export class Task {
 
   /**
    * Feed an agent's SDK `assistant` event into the status indicator. A single
-   * event can carry several parallel tool_use blocks; the last surfaced one wins
-   * (mirrors deriveActivityFromEvent's prior behavior).
+   * event can carry several parallel tool_use blocks; the last surfaced one wins.
    */
   noteActivityFromEvent(agentId: string, event: unknown): void {
     const e = event as { type?: string; message?: { content?: unknown } } | null;

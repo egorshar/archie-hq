@@ -8,7 +8,7 @@
 
 import { describe, it, expect } from 'vitest';
 import type { AgentDef } from '../../types/agent.js';
-import { agentDomainLabel, deriveActivity, deriveActivityFromEvent } from '../activity.js';
+import { agentDomainLabel, deriveActivity } from '../activity.js';
 
 function def(partial: Partial<AgentDef>): AgentDef {
   return {
@@ -190,29 +190,5 @@ describe('lowercase built-in tool aliases (opencode)', () => {
   it('leaves capitalized Claude names working unchanged', () => {
     expect(deriveActivity('Read', {}, ctx)).toBe('digging into the backend');
     expect(deriveActivity('Bash', {}, ctx)).toBe('running some checks on the backend');
-  });
-});
-
-describe('deriveActivityFromEvent', () => {
-  const sub = { isPm: false, editMode: false, domain: 'mobile' };
-
-  it('returns the last surfaced tool phrase from an assistant event', () => {
-    const event = {
-      type: 'assistant',
-      message: {
-        content: [
-          { type: 'text', text: 'thinking' },
-          { type: 'tool_use', name: 'Read', input: {} },
-          { type: 'tool_use', name: 'mcp__repo-tools__create_pull_request', input: {} },
-        ],
-      },
-    };
-    expect(deriveActivityFromEvent(event, sub)).toBe('opening a mobile pull request');
-  });
-
-  it('returns null for non-assistant events and plain-string content', () => {
-    expect(deriveActivityFromEvent({ type: 'result' }, sub)).toBeNull();
-    expect(deriveActivityFromEvent({ type: 'assistant', message: { content: 'hi' } }, sub)).toBeNull();
-    expect(deriveActivityFromEvent(null, sub)).toBeNull();
   });
 });
