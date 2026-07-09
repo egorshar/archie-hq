@@ -48,11 +48,15 @@ interface ToolDescriptor {
 type ToolHandler = (agent: Agent, task: Task, args: any) => Promise<ToolResult>;
 
 // FIXED whitelist — the bridge will never dispatch anything outside this map.
-const TOOL_WHITELIST: Record<string, ToolHandler> = {
-  post_to_user: postToUserHandler as ToolHandler,
-  report_completion: reportCompletionHandler as ToolHandler,
-  request_edit_mode: requestEditModeHandler as ToolHandler,
-};
+// A Map (not a plain object) is used deliberately: bracket/property access on a
+// plain object falls through to Object.prototype, so tool names like
+// "constructor", "toString", or "__proto__" would resolve to truthy, callable
+// functions and bypass the "unknown tool" rejection. Map has no such fallthrough.
+const TOOL_WHITELIST: Map<string, ToolHandler> = new Map([
+  ['post_to_user', postToUserHandler as ToolHandler],
+  ['report_completion', reportCompletionHandler as ToolHandler],
+  ['request_edit_mode', requestEditModeHandler as ToolHandler],
+]);
 
 const TOOL_DESCRIPTORS: ToolDescriptor[] = [
   {
@@ -72,10 +76,29 @@ const TOOL_DESCRIPTORS: ToolDescriptor[] = [
   },
 ];
 
+const MAX_BODY_BYTES = 1 * 1024 * 1024; // 1 MB — loopback-only, generous for control-tool payloads.
+
+class BodyTooLargeError extends Error {
+  constructor() {
+    super('request body too large');
+    this.name = 'BodyTooLargeError';
+  }
+}
+
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    req.on('data', (chunk) => chunks.push(chunk));
+    let total = 0;
+    req.on('data', (chunk: Buffer) => {
+      total += chunk.length;
+      if (total > MAX_BODY_BYTES) {
+        req.removeAllListeners('data');
+        req.removeAllListeners('end');
+        reject(new BodyTooLargeError());
+        return;
+      }
+      chunks.push(chunk);
+    });
     req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
     req.on('error', reject);
   });
@@ -103,18 +126,26 @@ async function handleToolRequest(
   res: ServerResponse,
   registry: SessionRegistry,
 ): Promise<void> {
-  let parsed: { sessionId?: unknown; tool?: unknown; args?: unknown };
+  let parsed: unknown;
   try {
     const raw = await readBody(req);
     parsed = JSON.parse(raw);
-  } catch {
+  } catch (e) {
+    if (e instanceof BodyTooLargeError) {
+      sendJson(res, 413, { ok: false, error: 'request body too large' });
+      return;
+    }
     sendJson(res, 400, { ok: false, error: 'invalid JSON body' });
     return;
   }
 
-  const sessionId = parsed.sessionId;
-  const toolName = parsed.tool;
-  const args = parsed.args ?? {};
+  if (typeof parsed !== 'object' || parsed === null) {
+    sendJson(res, 400, { ok: false, error: 'request body must be a JSON object' });
+    return;
+  }
+
+  const { sessionId, tool: toolName, args: rawArgs } = parsed as { sessionId?: unknown; tool?: unknown; args?: unknown };
+  const args = rawArgs ?? {};
 
   if (typeof sessionId !== 'string' || typeof toolName !== 'string') {
     sendJson(res, 400, { ok: false, error: 'sessionId and tool must be strings' });
@@ -127,11 +158,11 @@ async function handleToolRequest(
     return;
   }
 
-  const handler = TOOL_WHITELIST[toolName];
-  if (!handler) {
+  if (!TOOL_WHITELIST.has(toolName)) {
     sendJson(res, 200, { ok: false, error: `unknown tool (not permitted): ${toolName}` });
     return;
   }
+  const handler = TOOL_WHITELIST.get(toolName)!;
 
   try {
     const result = await handler(session.agent, session.task, args);

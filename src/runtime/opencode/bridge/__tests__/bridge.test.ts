@@ -36,6 +36,55 @@ describe('bridge server', () => {
     expect(body.error).toMatch(/unknown tool|not permitted/i);
   });
 
+  it.each(['constructor', '__proto__', 'toString', 'hasOwnProperty', 'valueOf'])(
+    'rejects prototype-chain tool name %s exactly like an unknown tool',
+    async (toolName) => {
+      const { task, agent } = fakeSession();
+      registry.set('s1', { task, agent });
+      const res = await fetch(`${handle.url}/tool`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${handle.token}` },
+        body: JSON.stringify({ sessionId: 's1', tool: toolName, args: {} }),
+      });
+      const body: any = await res.json();
+      expect(body.ok).toBe(false);
+      expect(body.error).toMatch(/unknown tool|not permitted/i);
+    },
+  );
+
+  it('rejects a null JSON body with a clean 400 instead of throwing', async () => {
+    const res = await fetch(`${handle.url}/tool`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${handle.token}` },
+      body: 'null',
+    });
+    expect(res.status).toBe(400);
+    const body: any = await res.json();
+    expect(body.ok).toBe(false);
+  });
+
+  it('rejects a non-object JSON body (array) with a clean error, not ok:true', async () => {
+    const res = await fetch(`${handle.url}/tool`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${handle.token}` },
+      body: '[1,2,3]',
+    });
+    const body: any = await res.json();
+    expect(body.ok).toBe(false);
+  });
+
+  it('rejects an oversized body instead of buffering it unbounded', async () => {
+    const hugeArg = 'x'.repeat(2 * 1024 * 1024); // 2 MB, over the 1 MB cap
+    const res = await fetch(`${handle.url}/tool`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${handle.token}` },
+      body: JSON.stringify({ sessionId: 's1', tool: 'post_to_user', args: { message: hugeArg } }),
+    });
+    expect(res.status).toBe(413);
+    const body: any = await res.json();
+    expect(body.ok).toBe(false);
+  });
+
   it('binds to loopback only', () => {
     expect(handle.url).toMatch(/^http:\/\/127\.0\.0\.1:/);
   });
