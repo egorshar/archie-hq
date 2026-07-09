@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { resolveOpencodeModel, opencodeFooterModel } from '../model.js';
+import { modelDisplayLabel } from '../../../agents/model-label.js';
 
 const ENV_KEYS = ['ARCHIE_OPENCODE_MODEL_HAIKU', 'ARCHIE_OPENCODE_MODEL_SONNET', 'ARCHIE_OPENCODE_MODEL_DEFAULT'];
 const saved: Record<string, string | undefined> = {};
@@ -67,5 +68,22 @@ describe('opencodeFooterModel', () => {
   it('returns null when unresolved', () => {
     delete process.env.ARCHIE_OPENCODE_MODEL_DEFAULT;
     expect(opencodeFooterModel()).toBeNull();
+  });
+
+  it('trims a provider-wrapper prefix off a multi-segment claude route so modelDisplayLabel can beautify it', () => {
+    // A real route like `openrouter/anthropic/claude-haiku-4-5` splits (at the
+    // FIRST '/') into providerID `openrouter`, modelID `anthropic/claude-haiku-4-5`
+    // — the raw `${providerID}/${modelID}` would be
+    // `openrouter/anthropic/claude-haiku-4-5`, which beautify() can't parse
+    // because it only strips a LEADING `(anthropic/)?claude-`.
+    process.env.ARCHIE_OPENCODE_MODEL_DEFAULT = 'openrouter/anthropic/claude-haiku-4-5';
+    const footer = opencodeFooterModel();
+    expect(footer).toBe('anthropic/claude-haiku-4-5');
+    expect(modelDisplayLabel(footer!)).toBe('Haiku 4.5');
+  });
+
+  it('passes through a non-claude multi-segment route unchanged', () => {
+    process.env.ARCHIE_OPENCODE_MODEL_DEFAULT = 'openrouter/openai/gpt-4o';
+    expect(opencodeFooterModel()).toBe('openrouter/openai/gpt-4o');
   });
 });

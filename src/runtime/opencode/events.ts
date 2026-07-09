@@ -65,6 +65,10 @@ export function handleOpencodeEvent(ev: unknown, registry: SessionRegistry): voi
       if (!part || part.type !== 'tool' || typeof part.tool !== 'string') return;
       const session = registry.get(part.sessionID);
       if (!session) return; // unknown / one-shot / evicted
+      // Tool parts fire multiple times per call (pending -> running -> completed),
+      // so an early fire may still carry `{}` for state?.input before opencode has
+      // populated it — harmless here: the status-line phrase is tool-name driven,
+      // not input driven, and the line itself is debounced downstream.
       session.task.noteActivity(session.agent.def.id, canonicalToolName(part.tool), part.state?.input ?? {});
       return;
     }

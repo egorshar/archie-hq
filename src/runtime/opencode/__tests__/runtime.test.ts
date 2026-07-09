@@ -241,6 +241,17 @@ describe('isSessionNotFound', () => {
   it('false on an unrelated error', () => {
     expect(isSessionNotFound({ data: { info: { error: { name: 'ProviderAuthError' } } } })).toBe(false);
   });
+  it('true for a thrown-shaped not-found error object (status)', () => {
+    const err = Object.assign(new Error('boom'), { status: 404 });
+    expect(isSessionNotFound(err)).toBe(true);
+  });
+  it('true for a thrown-shaped not-found error object (name/message)', () => {
+    expect(isSessionNotFound(new Error('session not found'))).toBe(true);
+    expect(isSessionNotFound(Object.assign(new Error('boom'), { name: 'SessionNotFoundError' }))).toBe(true);
+  });
+  it('false for an unrelated thrown error', () => {
+    expect(isSessionNotFound(new Error('ECONNRESET'))).toBe(false);
+  });
 });
 
 describe('promptWithRecovery', () => {
@@ -281,5 +292,47 @@ describe('promptWithRecovery', () => {
 
     expect(create).toHaveBeenCalledTimes(1);
     expect(prompt).toHaveBeenCalledTimes(2); // initial + one retry, then stop
+  });
+
+  it('resets the session and retries once when the initial prompt call THROWS not-found', async () => {
+    const notFoundErr = Object.assign(new Error('Session not found'), { status: 404 });
+    const prompt = vi.fn()
+      .mockRejectedValueOnce(notFoundErr)
+      .mockResolvedValueOnce({ data: { info: {}, parts: [{ type: 'text', text: 'ok' }] } });
+    const create = vi.fn().mockResolvedValue({ data: { id: 'S2' } });
+    const client = { session: { prompt, create } } as any;
+    const agent = { def: { id: 'pm' }, session: { session_id: 'S1' } } as any;
+    const task = { taskId: 'T1' } as any;
+
+    const { res, sessionId } = await promptWithRecovery({
+      client, agent, task, sessionId: 'S1', readOnly: false,
+      body: { parts: [{ type: 'text', text: 'hi' }], system: 's' },
+      signal: new AbortController().signal,
+    });
+
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(prompt).toHaveBeenCalledTimes(2);
+    expect(sessionId).toBe('S2');
+    expect(agent.session.session_id).toBe('S2'); // outer recovery re-spawn would start fresh, not stale
+    expect((res as any).data.parts[0].text).toBe('ok');
+  });
+
+  it('rethrows a non-not-found error from the initial prompt call without recovering', async () => {
+    const otherErr = new Error('ECONNRESET');
+    const prompt = vi.fn().mockRejectedValueOnce(otherErr);
+    const create = vi.fn();
+    const client = { session: { prompt, create } } as any;
+    const agent = { def: { id: 'pm' }, session: { session_id: 'S1' } } as any;
+    const task = { taskId: 'T1' } as any;
+
+    await expect(promptWithRecovery({
+      client, agent, task, sessionId: 'S1', readOnly: false,
+      body: { parts: [{ type: 'text', text: 'hi' }], system: 's' },
+      signal: new AbortController().signal,
+    })).rejects.toThrow('ECONNRESET');
+
+    expect(create).not.toHaveBeenCalled();
+    expect(prompt).toHaveBeenCalledTimes(1);
+    expect(agent.session.session_id).toBe('S1'); // untouched — not treated as a stale session
   });
 });

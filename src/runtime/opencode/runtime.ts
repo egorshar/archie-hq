@@ -15,27 +15,48 @@ import { prepareAgentContext } from '../../agents/spawn.js';
 import { logger } from '../../system/logger.js';
 import { getOpencodeClient, concatPromptText, sharedRegistry, type OpencodeClient } from './server.js';
 
+const SESSION_NOT_FOUND_RE = /session.*not.*found|not.*found.*session/i;
+
 /**
- * Detect opencode's "session does not exist" signal from a prompt result — a
- * stale stored session_id after a server restart / session GC. Checks the HTTP
- * error status and the prompt info error name (the two places concatPromptText
- * already inspects). Session-not-found is the ONE recoverable case; other
- * errors surface normally. (Confirm the exact status/name against the P2-C spike.)
+ * Detect opencode's "session does not exist" signal — a stale stored
+ * session_id after a server restart / session GC. Covers BOTH shapes the SDK
+ * can hand back: a RETURNED result object (HTTP error status / prompt info
+ * error name — the two places concatPromptText already inspects) and a
+ * THROWN/caught error object (an `Error`-like value with a `status` and/or
+ * `name`/`message`), since a stale session can surface either way depending on
+ * how the client wraps the underlying HTTP response. Session-not-found is the
+ * ONE recoverable case; other errors surface normally. (Confirm the exact
+ * status/name against the P2-C spike.)
  */
 export function isSessionNotFound(res: unknown): boolean {
-  const r = res as { error?: any; data?: { info?: { error?: { name?: string } } } };
+  const r = res as {
+    error?: any;
+    data?: { info?: { error?: { name?: string } } };
+    status?: number;
+    name?: string;
+    message?: string;
+  };
   if (r?.error?.status === 404) return true;
-  const name = r?.data?.info?.error?.name;
-  return typeof name === 'string' && /session.*not.*found|not.*found.*session/i.test(name);
+  if (r?.status === 404) return true;
+  const resultName = r?.data?.info?.error?.name;
+  if (typeof resultName === 'string' && SESSION_NOT_FOUND_RE.test(resultName)) return true;
+  if (typeof r?.name === 'string' && SESSION_NOT_FOUND_RE.test(r.name)) return true;
+  if (typeof r?.message === 'string' && SESSION_NOT_FOUND_RE.test(r.message)) return true;
+  return false;
 }
 
 /**
- * Issue one prompt with session-not-found recovery: on a not-found result,
- * discard the stale session, create a fresh one (re-register with the bridge),
- * and retry the SAME prompt exactly once. A second not-found gives up (returns
- * the failed result). Clearing agent.session.session_id here also means an outer
- * recovery re-spawn starts fresh — removing the infinite "not found → recover →
- * repeat" hot-loop at its source.
+ * Issue one prompt with session-not-found recovery: on a not-found result —
+ * whether `client.session.prompt` RETURNS a not-found result object or THROWS
+ * a not-found-shaped error (a stale session can surface either way) — discard
+ * the stale session, create a fresh one (re-register with the bridge), and
+ * retry the SAME prompt exactly once. A second not-found (or the retry
+ * throwing) gives up: a returned not-found result is passed back as-is, and a
+ * thrown error from the retry propagates (bounded to exactly one retry either
+ * way). Clearing agent.session.session_id here also means an outer recovery
+ * re-spawn starts fresh — removing the infinite "not found → recover →
+ * repeat" hot-loop at its source. Errors that are NOT session-not-found are
+ * never masked: they rethrow immediately, before any reset happens.
  */
 export async function promptWithRecovery(args: {
   client: OpencodeClient;
@@ -49,8 +70,17 @@ export async function promptWithRecovery(args: {
   const { client, agent, task, readOnly, body, signal } = args;
   let sessionId = args.sessionId;
 
-  let res = await client.session.prompt({ path: { id: sessionId }, body, signal });
-  if (!isSessionNotFound(res)) return { res, sessionId };
+  let res: unknown;
+  try {
+    res = await client.session.prompt({ path: { id: sessionId }, body, signal });
+    if (!isSessionNotFound(res)) return { res, sessionId };
+  } catch (err) {
+    // A stale session can make the SDK throw instead of returning a not-found
+    // result. Only recover from a session-not-found-shaped throw; anything
+    // else is an unrelated failure and must propagate untouched.
+    if (!isSessionNotFound(err)) throw err;
+    res = err; // fallback return value if recovery itself can't produce a fresh result
+  }
 
   logger.warn(agent.def.id, `opencode session ${sessionId} not found — resetting and retrying once`);
   sharedRegistry.delete(sessionId);
