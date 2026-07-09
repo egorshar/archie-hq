@@ -29,11 +29,17 @@ export class OpencodeRuntime implements AgentRuntime {
     task.updateAgentState(def.id, true);
 
     // Shared launch inputs (also sets agent.sandbox). opencode has no OS sandbox,
-    // so no Claude session dirs are added to the sandbox in this path.
-    const { systemPrompt } = await prepareAgentContext(agent, task, {
+    // so no Claude session dirs are added to the sandbox in this path. `repo` is
+    // only populated for repo agents (undefined for PM/plugin agents, which have
+    // no file/repo write surface to gate) — its `editAllowed` is the exact same
+    // edit-mode signal spawnAgent uses (it also sets agent.editModeAtSpawn from
+    // it), so reusing it here keeps the two runtimes' RO/edit decision identical
+    // instead of re-deriving it from agent.editModeAtSpawn / task.metadata by hand.
+    const { systemPrompt, repo } = await prepareAgentContext(agent, task, {
       claudeReadDirs: [],
       claudeWriteDirs: [],
     });
+    const readOnly = repo ? !repo.editAllowed : false;
 
     // Per-agent controller — aborts THIS agent's in-flight prompt only, never the
     // shared server. Task teardown calls handle.abort() after stopping the queue.
@@ -72,12 +78,10 @@ export class OpencodeRuntime implements AgentRuntime {
         // Register this session with the bridge's SessionRegistry so bridged
         // control-tool calls (post_to_user / report_completion /
         // request_edit_mode) resolve to this Task/Agent pair; evicted in the
-        // `finally` below regardless of how the turn loop exits.
-        // readOnly is hardcoded false here — wiring the repo agent's real edit
-        // mode into this entry is a later B.2 task (Runtime wiring, per
-        // docs/superpowers/specs/2026-07-09-opencode-ro-repo-tools-p2b2-design.md
-        // §Components 4); this task only adds the field + the /policy read path.
-        sharedRegistry.set(sessionId, { task, agent, readOnly: false });
+        // `finally` below regardless of how the turn loop exits. readOnly is the
+        // repo agent's real edit mode (false for non-repo agents) — the /policy
+        // read path and the bridge's write-tool rejection enforce RO from it.
+        sharedRegistry.set(sessionId, { task, agent, readOnly });
 
         while (!agent.queue.isStopped()) {
           let msg;

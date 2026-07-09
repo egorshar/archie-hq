@@ -21,12 +21,8 @@ vi.mock('../server.js', () => ({
 vi.mock('../model.js', () => ({
   resolveOpencodeModel: (m: string) => ({ providerID: 'anthropic', modelID: m }),
 }));
-vi.mock('../../../agents/spawn.js', () => ({
-  prepareAgentContext: vi.fn(async (agent: any) => {
-    agent.sandbox = { cwd: '/w' };
-    return { systemPrompt: 'SYS', cwd: '/w', additionalDirectories: [], sandboxOpts: { cwd: '/w' } };
-  }),
-}));
+const { prepareAgentContext } = vi.hoisted(() => ({ prepareAgentContext: vi.fn() }));
+vi.mock('../../../agents/spawn.js', () => ({ prepareAgentContext }));
 
 import { MessageQueue } from '../../../agents/message-queue.js';
 import { OpencodeRuntime } from '../runtime.js';
@@ -56,6 +52,11 @@ describe('OpencodeRuntime.spawn', () => {
     getOpencodeClient.mockResolvedValue({ session: { create, prompt } });
     registrySet.mockReset();
     registryDelete.mockReset();
+    prepareAgentContext.mockReset();
+    prepareAgentContext.mockImplementation(async (agent: any) => {
+      agent.sandbox = { cwd: '/w' };
+      return { systemPrompt: 'SYS', cwd: '/w', additionalDirectories: [], sandboxOpts: { cwd: '/w' } };
+    });
   });
 
   it('creates a session, prompts with NO body.model + the system prompt, sets a live handle', async () => {
@@ -156,6 +157,52 @@ describe('OpencodeRuntime.spawn', () => {
     // Never registered (no session was ever created), so nothing to evict either.
     expect(registrySet).not.toHaveBeenCalled();
     expect(registryDelete).not.toHaveBeenCalled();
+  });
+
+  it('registers a repo agent with edit mode OFF as readOnly:true', async () => {
+    prepareAgentContext.mockImplementation(async (agent: any) => {
+      agent.sandbox = { cwd: '/w' };
+      return {
+        systemPrompt: 'SYS', cwd: '/w', additionalDirectories: [], sandboxOpts: { cwd: '/w' },
+        repo: { editAllowed: false, repoMounts: [], allClonePaths: [] },
+      };
+    });
+    const agent = makeAgent();
+    const task = makeTask();
+    await new OpencodeRuntime().spawn(agent as any, task as any);
+    agent.queue.addMessage('go');
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(registrySet).toHaveBeenCalledWith('sess-1', { task, agent, readOnly: true });
+  });
+
+  it('registers a repo agent with edit mode ON as readOnly:false', async () => {
+    prepareAgentContext.mockImplementation(async (agent: any) => {
+      agent.sandbox = { cwd: '/w' };
+      return {
+        systemPrompt: 'SYS', cwd: '/w', additionalDirectories: [], sandboxOpts: { cwd: '/w' },
+        repo: { editAllowed: true, repoMounts: [], allClonePaths: [] },
+      };
+    });
+    const agent = makeAgent();
+    const task = makeTask();
+    await new OpencodeRuntime().spawn(agent as any, task as any);
+    agent.queue.addMessage('go');
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(registrySet).toHaveBeenCalledWith('sess-1', { task, agent, readOnly: false });
+  });
+
+  it('registers a non-repo (PM) agent as readOnly:false regardless of edit mode', async () => {
+    // Default mock (no `repo` field) represents the PM/plugin-agent path — no
+    // repo/edit-mode surface, so readOnly is always false.
+    const agent = makeAgent();
+    const task = makeTask();
+    await new OpencodeRuntime().spawn(agent as any, task as any);
+    agent.queue.addMessage('go');
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(registrySet).toHaveBeenCalledWith('sess-1', { task, agent, readOnly: false });
   });
 
   it('abort() cancels via the AbortController signal', async () => {
