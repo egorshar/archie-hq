@@ -55,3 +55,17 @@ export const CLAUDE_RUNTIME_CAPABILITIES: RuntimeCapabilities = {
   effort: true,
   backgroundTasks: true,
 };
+
+/**
+ * opencode runtime — least-capable baseline (spec P3). No built-in OS sandbox
+ * (Phase 3 adds a firewall + guard enforcement), no native Skills (a read_skill
+ * tool arrives in P2-C), no 1M-context / effort / background-task event parity
+ * yet. Individual flags are raised as later Phase-2 slices earn them.
+ */
+export const OPENCODE_RUNTIME_CAPABILITIES: RuntimeCapabilities = {
+  osSandbox: false,
+  skills: false,
+  oneMillionContext: false,
+  effort: false,
+  backgroundTasks: false,
+};
