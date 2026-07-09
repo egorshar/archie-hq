@@ -99,11 +99,15 @@ export const ArchieBridgePlugin = async (pluginCtx) => {
   // plugin "tool.execute.before" hook that throws for a session's blocked
   // tools is the only mechanism the spike found that actually blocks them.
   // The guard resolves each session's policy via the bridge's bearer-gated
-  // GET /policy?sessionId=<id>, caching the result per sessionID in this
-  // module-level Map so a long-running session pays the round-trip once, not
-  // on every tool call.
-  const policyCache = new Map();
-
+  // GET /policy?sessionId=<id> on EVERY tool.execute.before call — no
+  // per-session caching. A session's policy can change mid-session: the
+  // edit-mode approval flow re-spawns a repo agent RESUMING THE SAME
+  // opencode sessionID with readOnly flipped RO -> edit in the bridge's
+  // SessionRegistry, and the guard must observe that flip on the very next
+  // tool call rather than replaying a stale decision for the rest of the
+  // session's lifetime. The round-trip is a loopback fetch to the bridge
+  // (same host), so paying it on every call is negligible.
+  //
   // Fail-closed choice: any time the policy cannot be AUTHORITATIVELY
   // resolved — the fetch throws, the response isn't 2xx, or the body is
   // missing/malformed — we return the baked FAIL_CLOSED_BLOCKED_TOOLS
@@ -111,12 +115,8 @@ export const ArchieBridgePlugin = async (pluginCtx) => {
   // are the only thing this guard protects (they run in the opencode child
   // and never touch the bridge's own /tool dispatch backstop), so failing
   // open here would be a full read-only bypass. Read built-ins are never in
-  // that set, so they stay usable even while failing closed. Only a
-  // well-formed 2xx response is cached — a transient failure must retry on
-  // the next call instead of pinning the session unguarded (or over-blocked)
-  // for its remaining lifetime.
+  // that set, so they stay usable even while failing closed.
   async function resolvePolicy(sessionID) {
-    if (policyCache.has(sessionID)) return policyCache.get(sessionID);
     let r;
     try {
       r = await fetch(BRIDGE_URL + "/policy?sessionId=" + encodeURIComponent(sessionID), {
@@ -137,9 +137,7 @@ export const ArchieBridgePlugin = async (pluginCtx) => {
     if (!j || !Array.isArray(j.blockedTools)) {
       return { blockedTools: FAIL_CLOSED_BLOCKED_TOOLS };
     }
-    const policy = { blockedTools: j.blockedTools };
-    policyCache.set(sessionID, policy);
-    return policy;
+    return { blockedTools: j.blockedTools };
   }
 
   return {

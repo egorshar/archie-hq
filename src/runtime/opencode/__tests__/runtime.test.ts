@@ -91,7 +91,9 @@ describe('OpencodeRuntime.spawn', () => {
     agent.queue.addMessage('go');
     await new Promise((r) => setTimeout(r, 0));
 
-    expect(registrySet).toHaveBeenCalledWith('sess-1', { task, agent, readOnly: false });
+    // Default mock has no `repo` (non-repo/PM agent) → readOnly:true (parity
+    // with Claude, which denies PM/plugin agents Bash/Edit/Write entirely).
+    expect(registrySet).toHaveBeenCalledWith('sess-1', { task, agent, readOnly: true });
   });
 
   it('registers a resumed session (no session.create call) under its existing id', async () => {
@@ -103,7 +105,7 @@ describe('OpencodeRuntime.spawn', () => {
     await new Promise((r) => setTimeout(r, 0));
 
     expect(create).not.toHaveBeenCalled();
-    expect(registrySet).toHaveBeenCalledWith('sess-existing', { task, agent, readOnly: false });
+    expect(registrySet).toHaveBeenCalledWith('sess-existing', { task, agent, readOnly: true });
   });
 
   it('de-registers the session from the bridge registry when the queue stops', async () => {
@@ -112,7 +114,7 @@ describe('OpencodeRuntime.spawn', () => {
     await new OpencodeRuntime().spawn(agent as any, task as any);
     agent.queue.addMessage('go');
     await new Promise((r) => setTimeout(r, 0));
-    expect(registrySet).toHaveBeenCalledWith('sess-1', { task, agent, readOnly: false });
+    expect(registrySet).toHaveBeenCalledWith('sess-1', { task, agent, readOnly: true });
 
     agent.queue.stop();
     await agent.handle.running;
@@ -193,16 +195,19 @@ describe('OpencodeRuntime.spawn', () => {
     expect(registrySet).toHaveBeenCalledWith('sess-1', { task, agent, readOnly: false });
   });
 
-  it('registers a non-repo (PM) agent as readOnly:false regardless of edit mode', async () => {
+  it('registers a non-repo (PM) agent as readOnly:true (parity with Claude: no built-in Bash/Edit/Write)', async () => {
     // Default mock (no `repo` field) represents the PM/plugin-agent path — no
-    // repo/edit-mode surface, so readOnly is always false.
+    // repo/edit-mode surface. The Claude runtime denies PM/plugin agents
+    // Bash/Edit/Write entirely, so opencode must block its built-in
+    // edit/write/bash the same way; PM/plugin agents' legitimate tools
+    // (bridged custom tools + built-in reads) are unaffected by readOnly.
     const agent = makeAgent();
     const task = makeTask();
     await new OpencodeRuntime().spawn(agent as any, task as any);
     agent.queue.addMessage('go');
     await new Promise((r) => setTimeout(r, 0));
 
-    expect(registrySet).toHaveBeenCalledWith('sess-1', { task, agent, readOnly: false });
+    expect(registrySet).toHaveBeenCalledWith('sess-1', { task, agent, readOnly: true });
   });
 
   it('abort() cancels via the AbortController signal', async () => {

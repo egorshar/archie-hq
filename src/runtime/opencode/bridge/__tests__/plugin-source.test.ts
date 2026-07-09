@@ -96,7 +96,7 @@ describe('bridge plugin source', () => {
       if (dir) await rm(dir, { recursive: true, force: true });
     });
 
-    it('fetches /policy with the bearer token, caches per sessionID, and throws for a blocked tool', async () => {
+    it('fetches /policy with the bearer token on every call and throws for a blocked tool', async () => {
       dir = await mkdtemp(join(tmpdir(), 'archie-bridge-plugin-guard-'));
       const src = renderBridgePlugin('http://127.0.0.1:1', 'tok-guard');
       const file = join(dir, 'plugin.mjs');
@@ -131,8 +131,10 @@ describe('bridge plugin source', () => {
       await expect(before({ tool: 'edit', sessionID: 'sess-rw' }, {})).resolves.toBeUndefined();
 
       const policyCalls = fetchMock.mock.calls.filter((c) => String(c[0]).includes('/policy'));
-      // Two distinct sessionIDs → two policy fetches, despite 3 guard invocations (caching).
-      expect(policyCalls.length).toBe(2);
+      // No caching: every guard invocation re-fetches /policy, so 3 guard
+      // invocations means 3 policy fetches (not 2, despite only 2 distinct
+      // sessionIDs).
+      expect(policyCalls.length).toBe(3);
       const [policyUrl, policyInit] = policyCalls[0];
       expect(String(policyUrl)).toContain('/policy?sessionId=');
       expect((policyInit as any).headers.authorization).toBe('Bearer tok-guard');
@@ -140,7 +142,54 @@ describe('bridge plugin source', () => {
       vi.unstubAllGlobals();
     });
 
-    it('fails CLOSED (blocks builtins, allows read) when the policy fetch itself errors, and does not cache it', async () => {
+    it('respects a policy change mid-session (no stale cache): edit-mode approval flips RO -> edit for the SAME sessionID', async () => {
+      // Regression test for the stale per-session cache bug: the edit-mode
+      // approval flow re-spawns a repo agent RESUMING THE SAME opencode
+      // sessionID with readOnly flipped RO -> edit in the bridge's
+      // SessionRegistry. The guard must observe that flip on the very next
+      // tool.execute.before call instead of replaying a cached RO decision.
+      dir = await mkdtemp(join(tmpdir(), 'archie-bridge-plugin-guard-flip-'));
+      const src = renderBridgePlugin('http://127.0.0.1:1', 'tok-flip');
+      const file = join(dir, 'plugin.mjs');
+      await writeFile(file, src, 'utf8');
+
+      let approved = false;
+      const fetchMock = vi.fn(async (url: string) => {
+        if (url.includes('/tools')) return { ok: true, json: async () => [] };
+        if (url.includes('/policy')) {
+          return {
+            ok: true,
+            json: async () =>
+              approved ? { readOnly: false, blockedTools: [] } : { readOnly: true, blockedTools: ['edit', 'write', 'bash'] },
+          };
+        }
+        throw new Error('unexpected fetch ' + url);
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      const mod = await import(pathToFileURL(file).href);
+      const plugin = await mod.ArchieBridgePlugin({});
+      const before = plugin['tool.execute.before'];
+
+      const SAME_SESSION = 'sess-resumed';
+
+      // Before approval: same sessionID, guard blocks edit.
+      await expect(before({ tool: 'edit', sessionID: SAME_SESSION }, {})).rejects.toThrow(
+        'read-only mode: edit not permitted',
+      );
+
+      // Edit-mode approval flips the bridge's policy for the SAME sessionID.
+      approved = true;
+
+      // Same sessionID, no re-registration/reload of the plugin: the guard
+      // must now ALLOW edit, proving it re-queried /policy instead of
+      // replaying a stale cached RO decision.
+      await expect(before({ tool: 'edit', sessionID: SAME_SESSION }, {})).resolves.toBeUndefined();
+
+      vi.unstubAllGlobals();
+    });
+
+    it('fails CLOSED (blocks builtins, allows read) when the policy fetch itself errors', async () => {
       dir = await mkdtemp(join(tmpdir(), 'archie-bridge-plugin-guard-err-'));
       const src = renderBridgePlugin('http://127.0.0.1:1', 'tok');
       const file = join(dir, 'plugin.mjs');
@@ -168,15 +217,16 @@ describe('bridge plugin source', () => {
       // ...but read tools stay allowed even while failing closed.
       await expect(before({ tool: 'read', sessionID: 'sess-x' }, {})).resolves.toBeUndefined();
 
-      // The fail-closed result must NOT have been cached: once the bridge
-      // recovers, the very next call sees the real (permissive) policy.
+      // Once the bridge recovers, the very next call re-fetches and sees the
+      // real (permissive) policy — every call queries /policy fresh, so a
+      // transient failure never pins the session for its remaining lifetime.
       policyShouldFail = false;
       await expect(before({ tool: 'edit', sessionID: 'sess-x' }, {})).resolves.toBeUndefined();
 
       vi.unstubAllGlobals();
     });
 
-    it('fails CLOSED on a non-2xx /policy response (e.g. 404 unknown session during a startup race), and does not cache it', async () => {
+    it('fails CLOSED on a non-2xx /policy response (e.g. 404 unknown session during a startup race)', async () => {
       dir = await mkdtemp(join(tmpdir(), 'archie-bridge-plugin-guard-404-'));
       const src = renderBridgePlugin('http://127.0.0.1:1', 'tok');
       const file = join(dir, 'plugin.mjs');
@@ -202,7 +252,7 @@ describe('bridge plugin source', () => {
       );
       await expect(before({ tool: 'read', sessionID: 'sess-y' }, {})).resolves.toBeUndefined();
 
-      // Not cached: once the session resolves (later /policy calls return 2xx), edit is allowed.
+      // Once the session resolves (later /policy calls return 2xx), edit is allowed.
       policyOk = true;
       await expect(before({ tool: 'edit', sessionID: 'sess-y' }, {})).resolves.toBeUndefined();
 

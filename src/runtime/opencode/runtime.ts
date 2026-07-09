@@ -39,7 +39,17 @@ export class OpencodeRuntime implements AgentRuntime {
       claudeReadDirs: [],
       claudeWriteDirs: [],
     });
-    const readOnly = repo ? !repo.editAllowed : false;
+    // Parity with the Claude runtime: the Claude path denies PM/plugin agents
+    // Bash/Edit/Write entirely, and only grants them to repo agents once edit
+    // mode is approved. opencode has no OS sandbox, so its built-in
+    // edit/write/bash tools are the only thing standing between "readOnly"
+    // and full write access — readOnly must therefore be true for BOTH
+    // non-repo (PM/plugin) agents and read-only repo agents, and false only
+    // for edit-mode repo agents. PM/plugin agents are unaffected in practice:
+    // they only ever use their bridged custom tools (post_to_user etc. — not
+    // built-ins, never blocked) and built-in READ tools (read/grep/glob — not
+    // in RO_BUILTIN_BLOCK).
+    const readOnly = !(repo && repo.editAllowed);
 
     // Per-agent controller — aborts THIS agent's in-flight prompt only, never the
     // shared server. Task teardown calls handle.abort() after stopping the queue.
