@@ -13,13 +13,14 @@ import { GitLabHost } from '../connectors/gitlab/client.js';
 import { claudeSdkRuntime } from '../runtime/claude/runtime.js';
 import { claudeLlmOneShot } from '../runtime/claude/llm-one-shot.js';
 import { opencodeLlmOneShot } from '../runtime/opencode/llm-one-shot.js';
+import { opencodeRuntime } from '../runtime/opencode/runtime.js';
 import { logger } from './logger.js';
 
 export type RepoHostKind = 'github' | 'gitlab';
 export type AgentRuntimeKind = 'claude' | 'opencode';
 
 const SUPPORTED_REPO_HOSTS: RepoHostKind[] = ['github', 'gitlab'];
-const SUPPORTED_RUNTIMES: AgentRuntimeKind[] = ['claude']; // opencode: Phase 2
+const SUPPORTED_RUNTIMES: AgentRuntimeKind[] = ['claude', 'opencode'];
 
 export function resolveRepoHostKind(): RepoHostKind {
   const raw = (process.env.REPO_HOST ?? 'github').trim().toLowerCase();
@@ -45,6 +46,21 @@ function assertGitLabEnv(): void {
 }
 
 /**
+ * The runtime routes logical model names via ARCHIE_OPENCODE_MODEL_<TIER> /
+ * _DEFAULT (see runtime/opencode/model.ts). Require at least one so model
+ * resolution can't fail at spawn with no route configured.
+ */
+function assertOpencodeEnv(): void {
+  const hasRoute = Object.keys(process.env).some((k) => k.startsWith('ARCHIE_OPENCODE_MODEL_'));
+  if (!hasRoute) {
+    throw new Error(
+      'AGENT_RUNTIME=opencode requires a model route: set ARCHIE_OPENCODE_MODEL_DEFAULT ' +
+      '(or a per-tier ARCHIE_OPENCODE_MODEL_<TIER>, e.g. ARCHIE_OPENCODE_MODEL_OPUS) to a "provider/model" value.',
+    );
+  }
+}
+
+/**
  * Validate selected backends are supported in this build. Throw with an
  * actionable message otherwise. Call once at boot (see index.ts).
  */
@@ -66,6 +82,7 @@ export function assertBackendConfig(): void {
     }
     throw new Error(`AGENT_RUNTIME="${runtime}" is invalid. Supported values: ${SUPPORTED_RUNTIMES.join(', ')}.`);
   }
+  if (runtime === 'opencode') assertOpencodeEnv();
 }
 
 let gitlabSingleton: GitLabHost | null = null;
@@ -95,15 +112,18 @@ export function getRepoHost(): RepoHost | null {
 }
 
 /**
- * The active AgentRuntime. Phase 0 supports only 'claude'; the default branch
- * mirrors getRepoHost()'s defensive fallback (assertBackendConfig() rejects
- * unsupported values at boot, so this only guards against a mis-sequenced call).
+ * The active AgentRuntime — 'claude' (default) or 'opencode'. The default
+ * branch mirrors getRepoHost()'s defensive fallback (assertBackendConfig()
+ * rejects unsupported values at boot, so this only guards against a
+ * mis-sequenced call).
  */
 export function getAgentRuntime(): AgentRuntime {
   const runtime = resolveAgentRuntimeKind();
   switch (runtime) {
     case 'claude':
       return claudeSdkRuntime;
+    case 'opencode':
+      return opencodeRuntime;
     default:
       // Rejected by assertBackendConfig() at boot; default defensively.
       logger.warn('backends', `getAgentRuntime() called for unsupported runtime "${runtime}"; defaulting to claude`);
@@ -114,9 +134,7 @@ export function getAgentRuntime(): AgentRuntime {
 /**
  * The active LlmOneShot (one-shot prompt→text/JSON calls). Tied to the agent
  * runtime selection: opencode when AGENT_RUNTIME=opencode, otherwise the Claude
- * SDK impl (default). AGENT_RUNTIME=opencode is still gated by
- * assertBackendConfig() until the full opencode AgentRuntime lands (Phase 2),
- * so this branch is exercised via unit tests / direct calls for now.
+ * SDK impl (default).
  */
 export function getLlmOneShot(): LlmOneShot {
   return resolveAgentRuntimeKind() === 'opencode' ? opencodeLlmOneShot : claudeLlmOneShot;

@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { resolveRepoHostKind, assertBackendConfig, getBackendMatrix } from '../backends.js';
+import { resolveRepoHostKind, assertBackendConfig, getBackendMatrix, getAgentRuntime } from '../backends.js';
 
 const ORIG = { ...process.env };
 afterEach(() => {
@@ -32,5 +32,30 @@ describe('backends config resolver', () => {
     delete process.env.REPO_HOST;
     delete process.env.AGENT_RUNTIME;
     expect(getBackendMatrix()).toEqual({ repoHost: 'github', runtime: 'claude' });
+  });
+
+  it('accepts AGENT_RUNTIME=opencode when a model route is configured', () => {
+    process.env.AGENT_RUNTIME = 'opencode';
+    process.env.ARCHIE_OPENCODE_MODEL_DEFAULT = 'anthropic/claude-haiku-4-5';
+    expect(() => assertBackendConfig()).not.toThrow();
+  });
+
+  it('rejects AGENT_RUNTIME=opencode with no model route, actionably', () => {
+    process.env.AGENT_RUNTIME = 'opencode';
+    delete process.env.ARCHIE_OPENCODE_MODEL_DEFAULT;
+    delete process.env.ARCHIE_OPENCODE_MODEL_OPUS;
+    delete process.env.ARCHIE_OPENCODE_MODEL_SONNET;
+    expect(() => assertBackendConfig()).toThrow(/ARCHIE_OPENCODE_MODEL/);
+  });
+
+  it('rejects an invalid AGENT_RUNTIME value', () => {
+    process.env.AGENT_RUNTIME = 'gpt';
+    expect(() => assertBackendConfig()).toThrow(/AGENT_RUNTIME/);
+  });
+
+  it('getAgentRuntime returns the opencode runtime for AGENT_RUNTIME=opencode', () => {
+    process.env.AGENT_RUNTIME = 'opencode';
+    process.env.ARCHIE_OPENCODE_MODEL_DEFAULT = 'anthropic/claude-haiku-4-5';
+    expect(getAgentRuntime().kind).toBe('opencode');
   });
 });
