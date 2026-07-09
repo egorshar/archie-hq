@@ -35,6 +35,7 @@ function makeAgent() {
     handle: undefined as any,
     pendingTeardown: undefined as any,
     clearPendingTeardown: vi.fn(),
+    backgroundTasks: new Set(),
   };
 }
 function makeTask() {
@@ -98,8 +99,8 @@ describe('OpencodeRuntime.spawn', () => {
     const agent = makeAgent();
     const task = makeTask();
     let seenSignal: AbortSignal | undefined;
-    prompt.mockImplementation(async (_req: any, ropts: any) => {
-      seenSignal = ropts?.signal;
+    prompt.mockImplementation(async (req: any) => {
+      seenSignal = req?.signal;
       return { data: { parts: [{ type: 'text', text: 'ok' }] } };
     });
     await new OpencodeRuntime().spawn(agent as any, task as any);

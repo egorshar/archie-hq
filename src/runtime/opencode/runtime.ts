@@ -79,22 +79,15 @@ export class OpencodeRuntime implements AgentRuntime {
           }
           const text = msg.from ? `[From ${msg.from}]: ${msg.content}` : msg.content;
 
-          // client.session.prompt receives the abort signal as request options
-          // (the `@hey-api` fetch-client convention: `{ signal }` as a second
-          // argument). The pinned @opencode-ai/sdk types declare `prompt` as
-          // single-argument (Options<SessionPromptData> merges `signal` into the
-          // same object as `path`/`body`), so this two-arg call is cast through
-          // `any` to unblock typecheck; the exact SDK transport for the abort
-          // signal is verified live in a later task (see runtime.test.ts's
-          // 'abort() cancels via the AbortController signal' case, which asserts
-          // this two-arg threading against a mock).
-          const res = await (client.session.prompt as any)(
-            {
-              path: { id: sessionId },
-              body: { model, parts: [{ type: 'text', text }], system: systemPrompt },
-            },
-            { signal: abortController.signal },
-          );
+          // client.session.prompt is single-argument: Options<SessionPromptData>
+          // extends Omit<RequestInit, 'body'|'headers'|'method'> & SessionPromptData,
+          // so `signal` merges into the same object as `path`/`body` (the
+          // `@hey-api` fetch-client convention) rather than a second argument.
+          const res = await client.session.prompt({
+            path: { id: sessionId },
+            body: { model, parts: [{ type: 'text', text }], system: systemPrompt },
+            signal: abortController.signal,
+          });
 
           if (firstResponse) {
             firstResponse = false;
@@ -120,7 +113,7 @@ export class OpencodeRuntime implements AgentRuntime {
         if (!agent.queue.isStopped()) logger.error(def.id, 'opencode turn failed', err as Error);
       } finally {
         handle.isRunning = false;
-        agent.backgroundTasks?.clear();
+        agent.backgroundTasks.clear();
         if (agent.pendingTeardown) {
           const teardown = agent.pendingTeardown;
           agent.clearPendingTeardown();
