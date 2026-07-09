@@ -5,8 +5,9 @@
  *
  * Note: opencode SDK 1.17.16 has no native structured-output param, so json()
  * instructs the model to emit schema-conforming JSON and parses it (the caller
- * re-validates with its own schema, per the port contract). All opencode
- * imports are confined to this module (spec R4).
+ * re-validates with its own schema, per the port contract). The embedded
+ * server and its client are shared via ./server.js; all opencode SDK imports
+ * are confined to src/runtime/opencode/ (spec R4).
  */
 import type { LlmOneShot, LlmTextRequest, LlmJsonRequest } from '../../ports/llm-one-shot.js';
 import { logger } from '../../system/logger.js';
