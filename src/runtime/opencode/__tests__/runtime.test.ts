@@ -95,6 +95,21 @@ describe('OpencodeRuntime.spawn', () => {
     expect(teardown).toHaveBeenCalledTimes(1);
   });
 
+  it('degrades gracefully when the embedded server fails to start', async () => {
+    const agent = makeAgent();
+    const task = makeTask();
+    // Embedded-server startup failure (e.g. `spawn opencode ENOENT`) must fail
+    // only this agent — spawn() must not reject, handle.running must resolve (not
+    // reject), and the agent must end inactive — so recovery re-spawn can't
+    // surface an unhandled rejection that crashes the process.
+    getOpencodeClient.mockRejectedValueOnce(new Error('spawn opencode ENOENT'));
+
+    await expect(new OpencodeRuntime().spawn(agent as any, task as any)).resolves.toBeUndefined();
+    expect(agent.handle).toBeTruthy();
+    await expect(agent.handle.running).resolves.toBeUndefined();
+    expect(agent.handle.isRunning).toBe(false);
+  });
+
   it('abort() cancels via the AbortController signal', async () => {
     const agent = makeAgent();
     const task = makeTask();

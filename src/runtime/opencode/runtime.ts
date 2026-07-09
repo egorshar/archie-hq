@@ -37,14 +37,6 @@ export class OpencodeRuntime implements AgentRuntime {
       claudeWriteDirs: [],
     });
 
-    const client = await getOpencodeClient();
-    // Logical model → opencode {providerID, modelID}. PM defaults to opus, other
-    // agents to sonnet, unless the def pins one; resolveOpencodeModel maps the
-    // logical name to a provider/model via env (throws with an actionable message
-    // if unresolvable).
-    const logicalModel = def.model || (isPmAgent(def) ? 'opus' : 'sonnet');
-    const model = resolveOpencodeModel(logicalModel);
-
     // Per-agent controller — aborts THIS agent's in-flight prompt only, never the
     // shared server. Task teardown calls handle.abort() after stopping the queue.
     const abortController = new AbortController();
@@ -59,6 +51,19 @@ export class OpencodeRuntime implements AgentRuntime {
       let sessionId = agent.session.session_id;
       let firstResponse = true;
       try {
+        // Start the embedded server and resolve the model INSIDE the turn body so
+        // a startup failure (server can't spawn, model unresolvable) fails only
+        // this agent — logged here, marked inactive by the finally + Agent.spawn's
+        // crash wiring — instead of rejecting spawn() and surfacing as an
+        // unhandled rejection that crashes the process when recovery re-spawns.
+        const client = await getOpencodeClient();
+        // Logical model → opencode {providerID, modelID}. PM defaults to opus,
+        // other agents to sonnet, unless the def pins one; resolveOpencodeModel
+        // maps the logical name to a provider/model via env (throws with an
+        // actionable message if unresolvable).
+        const logicalModel = def.model || (isPmAgent(def) ? 'opus' : 'sonnet');
+        const model = resolveOpencodeModel(logicalModel);
+
         // Ensure a session (resume the stored one, else create).
         if (!sessionId) {
           const created = await client.session.create({ body: { title: `archie-${task.taskId}-${def.id}` } });
