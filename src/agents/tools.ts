@@ -113,6 +113,9 @@ const execAsync = promisify(exec);
 const ok = (text: string) => ({ content: [{ type: 'text' as const, text }] });
 const err = (text: string) => ({ content: [{ type: 'text' as const, text: `Error: ${text}` }] });
 
+/** Shared return shape for the extracted control-tool handlers (matches `ok`/`err`'s output). */
+export type ToolResult = ReturnType<typeof ok>;
+
 /**
  * Get the agent's sandbox config. Populated by `spawnAgent` before any tool
  * runs; throws if a tool somehow executes before spawn (programmer error).
@@ -264,6 +267,38 @@ function createShareArtifactTool(agent: Agent, task: Task) {
 
 // ---- PM-only tools ----
 
+const postToUserArgsSchema = {
+  message: z.string().describe('The message to send'),
+  target: z.object({
+    channel: z.string().optional().describe('Channel key of an existing linked thread (e.g., "slack:C123:456.789")'),
+    new_dm: z.string().optional().describe('User ID to start a new DM conversation with'),
+    new_thread: z.string().optional().describe('Channel ID to start a new thread in'),
+  }).optional().describe('Where to post. Omit to post to the default channel.'),
+};
+export type PostToUserArgs = z.infer<z.ZodObject<typeof postToUserArgsSchema>>;
+
+export async function postToUserHandler(agent: Agent, task: Task, args: PostToUserArgs): Promise<ToolResult> {
+  const agentName = agent.def.id as AgentName;
+  const hasTarget = !!(args.target?.channel || args.target?.new_dm || args.target?.new_thread);
+  if (!hasTarget && Object.keys(task.metadata.channels).length === 0) {
+    return ok(
+      'No channel linked to this task. Use target.new_dm <userId> or target.new_thread <channelId> ' +
+      'to open a destination, or call report_completion() without a message to finish silently.'
+    );
+  }
+  task.touch();
+  let newChannelKey: string | null;
+  try {
+    newChannelKey = await task.postToUser(args.message, agentName, args.target);
+  } catch (e) {
+    return ok(formatSlackSendError(e));
+  }
+  if (newChannelKey) {
+    return ok(`Message posted. New channel linked: ${newChannelKey} (saved in task metadata for future use)`);
+  }
+  return ok('Message posted.');
+}
+
 function createPostToUserTool(agent: Agent, task: Task) {
   return tool(
     'post_to_user',
@@ -275,35 +310,8 @@ function createPostToUserTool(agent: Agent, task: Task) {
     'If it lives in a DM, you are 1:1 with that user — keep it private and don\'t pull others in. ' +
     'When creating new DMs/threads, returns the channel key for future use. ' +
     'To attach files, send the message first, then call `post_files_to_user` with the same target.',
-    {
-      message: z.string().describe('The message to send'),
-      target: z.object({
-        channel: z.string().optional().describe('Channel key of an existing linked thread (e.g., "slack:C123:456.789")'),
-        new_dm: z.string().optional().describe('User ID to start a new DM conversation with'),
-        new_thread: z.string().optional().describe('Channel ID to start a new thread in'),
-      }).optional().describe('Where to post. Omit to post to the default channel.'),
-    },
-    async (args) => {
-      const agentName = agent.def.id as AgentName;
-      const hasTarget = !!(args.target?.channel || args.target?.new_dm || args.target?.new_thread);
-      if (!hasTarget && Object.keys(task.metadata.channels).length === 0) {
-        return ok(
-          'No channel linked to this task. Use target.new_dm <userId> or target.new_thread <channelId> ' +
-          'to open a destination, or call report_completion() without a message to finish silently.'
-        );
-      }
-      task.touch();
-      let newChannelKey: string | null;
-      try {
-        newChannelKey = await task.postToUser(args.message, agentName, args.target);
-      } catch (e) {
-        return ok(formatSlackSendError(e));
-      }
-      if (newChannelKey) {
-        return ok(`Message posted. New channel linked: ${newChannelKey} (saved in task metadata for future use)`);
-      }
-      return ok('Message posted.');
-    },
+    postToUserArgsSchema,
+    async (args) => postToUserHandler(agent, task, args),
   );
 }
 
@@ -427,86 +435,152 @@ function createAssignTaskOwnerTool(agent: Agent, task: Task) {
   );
 }
 
+const requestEditModeArgsSchema = {
+  reason: z.string().describe('Brief summary of what changes need to be made'),
+  channel: z.string().optional().describe('Channel key of an existing linked thread to post the request to (e.g., "slack:C123:456.789"). Omit to use the task\'s default channel.'),
+};
+export type RequestEditModeArgs = z.infer<z.ZodObject<typeof requestEditModeArgsSchema>>;
+
+export async function requestEditModeHandler(agent: Agent, task: Task, args: RequestEditModeArgs): Promise<ToolResult> {
+  const agentName = agent.def.id as AgentName;
+
+  // Idempotency: edit mode is a task-lifetime grant. If it is already active,
+  // don't post another approval prompt or pause the task — just tell the
+  // caller it's already granted so it proceeds instead of waiting on a user
+  // who has nothing to approve.
+  if (task.metadata.edit_allowed === true) {
+    return ok('Edit mode is already approved for this task and persists for its lifetime — no need to request it again. Go ahead and make the changes.');
+  }
+
+  // Already pausing this turn — the spawn loop tears the task down at turn
+  // end. Skip a duplicate approval post if the tool fires twice.
+  if (agent.pendingTeardown) {
+    return ok('Edit mode request already sent — task is pausing pending user approval.');
+  }
+
+  // Validate an explicit target before posting so a bad key surfaces as
+  // actionable feedback instead of silently dropping to the CLI log. The
+  // task is left running so the agent can retry with a valid channel.
+  if (args.channel) {
+    const ch = task.metadata.channels[args.channel];
+    if (!ch) {
+      return ok(`Channel ${args.channel} is not linked to this task. Open one with post_to_user(target.new_thread/new_dm), or omit channel to use the default.`);
+    }
+    if (ch.type !== 'slack') {
+      return ok(`Channel ${args.channel} is not a Slack channel (type: ${ch.type}).`);
+    }
+  }
+
+  logger.agentAction(agentName, 'Requesting edit mode', args.reason);
+  task.touch();
+
+  await appendAgentFinding(task.taskId, 'system', `Edit mode requested: ${args.reason}`, 'decision');
+
+  const blocks = [
+    {
+      type: 'section',
+      text: { type: 'mrkdwn', text: `*Edit mode request:* ${args.reason}` },
+    },
+    {
+      type: 'actions',
+      elements: [
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: 'Approve' },
+          action_id: 'approve_edit_mode',
+          value: task.taskId,
+          style: 'primary',
+        },
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: 'Deny' },
+          action_id: 'deny_edit_mode',
+          value: task.taskId,
+          style: 'danger',
+        },
+      ],
+    },
+  ];
+  await task.postInteractiveToUser(`Edit mode request: ${args.reason}`, blocks, 'edit_mode', args.channel);
+
+  // Task is now paused pending approval — freeze the status so the wind-down
+  // doesn't resurface a "working…" indicator.
+  task.suspendStatus();
+  // Defer the pause to turn-end (see report_completion) so stopping the queue
+  // doesn't close the input stream under an in-flight hook ("stream closed").
+  agent.deferTeardown(() => task.stop());
+  return { content: [{ type: 'text' as const, text: 'Edit mode request sent. Task paused pending user approval.' }] };
+}
+
 function createRequestEditModeTool(agent: Agent, task: Task) {
   return tool(
     'request_edit_mode',
     'Request permission to make code changes. Call this AFTER explaining to the user what changes are needed and why. Task will pause until user approves or denies. ' +
     'Edit mode is a task-LIFETIME grant: once approved it stays in effect for the rest of the task, so you only ever need to request it once. If it is already approved this call is a no-op — it will not prompt the user again, it just confirms the grant. ' +
     'Without `channel`, the request posts to the task\'s default channel. Pass `channel` (a channel key like "slack:C123:456.789") to post it to a specific linked thread — useful when the task has no default channel yet or you opened a new thread to talk to the user.',
-    {
-      reason: z.string().describe('Brief summary of what changes need to be made'),
-      channel: z.string().optional().describe('Channel key of an existing linked thread to post the request to (e.g., "slack:C123:456.789"). Omit to use the task\'s default channel.'),
-    },
-    async (args) => {
-      const agentName = agent.def.id as AgentName;
+    requestEditModeArgsSchema,
+    async (args) => requestEditModeHandler(agent, task, args),
+  );
+}
 
-      // Idempotency: edit mode is a task-lifetime grant. If it is already active,
-      // don't post another approval prompt or pause the task — just tell the
-      // caller it's already granted so it proceeds instead of waiting on a user
-      // who has nothing to approve.
-      if (task.metadata.edit_allowed === true) {
-        return ok('Edit mode is already approved for this task and persists for its lifetime — no need to request it again. Go ahead and make the changes.');
-      }
+const reportCompletionArgsSchema = {
+  message: z.string().optional().describe('Optional message to post to Slack before finishing'),
+};
+export type ReportCompletionArgs = z.infer<z.ZodObject<typeof reportCompletionArgsSchema>>;
 
-      // Already pausing this turn — the spawn loop tears the task down at turn
-      // end. Skip a duplicate approval post if the tool fires twice.
-      if (agent.pendingTeardown) {
-        return ok('Edit mode request already sent — task is pausing pending user approval.');
-      }
-
-      // Validate an explicit target before posting so a bad key surfaces as
-      // actionable feedback instead of silently dropping to the CLI log. The
-      // task is left running so the agent can retry with a valid channel.
-      if (args.channel) {
-        const ch = task.metadata.channels[args.channel];
-        if (!ch) {
-          return ok(`Channel ${args.channel} is not linked to this task. Open one with post_to_user(target.new_thread/new_dm), or omit channel to use the default.`);
-        }
-        if (ch.type !== 'slack') {
-          return ok(`Channel ${args.channel} is not a Slack channel (type: ${ch.type}).`);
-        }
-      }
-
-      logger.agentAction(agentName, 'Requesting edit mode', args.reason);
-      task.touch();
-
-      await appendAgentFinding(task.taskId, 'system', `Edit mode requested: ${args.reason}`, 'decision');
-
-      const blocks = [
-        {
-          type: 'section',
-          text: { type: 'mrkdwn', text: `*Edit mode request:* ${args.reason}` },
-        },
-        {
-          type: 'actions',
-          elements: [
-            {
-              type: 'button',
-              text: { type: 'plain_text', text: 'Approve' },
-              action_id: 'approve_edit_mode',
-              value: task.taskId,
-              style: 'primary',
-            },
-            {
-              type: 'button',
-              text: { type: 'plain_text', text: 'Deny' },
-              action_id: 'deny_edit_mode',
-              value: task.taskId,
-              style: 'danger',
-            },
-          ],
-        },
-      ];
-      await task.postInteractiveToUser(`Edit mode request: ${args.reason}`, blocks, 'edit_mode', args.channel);
-
-      // Task is now paused pending approval — freeze the status so the wind-down
-      // doesn't resurface a "working…" indicator.
-      task.suspendStatus();
-      // Defer the pause to turn-end (see report_completion) so stopping the queue
-      // doesn't close the input stream under an in-flight hook ("stream closed").
-      agent.deferTeardown(() => task.stop());
-      return { content: [{ type: 'text' as const, text: 'Edit mode request sent. Task paused pending user approval.' }] };
-    },
+export async function reportCompletionHandler(agent: Agent, task: Task, args: ReportCompletionArgs): Promise<ToolResult> {
+  const agentName = agent.def.id as AgentName;
+  // Idempotency: task already parked/stopped — nothing to do.
+  if (!task.isActive) {
+    return ok('Task already completed. End your turn.');
+  }
+  // A forced stop (request_edit_mode / research-budget) is already deferred
+  // this turn — don't double up.
+  if (agent.pendingTeardown) {
+    return ok('Task already stopping. End your turn.');
+  }
+  // Already recorded completion this turn — don't re-post or re-signal.
+  if (task.completionIntent) {
+    return ok('Completion already recorded. End your turn.');
+  }
+  if (args.message) {
+    if (Object.keys(task.metadata.channels).length === 0) {
+      return ok(
+        'Cannot post a completion message — no channel linked. ' +
+        'Either open a destination via post_to_user(target.new_dm/new_thread) first, ' +
+        'or call report_completion() without a message to finish silently.'
+      );
+    }
+    try {
+      await task.postToUser(args.message, agentName);
+    } catch (err) {
+      // Surface the error to the agent so it can retry (e.g. split the
+      // message). Do NOT record completion — it only proceeds after a
+      // successful post (or no message at all).
+      return ok(formatSlackSendError(err));
+    }
+  }
+  logger.agentAction(agentName, 'Reporting completion', '');
+  task.touch();
+  // Post any changed PR card now, right under the final message. Under the
+  // quiescence model the task isn't torn down here — complete() runs later
+  // from the idle-check once the system goes quiet — so this is the prompt
+  // path for the card; posting now also means it exists before CI webhooks
+  // arrive, so they have something to update in place.
+  await task.resurfacePrCards();
+  // Blank the live status now — the final message is sent and the turn is
+  // ending; without this the indicator would pop back during the wind-down.
+  task.suspendStatus();
+  // Record intent instead of tearing down. The idle-check parks the task once
+  // every agent is idle (quiescent); if a peer is in fact still working, the
+  // task stays active until it's done — so completion can't orphan a peer, and
+  // no synchronous peer-gate races the Stop-hook boundary. The agent must end
+  // its turn now: that's what lets the system reach quiescence and park.
+  task.setCompletionIntent();
+  return ok(
+    args.message
+      ? 'Message posted. Nothing left to do — end your turn.'
+      : 'Completion recorded. Nothing left to do — end your turn.'
   );
 }
 
@@ -514,64 +588,8 @@ function createReportCompletionTool(agent: Agent, task: Task) {
   return tool(
     'report_completion',
     'Finish your turn: signal you have responded and are now waiting only on the user (not on any agent). If a message is provided, it is posted first.',
-    {
-      message: z.string().optional().describe('Optional message to post to Slack before finishing'),
-    },
-    async (args) => {
-      const agentName = agent.def.id as AgentName;
-      // Idempotency: task already parked/stopped — nothing to do.
-      if (!task.isActive) {
-        return ok('Task already completed. End your turn.');
-      }
-      // A forced stop (request_edit_mode / research-budget) is already deferred
-      // this turn — don't double up.
-      if (agent.pendingTeardown) {
-        return ok('Task already stopping. End your turn.');
-      }
-      // Already recorded completion this turn — don't re-post or re-signal.
-      if (task.completionIntent) {
-        return ok('Completion already recorded. End your turn.');
-      }
-      if (args.message) {
-        if (Object.keys(task.metadata.channels).length === 0) {
-          return ok(
-            'Cannot post a completion message — no channel linked. ' +
-            'Either open a destination via post_to_user(target.new_dm/new_thread) first, ' +
-            'or call report_completion() without a message to finish silently.'
-          );
-        }
-        try {
-          await task.postToUser(args.message, agentName);
-        } catch (err) {
-          // Surface the error to the agent so it can retry (e.g. split the
-          // message). Do NOT record completion — it only proceeds after a
-          // successful post (or no message at all).
-          return ok(formatSlackSendError(err));
-        }
-      }
-      logger.agentAction(agentName, 'Reporting completion', '');
-      task.touch();
-      // Post any changed PR card now, right under the final message. Under the
-      // quiescence model the task isn't torn down here — complete() runs later
-      // from the idle-check once the system goes quiet — so this is the prompt
-      // path for the card; posting now also means it exists before CI webhooks
-      // arrive, so they have something to update in place.
-      await task.resurfacePrCards();
-      // Blank the live status now — the final message is sent and the turn is
-      // ending; without this the indicator would pop back during the wind-down.
-      task.suspendStatus();
-      // Record intent instead of tearing down. The idle-check parks the task once
-      // every agent is idle (quiescent); if a peer is in fact still working, the
-      // task stays active until it's done — so completion can't orphan a peer, and
-      // no synchronous peer-gate races the Stop-hook boundary. The agent must end
-      // its turn now: that's what lets the system reach quiescence and park.
-      task.setCompletionIntent();
-      return ok(
-        args.message
-          ? 'Message posted. Nothing left to do — end your turn.'
-          : 'Completion recorded. Nothing left to do — end your turn.'
-      );
-    },
+    reportCompletionArgsSchema,
+    async (args) => reportCompletionHandler(agent, task, args),
   );
 }
 
