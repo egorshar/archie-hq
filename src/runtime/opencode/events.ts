@@ -9,6 +9,7 @@
  */
 import type { OpencodeClient } from './server.js';
 import type { SessionRegistry } from './bridge/registry.js';
+import { REPO_TOOL_SPECS } from '../../agents/tools.js';
 import { logger } from '../../system/logger.js';
 
 export interface EventConsumerHandle {
@@ -16,20 +17,31 @@ export interface EventConsumerHandle {
 }
 
 /**
+ * Repo-tool name set, derived from the same `REPO_TOOL_SPECS` (in
+ * `src/agents/tools.ts`) the Claude SDK MCP server and the opencode bridge
+ * dispatch both use — single source of truth, no hand-maintained copy that can
+ * drift. Computed lazily (not at module top level): this module sits in the
+ * existing import cycle (`tools.ts` -> `system/backends.ts` -> opencode's
+ * `llm-one-shot.ts` -> `server.ts` -> `events.ts` -> back to `tools.ts`), so
+ * `REPO_TOOL_SPECS` is not guaranteed populated at module-eval time. Deferring
+ * to first call (and caching) sidesteps the ordering hazard — by the time any
+ * event is handled, both modules have fully loaded. Mirrors
+ * `bridge/server.ts`'s `getRepoToolDescriptors()`.
+ */
+let repoToolNames: Set<string> | null = null;
+function isRepoTool(tool: string): boolean {
+  if (!repoToolNames) repoToolNames = new Set(REPO_TOOL_SPECS.map((s) => s.name));
+  return repoToolNames.has(tool);
+}
+
+/**
  * Bridged repo-tools surface from opencode as bare names (`push_branch`); the
  * status mapper (activity.ts) keys them under the `mcp__repo-tools__` namespace.
- * Kept in sync with REPO_TOOL_SPECS in bridge/plugin-source (control tools like
- * post_to_user map to null in activity.ts, so they need no prefixing).
+ * Control tools like post_to_user map to null in activity.ts, so they need no
+ * prefixing.
  */
 function canonicalToolName(tool: string): string {
-  const REPO_TOOL_NAMES = new Set([
-    'push_branch', 'create_pull_request', 'merge_pull_request', 'close_pull_request',
-    'update_pr', 'add_pr_comment', 'add_review_comment', 'reply_to_review_comment',
-    'resolve_review_thread', 'request_re_review', 'list_prs', 'get_pr', 'get_pr_status',
-    'get_pr_checks', 'get_check_run', 'get_pr_reviews', 'get_pr_comments',
-    'get_review_threads', 'fetch', 'switch_branch', 'list_branches', 'create_branch',
-  ]);
-  return REPO_TOOL_NAMES.has(tool) ? `mcp__repo-tools__${tool}` : tool;
+  return isRepoTool(tool) ? `mcp__repo-tools__${tool}` : tool;
 }
 
 /** Correlate one opencode event to a live turn and feed the status line. Never throws. */
@@ -73,6 +85,7 @@ export function startEventConsumer(client: OpencodeClient, registry: SessionRegi
     try {
       const { stream } = await client.event.subscribe();
       for await (const ev of stream as AsyncIterable<unknown>) {
+        // stop() is best-effort: the loop unblocks on the next event / stream close.
         if (stopped) break;
         handleOpencodeEvent(ev, registry);
       }

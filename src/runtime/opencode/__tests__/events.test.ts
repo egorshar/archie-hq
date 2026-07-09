@@ -30,6 +30,15 @@ describe('handleOpencodeEvent', () => {
     expect(noteActivity).toHaveBeenCalledWith('backend-agent', 'mcp__repo-tools__push_branch', {});
   });
 
+  it('prefixes every repo tool derived from REPO_TOOL_SPECS (anti-drift, e.g. code-scanning)', () => {
+    const { reg, noteActivity } = registryWith('S1');
+    handleOpencodeEvent(
+      { type: 'message.part.updated', properties: { part: { type: 'tool', sessionID: 'S1', tool: 'list_code_scanning_alerts', state: {} } } },
+      reg,
+    );
+    expect(noteActivity).toHaveBeenCalledWith('backend-agent', 'mcp__repo-tools__list_code_scanning_alerts', {});
+  });
+
   it('ignores events for unknown sessions', () => {
     const { reg, noteActivity } = registryWith('S1');
     handleOpencodeEvent(
