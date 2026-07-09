@@ -18,6 +18,7 @@ import { writeBridgePlugin } from './bridge/plugin-source.js';
 import { startBridgeServer, type BridgeHandle } from './bridge/server.js';
 import { SessionRegistry } from './bridge/registry.js';
 import { resolveOpencodeModel } from './model.js';
+import { startEventConsumer, type EventConsumerHandle } from './events.js';
 
 export type OpencodeClient = Awaited<ReturnType<typeof createOpencode>>['client'];
 
@@ -54,6 +55,7 @@ const SERVER_MODEL_LOGICAL = 'default';
 
 let clientPromise: Promise<OpencodeClient> | null = null;
 let bridgeHandle: BridgeHandle | null = null;
+let eventConsumer: EventConsumerHandle | null = null;
 
 /**
  * Lazily start (once) and reuse the embedded opencode server's client.
@@ -89,6 +91,7 @@ export function getOpencodeClient(): Promise<OpencodeClient> {
             permission: READ_ONLY_PERMISSION,
           },
         });
+        eventConsumer = startEventConsumer(r.client, sharedRegistry);
         return r.client;
       } catch (err) {
         await bridge.close().catch(() => {});
@@ -109,6 +112,10 @@ export function getOpencodeClient(): Promise<OpencodeClient> {
  * shutdown path; never logs the bridge token.
  */
 export async function closeOpencodeBridge(): Promise<void> {
+  if (eventConsumer) {
+    eventConsumer.stop();
+    eventConsumer = null;
+  }
   if (bridgeHandle) {
     const handle = bridgeHandle;
     bridgeHandle = null;
