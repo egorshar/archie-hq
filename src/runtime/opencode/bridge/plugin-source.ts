@@ -88,7 +88,52 @@ export const ArchieBridgePlugin = async (pluginCtx) => {
     });
   }
 
-  return { tool: tools };
+  // RO guard (B.2 spike-proven mechanism, see __spike__/b2-spike.md): opencode's
+  // built-in edit/write/bash tools have no per-session permission surface, so
+  // the shared server-wide config.permission can't gate them per session. A
+  // plugin "tool.execute.before" hook that throws for a session's blocked
+  // tools is the only mechanism the spike found that actually blocks them.
+  // The guard resolves each session's policy via the bridge's bearer-gated
+  // GET /policy?sessionId=<id>, caching the result per sessionID in this
+  // module-level Map so a long-running session pays the round-trip once, not
+  // on every tool call.
+  const policyCache = new Map();
+
+  async function resolvePolicy(sessionID) {
+    if (policyCache.has(sessionID)) return policyCache.get(sessionID);
+    let policy;
+    try {
+      const r = await fetch(BRIDGE_URL + "/policy?sessionId=" + encodeURIComponent(sessionID), {
+        headers: { authorization: "Bearer " + BRIDGE_TOKEN },
+      });
+      const j = await r.json();
+      policy = { blockedTools: Array.isArray(j && j.blockedTools) ? j.blockedTools : [] };
+      policyCache.set(sessionID, policy);
+    } catch {
+      // Fail-safe choice: if the policy fetch itself errors, allow the call
+      // through rather than blocking every built-in tool for the session.
+      // This only happens if the bridge (not just this one call) is
+      // unreachable — in that state every bridged custom tool is already
+      // failing too, so blocking built-ins here buys nothing but a worse
+      // failure mode (an agent stuck unable to even read). The bridge's own
+      // /tool dispatch rejection of write repo-tools remains the backstop
+      // for the tools that go through it. Deliberately NOT cached, so the
+      // next call retries instead of staying unguarded for the session's
+      // remaining lifetime.
+      policy = { blockedTools: [] };
+    }
+    return policy;
+  }
+
+  return {
+    tool: tools,
+    "tool.execute.before": async (input, output) => {
+      const policy = await resolvePolicy(input.sessionID);
+      if (policy.blockedTools.includes(input.tool)) {
+        throw new Error("read-only mode: " + input.tool + " is not permitted");
+      }
+    },
+  };
 };
 `;
 }
