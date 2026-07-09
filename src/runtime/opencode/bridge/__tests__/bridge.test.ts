@@ -88,4 +88,38 @@ describe('bridge server', () => {
   it('binds to loopback only', () => {
     expect(handle.url).toMatch(/^http:\/\/127\.0\.0\.1:/);
   });
+
+  it('returns the tool result as an unwrapped string, not a ToolResult object', async () => {
+    // A task with isActive:false makes reportCompletionHandler short-circuit
+    // on its very first branch, returning a plain
+    // `{ content: [{ type: 'text', text }] }` ToolResult without touching
+    // anything else on the stub — a minimal, real exercise of the unwrap.
+    const task: any = { taskId: 't1', isActive: false };
+    const agent: any = { def: { id: 'pm-agent' } };
+    registry.set('s1', { task, agent });
+    const res = await fetch(`${handle.url}/tool`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${handle.token}` },
+      body: JSON.stringify({ sessionId: 's1', tool: 'report_completion', args: {} }),
+    });
+    const body: any = await res.json();
+    expect(body.ok).toBe(true);
+    expect(typeof body.result).toBe('string');
+    expect(body.result).toBe('Task already completed. End your turn.');
+  });
+
+  describe('GET /tools', () => {
+    it('rejects a request without the bearer token', async () => {
+      const res = await fetch(`${handle.url}/tools`);
+      expect(res.status).toBe(401);
+    });
+
+    it('returns the manifest with a valid bearer token', async () => {
+      const res = await fetch(`${handle.url}/tools`, { headers: { authorization: `Bearer ${handle.token}` } });
+      expect(res.status).toBe(200);
+      const body: any = await res.json();
+      expect(Array.isArray(body)).toBe(true);
+      expect(body.some((t: any) => t.name === 'post_to_user')).toBe(true);
+    });
+  });
 });

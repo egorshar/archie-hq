@@ -6,12 +6,14 @@
  * opencode plugin via this localhost-only bridge. The plugin POSTs
  * `{ sessionId, tool, args }` to `/tool`; the bridge resolves the session in
  * the `SessionRegistry`, dispatches to one of a FIXED whitelist of control
- * tools, and returns `{ ok: true, result }` or `{ ok: false, error }`.
+ * tools, and returns `{ ok: true, result }` or `{ ok: false, error }`. `result`
+ * is the tool's `ToolResult` unwrapped to a plain string (opencode's
+ * custom-tool `execute` must return a string, not a JSON object).
  *
  * Security: binds to 127.0.0.1 only, requires a bearer token (constant-time
- * compared) on every request, and dispatches ONLY the three whitelisted tool
- * names — never an arbitrary function. Never logs the token, prompt content,
- * or tool args.
+ * compared) on every request (including `GET /tools`), and dispatches ONLY
+ * the three whitelisted tool names — never an arbitrary function. Never logs
+ * the token, prompt content, or tool args.
  */
 import { createServer, type IncomingMessage, type ServerResponse } from 'http';
 import { randomBytes, timingSafeEqual } from 'crypto';
@@ -36,8 +38,14 @@ export interface BridgeHandle {
   close(): Promise<void>;
 }
 
-/** JSON-serializable descriptor of a tool's args shape: argName -> primitive kind. */
-type ArgsSchema = Record<string, 'string' | 'object' | 'number' | 'boolean'>;
+/** JSON-serializable descriptor of a single arg: its primitive kind + whether it's optional. */
+interface ArgSpec {
+  type: 'string' | 'object' | 'number' | 'boolean';
+  optional?: boolean;
+}
+
+/** JSON-serializable descriptor of a tool's args shape: argName -> spec. */
+type ArgsSchema = Record<string, ArgSpec>;
 
 interface ToolDescriptor {
   name: string;
@@ -58,21 +66,32 @@ const TOOL_WHITELIST: Map<string, ToolHandler> = new Map([
   ['request_edit_mode', requestEditModeHandler as ToolHandler],
 ]);
 
+// Required/optional shape mirrors the real zod schemas in src/agents/tools.ts
+// EXACTLY (postToUserArgsSchema, reportCompletionArgsSchema,
+// requestEditModeArgsSchema) — keep these in sync if those schemas change.
 const TOOL_DESCRIPTORS: ToolDescriptor[] = [
   {
     name: 'post_to_user',
     description: 'Send a message to the user.',
-    argsSchema: { message: 'string', target: 'object' } satisfies Record<keyof PostToUserArgs, ArgsSchema[string]>,
+    argsSchema: {
+      message: { type: 'string' },
+      target: { type: 'object', optional: true },
+    } satisfies Record<keyof PostToUserArgs, ArgSpec>,
   },
   {
     name: 'report_completion',
     description: 'Finish your turn: signal you have responded and are now waiting only on the user.',
-    argsSchema: { message: 'string' } satisfies Record<keyof ReportCompletionArgs, ArgsSchema[string]>,
+    argsSchema: {
+      message: { type: 'string', optional: true },
+    } satisfies Record<keyof ReportCompletionArgs, ArgSpec>,
   },
   {
     name: 'request_edit_mode',
     description: 'Request permission to make code changes.',
-    argsSchema: { reason: 'string', channel: 'string' } satisfies Record<keyof RequestEditModeArgs, ArgsSchema[string]>,
+    argsSchema: {
+      reason: { type: 'string' },
+      channel: { type: 'string', optional: true },
+    } satisfies Record<keyof RequestEditModeArgs, ArgSpec>,
   },
 ];
 
@@ -121,6 +140,25 @@ function isAuthorized(req: IncomingMessage, token: string): boolean {
   return timingSafeEqual(presentedBuf, tokenBuf);
 }
 
+/**
+ * Unwrap a `ToolResult` (`{ content: [{ type: 'text', text }] }`) to the plain
+ * string opencode's custom-tool `execute` must return (spike-confirmed — a
+ * JSON blob renders as-is in the model's view instead of the tool's message).
+ * Joins all text parts; coerces anything unexpected to a string rather than
+ * dropping it silently.
+ */
+function unwrapToolResult(result: ToolResult): string {
+  const content = (result as { content?: unknown }).content;
+  if (!Array.isArray(content)) return String(result);
+  const parts = content
+    .map((part) => (part && typeof part === 'object' && typeof (part as any).text === 'string' ? (part as any).text : null))
+    .filter((text): text is string => text !== null);
+  if (parts.length > 0) return parts.join('\n');
+  // No text parts found (unexpected shape) — coerce sensibly instead of
+  // silently dropping the content.
+  return JSON.stringify(result);
+}
+
 async function handleToolRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -166,7 +204,7 @@ async function handleToolRequest(
 
   try {
     const result = await handler(session.agent, session.task, args);
-    sendJson(res, 200, { ok: true, result });
+    sendJson(res, 200, { ok: true, result: unwrapToolResult(result) });
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     sendJson(res, 200, { ok: false, error: message });
@@ -192,6 +230,10 @@ export function startBridgeServer(registry: SessionRegistry): Promise<BridgeHand
       void (async () => {
         try {
           if (req.method === 'GET' && req.url === '/tools') {
+            if (!isAuthorized(req, token)) {
+              sendJson(res, 401, { ok: false, error: 'unauthorized' });
+              return;
+            }
             handleToolsList(res);
             return;
           }

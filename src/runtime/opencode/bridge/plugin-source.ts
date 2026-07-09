@@ -36,18 +36,24 @@ import { tool } from "@opencode-ai/plugin";
 const BRIDGE_URL = ${JSON.stringify(bridgeUrl)};
 const BRIDGE_TOKEN = ${JSON.stringify(token)};
 
-function schemaFor(kind) {
-  switch (kind) {
+function schemaFor(spec) {
+  let base;
+  switch (spec.type) {
     case "string":
-      return tool.schema.string();
+      base = tool.schema.string();
+      break;
     case "number":
-      return tool.schema.number();
+      base = tool.schema.number();
+      break;
     case "boolean":
-      return tool.schema.boolean();
+      base = tool.schema.boolean();
+      break;
     case "object":
     default:
-      return tool.schema.any();
+      base = tool.schema.any();
+      break;
   }
+  return spec.optional ? base.optional() : base;
 }
 
 export const ArchieBridgePlugin = async (pluginCtx) => {
