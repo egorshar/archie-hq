@@ -37,6 +37,7 @@ import { join } from 'path';
 import { validateMasterKey } from './system/secrets-vault.js';
 import { initPlugins, getPlugins } from './system/plugin-loader.js';
 import { startContextProbe } from './system/context-probe.js';
+import { assertClaudeCredentialAvailable } from './system/claude-credential.js';
 import { initRegistry, getAllAgentDefs } from './agents/registry.js';
 import { isRepoAgent, isPmAgent } from './types/agent.js';
 import { configureGitIdentity } from './connectors/github/client.js';
@@ -70,9 +71,7 @@ function loadConfig(): AppConfig {
   const githubWebhookSecret = process.env.GITHUB_WEBHOOK_SECRET;
   const gitlabWebhookSecret = process.env.GITLAB_WEBHOOK_SECRET;
 
-  if (!process.env.ANTHROPIC_API_KEY) {
-    throw new Error('ANTHROPIC_API_KEY environment variable is required');
-  }
+  assertClaudeCredentialAvailable();
 
   return {
     slackBotToken,
