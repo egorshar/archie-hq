@@ -68,7 +68,7 @@ import { logger } from '../system/logger.js';
 import { emitEvent } from '../system/event-bus.js';
 import { TaskStatusController, isStatusEnabled } from './status.js';
 import { setSlackThreadStatus } from '../connectors/slack/status.js';
-import { agentDomainLabel, deriveActivityFromEvent } from '../agents/activity.js';
+import { agentDomainLabel, deriveActivity } from '../agents/activity.js';
 
 // ---- Global state ----
 
@@ -839,19 +839,20 @@ export class Task {
   }
 
   /**
-   * Feed an agent's SDK event into the status indicator. Called once per event
-   * from the spawn loop; it inspects tool_use blocks and, when one maps to a
-   * surfaceable action, records the agent's current activity. No-op for events
-   * without a status-worthy tool call.
+   * Record an agent's tool call on the status indicator. Builds the agent's
+   * ActivityContext and maps (toolName, input) → a surfaceable phrase. No-op for
+   * an unknown agent or a non-surfaced tool. Runtime-agnostic: the Claude spawn
+   * loop feeds it via noteActivityFromEvent; the opencode event consumer calls it
+   * directly with the opencode tool name.
    */
-  noteActivityFromEvent(agentId: string, event: unknown): void {
+  noteActivity(agentId: string, toolName: string, input: unknown): void {
     const agent = this.agentProcesses.get(agentId as AgentName);
     if (!agent) return;
     const def = agent.def;
     const isPm = isPmAgent(def);
     const domain = agentDomainLabel(def);
     const editMode = isRepoAgent(def) && this.metadata.edit_allowed === true;
-    const phrase = deriveActivityFromEvent(event, {
+    const phrase = deriveActivity(toolName, input, {
       isPm,
       editMode,
       domain,
@@ -863,6 +864,22 @@ export class Task {
       },
     });
     if (phrase) this.statusController.note(agentId, isPm, domain, phrase);
+  }
+
+  /**
+   * Feed an agent's SDK `assistant` event into the status indicator. A single
+   * event can carry several parallel tool_use blocks; the last surfaced one wins
+   * (mirrors deriveActivityFromEvent's prior behavior).
+   */
+  noteActivityFromEvent(agentId: string, event: unknown): void {
+    const e = event as { type?: string; message?: { content?: unknown } } | null;
+    if (!e || e.type !== 'assistant' || !Array.isArray(e.message?.content)) return;
+    for (const block of e.message.content) {
+      const b = block as { type?: string; name?: string; input?: unknown };
+      if (b?.type === 'tool_use' && typeof b.name === 'string') {
+        this.noteActivity(agentId, b.name, b.input ?? {});
+      }
+    }
   }
 
   /**

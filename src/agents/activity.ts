@@ -77,6 +77,26 @@ function normalizePluginDomain(plugin: string): string {
 }
 
 /**
+ * opencode emits built-in tool names lowercased (`read`, `grep`, `bash`, …).
+ * Normalize them to the canonical Claude-cased names this module keys on, so a
+ * single tool→phrase table serves both runtimes. Harmless to the Claude path,
+ * which never emits these lowercase forms. Non-listed names pass through
+ * unchanged (MCP / bridged tools are matched later by their own branches).
+ */
+const BUILTIN_TOOL_ALIASES: Record<string, string> = {
+  read: 'Read',
+  grep: 'Grep',
+  glob: 'Glob',
+  edit: 'Edit',
+  write: 'Write',
+  patch: 'Edit',
+  multiedit: 'MultiEdit',
+  bash: 'Bash',
+  webfetch: 'WebFetch',
+  todowrite: 'TodoWrite',
+};
+
+/**
  * Map a single tool call to a status fragment, or null when the call is not
  * worth surfacing (internal bookkeeping, delegating, posting to the user — the
  * status for those is handled by the caller's lifecycle, not here).
@@ -86,6 +106,7 @@ export function deriveActivity(
   input: unknown,
   ctx: ActivityContext,
 ): string | null {
+  toolName = BUILTIN_TOOL_ALIASES[toolName] ?? toolName;
   const here = ctx.domain ? `the ${ctx.domain}` : 'this';
 
   // ---- Built-in SDK tools (bare names) ----

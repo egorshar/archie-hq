@@ -167,6 +167,32 @@ describe('deriveActivity', () => {
   });
 });
 
+describe('lowercase built-in tool aliases (opencode)', () => {
+  const ctx = { isPm: false, editMode: false, domain: 'backend' } as const;
+
+  it('maps lowercase read/grep/glob to the reading phrase', () => {
+    expect(deriveActivity('read', {}, ctx)).toBe('digging into the backend');
+    expect(deriveActivity('grep', {}, ctx)).toBe('digging into the backend');
+    expect(deriveActivity('glob', {}, ctx)).toBe('digging into the backend');
+  });
+
+  it('maps lowercase edit/write/patch/multiedit to the changes phrase', () => {
+    expect(deriveActivity('edit', {}, ctx)).toBe('making changes to the backend');
+    expect(deriveActivity('write', {}, ctx)).toBe('making changes to the backend');
+    expect(deriveActivity('patch', {}, ctx)).toBe('making changes to the backend');
+    expect(deriveActivity('multiedit', {}, ctx)).toBe('making changes to the backend');
+  });
+
+  it('maps lowercase bash to the checks phrase (read-only specialist)', () => {
+    expect(deriveActivity('bash', {}, ctx)).toBe('running some checks on the backend');
+  });
+
+  it('leaves capitalized Claude names working unchanged', () => {
+    expect(deriveActivity('Read', {}, ctx)).toBe('digging into the backend');
+    expect(deriveActivity('Bash', {}, ctx)).toBe('running some checks on the backend');
+  });
+});
+
 describe('deriveActivityFromEvent', () => {
   const sub = { isPm: false, editMode: false, domain: 'mobile' };
 
