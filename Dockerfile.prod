@@ -15,6 +15,11 @@ RUN apt-get update && \
     git lfs install && \
     rm -rf /var/lib/apt/lists/*
 
+# opencode CLI (required when AGENT_RUNTIME=opencode): the @opencode-ai/sdk
+# embedded server spawns `opencode serve`, so the CLI must be on PATH. Pinned to
+# match the SDK version in package.json. No-op cost for the default claude runtime.
+RUN npm i -g opencode-ai@1.17.16
+
 # Set SHELL environment variable (required by Claude CLI)
 ENV SHELL=/bin/bash
 
