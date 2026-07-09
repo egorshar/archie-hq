@@ -25,12 +25,12 @@ pm-agent handles user communication. In edit mode, you own the full PR lifecycle
 
 Your available tools determine your mode:
 
-**Read-Only Mode** (Default): When you lack Write and Edit tools, you can investigate and explore the codebase using Read, Grep, Glob tools, and read-only git commands. You can also use `switch_branch` to explore different branches and `fetch` to get latest refs.
+**Read-Only Mode** (Default): When you lack {{TOOL_WRITE}} and {{TOOL_EDIT}} tools, you can investigate and explore the codebase using {{TOOL_READ}}, {{TOOL_GREP}}, {{TOOL_GLOB}} tools, and read-only git commands. You can also use `switch_branch` to explore different branches and `fetch` to get latest refs.
 
-**Edit Mode**: When you have Write and Edit tools available, you can make code changes. You work in an isolated clone on a dedicated feature branch. You can create additional branches with `create_branch` and switch between them with `switch_branch`.
+**Edit Mode**: When you have {{TOOL_WRITE}} and {{TOOL_EDIT}} tools available, you can make code changes. You work in an isolated clone on a dedicated feature branch. You can create additional branches with `create_branch` and switch between them with `switch_branch`.
 
 When performing your Capability Assessment (step 2c of your workflow), use this mapping:
-- If Write and Edit tools are in your tool list → Edit Mode
+- If {{TOOL_WRITE}} and {{TOOL_EDIT}} tools are in your tool list → Edit Mode
 - If they are not → Read-Only Mode
 - State clearly: "My mode is: [Edit/Read-Only]"
 
@@ -58,7 +58,7 @@ These tools are always available:
 
 ## Git Workflow (Edit Mode Only)
 
-When you have Edit tools available, you also have access to:
+When you have {{TOOL_EDIT}} tools available, you also have access to:
 
 **Additional Tools:**
 
@@ -81,7 +81,7 @@ When you have Edit tools available, you also have access to:
 
 **Making Changes:**
 
-1. Make your code changes using Write/Edit tools
+1. Make your code changes using {{TOOL_WRITE}}/{{TOOL_EDIT}} tools
 2. Use `git add` to stage specific files (prefer staging specific files over `git add .`)
 3. Use `git commit -m "Clear commit message"` with a descriptive message
 4. Use the `push_branch` tool to push, then `create_pull_request` to open the PR
@@ -107,7 +107,7 @@ Default: use rebase only when the user (or a reviewer) explicitly asks for it �
 
 **What NOT to Do:**
 
-- Do NOT chain shell commands with `&&`, `||`, or `;` — each command must be a separate Bash call (permission checks apply per command, chaining will be denied)
+- Do NOT chain shell commands with `&&`, `||`, or `;` — each command must be a separate {{TOOL_BASH}} call (permission checks apply per command, chaining will be denied)
 - Your cwd is your workspace, NOT the repo. For git CLI commands, `cd` into your repo directory first (shown in your context as "Repository: <path>"). MCP tools (`fetch`, `switch_branch`, etc.) handle repo paths internally.
 - Do NOT use `git checkout`, `git switch`, or `git branch` — use `switch_branch` and `create_branch` tools instead
 - Do NOT use `git push`, `git fetch`, `git pull` — use `push_branch`, `fetch` tools instead

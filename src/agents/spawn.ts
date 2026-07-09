@@ -50,12 +50,15 @@ import { getProbeBaseUrl } from '../system/context-probe.js';
 import { buildSandboxConfig, createFilesystemGuardHooks, TRUSTED_PACKAGE_REGISTRY_DOMAINS, type SandboxOptions } from './sandbox.js';
 import { applyOAuthBindings } from '../system/oauth/inject.js';
 import { enrichPromptWithMemory, isMemoryEnabled, isInjectionEnabled } from '../memory/index.js';
+import { runtimePromptVars } from './prompt-runtime-vars.js';
+import { getAgentRuntime } from '../system/backends.js';
 
 // ---- Prompt generation (per agent kind) ----
 
 async function generatePMPrompt(task: Task): Promise<string> {
   const pmDef = task.team.find(isPmAgent);
   return loadPrompt('pm-agent', {
+    ...runtimePromptVars(getAgentRuntime().kind),
     TEAM_LIST: pmDef?.pmConfig?.teamList ?? '',
     TEAM_EXPERTISE: pmDef?.pmConfig?.teamExpertise ?? '',
     PM_INTEGRATIONS: pmDef?.pmConfig?.pmIntegrations ?? '',
@@ -67,6 +70,7 @@ async function generateRepoAgentPrompt(agent: Agent, task: Task): Promise<string
   const peerList = buildPeerListForSender(def, task.team);
 
   const corePrompt = await loadPrompt('agent-core', {
+    ...runtimePromptVars(getAgentRuntime().kind),
     AGENT_ID: def.id,
     AGENT_ROLE: def.role,
     EXPERTISE: def.expertise,
@@ -78,7 +82,7 @@ async function generateRepoAgentPrompt(agent: Agent, task: Task): Promise<string
   // repo-agent branch of spawnAgent), not via static template variables here.
   // The repo-agent prompt is generic; instances differ only in what their
   // Current Context lists.
-  const repoPrompt = await loadPrompt('repo-agent', {});
+  const repoPrompt = await loadPrompt('repo-agent', runtimePromptVars(getAgentRuntime().kind));
 
   const layers = [corePrompt, repoPrompt];
   if (def.agentPrompt) layers.push(def.agentPrompt);
@@ -90,13 +94,14 @@ async function generatePluginAgentPrompt(agent: Agent, task: Task): Promise<stri
   const peerList = buildPeerListForSender(def, task.team);
 
   const corePrompt = await loadPrompt('agent-core', {
+    ...runtimePromptVars(getAgentRuntime().kind),
     AGENT_ID: def.id,
     AGENT_ROLE: def.role,
     EXPERTISE: def.expertise,
     PEER_LIST: peerList,
   });
 
-  const pluginPrompt = await loadPrompt('plugin-agent', {});
+  const pluginPrompt = await loadPrompt('plugin-agent', runtimePromptVars(getAgentRuntime().kind));
 
   const layers = [corePrompt, pluginPrompt];
   if (def.agentPrompt) layers.push(def.agentPrompt);
