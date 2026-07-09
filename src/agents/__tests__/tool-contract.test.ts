@@ -123,7 +123,6 @@ const PM_COMMS_TOOLS = [
   'mcp__comms-tools__list_channels',
   'mcp__comms-tools__read_channel_history',
   'mcp__comms-tools__read_thread',
-  'mcp__comms-tools__search_messages',
   'mcp__comms-tools__post_to_channel',
   'mcp__comms-tools__mute_channel',
   'mcp__comms-tools__react_to_message',

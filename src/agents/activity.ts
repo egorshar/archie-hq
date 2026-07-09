@@ -199,7 +199,6 @@ function commsToolPhrase(tool: string): string | null {
     case 'list_channels': return 'looking over the channels';
     case 'read_channel_history': return 'catching up on a channel';
     case 'read_thread': return 'reading a thread';
-    case 'search_messages': return 'searching Slack';
     default: return null;
   }
 }

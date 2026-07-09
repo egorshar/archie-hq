@@ -32,7 +32,6 @@ import {
   downloadSlackFile,
   fetchChannelHistory,
   fetchExploreThread,
-  searchSlackMessages,
   postSlackMessage,
   assertPostableChannel,
 } from '../connectors/slack/client.js';
@@ -40,7 +39,6 @@ import { readCanvas } from '../connectors/slack/canvas-read.js';
 import { collectCanvasFileAllowlist } from '../connectors/slack/channel-canvas.js';
 import { isDmOrUserId } from '../connectors/slack/channel-ids.js';
 import {
-  slackErrorCode,
   formatSlackSendError,
   formatSlackPostError,
   formatSlackReadError,
@@ -490,9 +488,9 @@ function createFindSlackChannelTool(_agent: Agent, _task: Task) {
 function createListChannelsTool(_agent: Agent, task: Task) {
   return tool(
     'list_channels',
-    "List the channels you can read and search for THIS task — every PUBLIC channel Archie has been added to, plus this task's own channel if it happens to be a private channel or DM. " +
+    "List the channels you can read for THIS task — every PUBLIC channel Archie has been added to, plus this task's own channel if it happens to be a private channel or DM. " +
     'Use this to discover where you can explore instead of guessing channel names. It never lists other private channels or DMs. ' +
-    '(Posting is broader — see post_to_channel — but reading/searching is limited to this list.)',
+    '(Posting is broader — see post_to_channel — but reading is limited to this list.)',
     {},
     async () => {
       try {
@@ -515,7 +513,7 @@ function createListChannelsTool(_agent: Agent, task: Task) {
           ...publicChannels.map((ch) => `- #${ch.name} — ID: ${ch.id}${ch.topic ? ` — ${ch.topic}` : ''}`),
           ...own.map((ch) => `- #${ch.name} — ID: ${ch.id} (this task's own channel)`),
         ];
-        return ok(`Channels you can read/search${own.length ? " (public channels Archie's in, plus this task's own channel)" : ''}:\n${lines.join('\n')}`);
+        return ok(`Channels you can read${own.length ? " (public channels Archie's in, plus this task's own channel)" : ''}:\n${lines.join('\n')}`);
       } catch (e) {
         const reason = e instanceof Error ? e.message : String(e);
         return ok(`Couldn't list channels: ${reason}`);
@@ -871,7 +869,7 @@ function createReadThreadTool(_agent: Agent, task: Task) {
   return tool(
     'read_thread',
     'Read a specific thread (parent message + all replies) — exploration only, NOT linked to this task. ' +
-    'Pass the channel ID and the parent message ts (from search_messages or read_channel_history). Includes Archie\'s own and other bots\' messages. ' +
+    'Pass the channel ID and the parent message ts (from read_channel_history). Includes Archie\'s own and other bots\' messages. ' +
     "Allowed for any PUBLIC channel Archie's in, plus this task's own channel if it is private or a DM — other private channels and DMs are off-limits.",
     {
       channel: z.string().describe('Slack channel ID (e.g. "C1234567")'),
@@ -889,43 +887,6 @@ function createReadThreadTool(_agent: Agent, task: Task) {
         return ok(`#${channel.name} thread ${args.thread_ts} — ${messages.length} message(s):\n\n${formatExploreMessages(messages)}`);
       } catch (e) {
         return ok(formatSlackReadError(e, args.channel));
-      }
-    },
-  );
-}
-
-function createSearchMessagesTool(_agent: Agent, _task: Task) {
-  return tool(
-    'search_messages',
-    'Search Slack messages across PUBLIC channels Archie is a member of — exploration only, NOT linked to this task. Private channels and DMs are never searched. ' +
-    'Put keywords or a natural-language question in `query`, and narrow with Slack search modifiers: ' +
-    '`in:#channel`, `from:@user`, `before:YYYY-MM-DD` / `after:YYYY-MM-DD` / `on:YYYY-MM-DD`, `is:thread`, `has:link`, `"exact phrase"`, `-exclude`, `*` wildcard. ' +
-    'Returns the top matches with channel, author, text, and a permalink. To read around a match, use read_thread or read_channel_history.',
-    {
-      query: z.string().describe('Search query, e.g. \'deploy failed in:#incidents after:2026-06-01\''),
-      count: z.number().int().min(1).max(20).optional().describe('Max matches to return (default 20, max 20)'),
-    },
-    async (args) => {
-      try {
-        const matches = await searchSlackMessages(args.query, args.count ?? 20);
-        if (matches.length === 0) return ok(`No messages matched "${args.query}".`);
-        const list = matches
-          .map((m) => {
-            const link = m.permalink ? `\n  ${m.permalink}` : '';
-            return `#${m.channelName} — @${m.author} | msg:${m.ts}\n${m.text}${link}`;
-          })
-          .join('\n\n');
-        return ok(`${matches.length} match(es) for "${args.query}":\n\n${list}`);
-      } catch (e) {
-        const code = slackErrorCode(e);
-        if (code === 'not_allowed_token_type' || code === 'missing_scope') {
-          return ok(
-            "Search isn't enabled yet: Archie needs the `search:read.public` bot scope — " +
-            'reinstall the Slack app with that scope. Reading channel history still works.',
-          );
-        }
-        const reason = e instanceof Error ? e.message : String(e);
-        return ok(`Search failed: ${reason}`);
       }
     },
   );
@@ -2070,7 +2031,6 @@ export function createCommsMcpServer(agent: Agent, task: Task) {
       createListChannelsTool(agent, task),
       createReadChannelHistoryTool(agent, task),
       createReadThreadTool(agent, task),
-      createSearchMessagesTool(agent, task),
       createPostToChannelTool(agent, task),
       createMuteChannelTool(agent, task),
       createReactToMessageTool(agent, task),

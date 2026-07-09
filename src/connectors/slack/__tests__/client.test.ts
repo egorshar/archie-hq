@@ -1,11 +1,11 @@
 /**
  * Tests for the Slack client behaviours added in the v32 permissions rework:
  *  - fetchSlackThread.rootAuthorWasBot detection + keeping the bot's root message
- *  - searchSlackMessages excludes private channels / DMs / group DMs
  *  - fetchChannelHistory / fetchExploreThread accessible-set gate
  *    (assertAccessibleChannel): public, or this task's own channel via allowedIds;
  *    other private/DMs refused. History returned chronologically.
  *  - listBotChannels lists public memberships only
+ *  - assertPostableChannel: posting open to public/private channels, closed to DMs/mpims
  *
  * The whole Slack WebClient is faked via @slack/web-api. The module is reset
  * before each test so the client's internal caches (channel info, shared status,
@@ -19,7 +19,6 @@ const slackApi = {
   conversations: { info: vi.fn(), replies: vi.fn(), history: vi.fn() },
   users: { info: vi.fn(), conversations: vi.fn() },
   usergroups: { list: vi.fn() },
-  search: { messages: vi.fn() },
 };
 
 // WebClient is used with `new`, so the mock implementation must be a regular
@@ -37,11 +36,6 @@ let client: ClientModule;
 /** Build a raw Slack message; `text` falls back through blocks to the text field. */
 function rawMsg(over: Record<string, unknown>): Record<string, unknown> {
   return { type: 'message', ts: '1.0', text: 'hi', ...over };
-}
-
-/** A search match in the shape search.messages returns. */
-function match(over: Record<string, unknown>): Record<string, unknown> {
-  return { ts: '1.0', text: 'hit', username: 'someone', ...over };
 }
 
 const BOT_USER = 'UBOT';
@@ -114,26 +108,6 @@ describe('fetchSlackThread — rootAuthorWasBot', () => {
     expect(texts).toContain('human starts the thread');
     expect(texts).toContain('another human');
     expect(texts).not.toContain('archie chimed in'); // bot non-root message filtered out
-  });
-});
-
-describe('searchSlackMessages — public only', () => {
-  it('keeps public-channel matches and drops private / DM / group-DM matches', async () => {
-    slackApi.search.messages.mockResolvedValue({
-      messages: {
-        matches: [
-          match({ text: 'public hit', channel: { id: 'C9', name: 'general', is_private: false } }),
-          match({ text: 'private hit', channel: { id: 'C8', name: 'secret', is_private: true } }),
-          match({ text: 'dm hit', channel: { id: 'D7', name: 'dm', is_im: true } }),
-          match({ text: 'mpim hit', channel: { id: 'G6', name: 'mpdm', is_mpim: true } }),
-        ],
-      },
-    });
-
-    const results = await client.searchSlackMessages('hit');
-
-    expect(results.map((r) => r.text)).toEqual(['public hit']);
-    expect(results[0]).toMatchObject({ channelId: 'C9', channelName: 'general' });
   });
 });
 

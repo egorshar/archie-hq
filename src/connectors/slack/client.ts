@@ -1104,51 +1104,6 @@ export async function fetchExploreThread(
   return { channel: channelInfo, messages: await resolveAuthorsAndMap(raw) };
 }
 
-/** A single match from a Slack message search. */
-export interface SlackSearchMatch {
-  channelId: string;
-  channelName: string;
-  author: string;
-  text: string;
-  ts: string;
-  permalink?: string;
-}
-
-/**
- * Search messages via the bot token's `search.messages`. With the `search:read.public`
- * bot scope, Slack scopes results to the PUBLIC channels Archie is a member of and
- * never includes private channels or DMs. Mentions in matched text are resolved.
- * Private/DM/group-DM matches are filtered out defensively.
- */
-export async function searchSlackMessages(query: string, count = 20): Promise<SlackSearchMatch[]> {
-  const client = getSlackClient();
-  const result = await client.search.messages({ query, count });
-  const allMatches = result.messages?.matches ?? [];
-  // Public channels only: the search:read.public scope already excludes private
-  // channels and DMs, but we filter defensively on is_private/is_im/is_mpim
-  // (and a 'D…' id fallback) so private content can never surface.
-  const matches = allMatches.filter((m) => {
-    const ch = m.channel as { id?: string; is_im?: boolean; is_mpim?: boolean; is_private?: boolean } | undefined;
-    if (!ch?.id) return false;
-    return !ch.is_im && !ch.is_mpim && !ch.is_private && !ch.id.startsWith('D');
-  });
-  const channelIds = new Set(
-    matches.map((m) => m.channel?.id).filter((id): id is string => !!id),
-  );
-  const { userInfoMap, groupInfoMap, channelInfoMap } = await fetchMentionInfo(
-    matches.map((m) => ({ text: m.text ?? '' })),
-    channelIds,
-  );
-  return matches.map((m) => ({
-    channelId: m.channel?.id ?? '',
-    channelName: m.channel?.name ?? '',
-    author: m.username ?? m.user ?? 'unknown',
-    text: applyMentionReplacements(m.text ?? '', userInfoMap, groupInfoMap, channelInfoMap),
-    ts: m.ts ?? '',
-    permalink: m.permalink,
-  }));
-}
-
 /**
  * Get user info
  */
