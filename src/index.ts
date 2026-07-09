@@ -38,6 +38,7 @@ import { validateMasterKey } from './system/secrets-vault.js';
 import { initPlugins, getPlugins } from './system/plugin-loader.js';
 import { startContextProbe } from './system/context-probe.js';
 import { assertClaudeCredentialAvailable } from './system/claude-credential.js';
+import { StartupError } from './system/startup-error.js';
 import { initRegistry, getAllAgentDefs } from './agents/registry.js';
 import { isRepoAgent, isPmAgent } from './types/agent.js';
 import { configureGitIdentity } from './connectors/github/client.js';
@@ -318,6 +319,16 @@ async function main(): Promise<void> {
     process.on('SIGINT', () => shutdown('SIGINT'));
     process.on('SIGTERM', () => shutdown('SIGTERM'));
   } catch (error) {
+    if (error instanceof StartupError) {
+      // Known, operator-fixable misconfiguration — show a clean, actionable
+      // message with no JS stack trace (the stack is noise here).
+      logger.error('startup', error.message);
+      for (const line of error.details) {
+        logger.plain(`  ${line}`);
+      }
+      logger.plain('');
+      process.exit(1);
+    }
     logger.error('index', 'Failed to start server', error);
     process.exit(1);
   }

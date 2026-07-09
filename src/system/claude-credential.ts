@@ -11,6 +11,7 @@ import { readFileSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
 import { logger } from './logger.js';
+import { StartupError } from './startup-error.js';
 
 export type ClaudeCredentialKind =
   | 'api_key'
@@ -66,10 +67,14 @@ const KIND_LABEL: Record<ClaudeCredentialKind, string> = {
 export function assertClaudeCredentialAvailable(): void {
   const { kind } = resolveClaudeCredential();
   if (kind === 'none') {
-    throw new Error(
-      'No Claude credential found. Set one of: ANTHROPIC_API_KEY; ' +
-        'CLAUDE_CODE_OAUTH_TOKEN (run `claude setup-token`); ' +
-        'or run `claude login` so ~/.claude/.credentials.json exists.',
+    throw new StartupError(
+      "No Claude credential found — Archie can't authenticate to Claude.",
+      [
+        'Set ONE of the following, then restart:',
+        '  • CLAUDE_CODE_OAUTH_TOKEN   subscription token — run: claude setup-token',
+        '  • claude login              interactive login (writes ~/.claude/.credentials.json)',
+        '  • ANTHROPIC_API_KEY         a standard Anthropic API key',
+      ],
     );
   }
   logger.system(`Claude auth: ${KIND_LABEL[kind]}`);
