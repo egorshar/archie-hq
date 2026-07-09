@@ -45,4 +45,19 @@ describe('ClaudeLlmOneShot', () => {
     expect(opts.cwd).toBe('/tmp/x');
     expect(opts.env.ANTHROPIC_API_KEY).toBe('k');
   });
+
+  it('passes CLAUDE_CODE_OAUTH_TOKEN into env when no API key is set', async () => {
+    delete process.env.ANTHROPIC_API_KEY;
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = 'oauth-tok';
+    try {
+      queryMock.mockReturnValue(stream([{ type: 'result', subtype: 'success', result: 'ok' }]));
+      await claudeLlmOneShot.text({ prompt: 'p', model: 'haiku' });
+      const opts = queryMock.mock.calls[0][0].options;
+      expect(opts.env.CLAUDE_CODE_OAUTH_TOKEN).toBe('oauth-tok');
+      expect(opts.env.ANTHROPIC_API_KEY).toBeUndefined();
+    } finally {
+      delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+      process.env.ANTHROPIC_API_KEY = 'k';
+    }
+  });
 });
