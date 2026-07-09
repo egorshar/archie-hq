@@ -4,7 +4,11 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // `vi.fn()` referenced inside one throws "Cannot access before initialization"
 // under this vitest version, so the mock fns are created inside vi.hoisted
 // (same pattern as llm-one-shot.test.ts).
-const { getOpencodeClient } = vi.hoisted(() => ({ getOpencodeClient: vi.fn() }));
+const { getOpencodeClient, registrySet, registryDelete } = vi.hoisted(() => ({
+  getOpencodeClient: vi.fn(),
+  registrySet: vi.fn(),
+  registryDelete: vi.fn(),
+}));
 vi.mock('../server.js', () => ({
   getOpencodeClient,
   concatPromptText: (res: any) => {
@@ -12,6 +16,7 @@ vi.mock('../server.js', () => ({
     const t = parts.filter((p: any) => p?.type === 'text').map((p: any) => p.text).join('');
     return t || null;
   },
+  sharedRegistry: { set: registrySet, delete: registryDelete },
 }));
 vi.mock('../model.js', () => ({
   resolveOpencodeModel: (m: string) => ({ providerID: 'anthropic', modelID: m }),
@@ -49,9 +54,11 @@ describe('OpencodeRuntime.spawn', () => {
     create = vi.fn(async () => ({ data: { id: 'sess-1' } }));
     prompt = vi.fn(async () => ({ data: { parts: [{ type: 'text', text: 'hi there' }] } }));
     getOpencodeClient.mockResolvedValue({ session: { create, prompt } });
+    registrySet.mockReset();
+    registryDelete.mockReset();
   });
 
-  it('creates a session, prompts with the resolved model + system prompt, sets a live handle', async () => {
+  it('creates a session, prompts with NO body.model + the system prompt, sets a live handle', async () => {
     const agent = makeAgent();
     const task = makeTask();
     await new OpencodeRuntime().spawn(agent as any, task as any);
@@ -66,12 +73,50 @@ describe('OpencodeRuntime.spawn', () => {
     expect(create).toHaveBeenCalledTimes(1);
     expect(prompt).toHaveBeenCalledTimes(1);
     const body = prompt.mock.calls[0][0].body;
-    expect(body.model).toEqual({ providerID: 'anthropic', modelID: 'opus' });
+    // Model routing is server-global (config.model, set in server.ts) — opencode
+    // ignores body.model, so it must not be sent (spike.md §5).
+    expect(body).not.toHaveProperty('model');
     expect(body.system).toBe('SYS');
     expect(body.parts[0].text).toContain('investigate the login bug');
     // first response marks active with the session id, then idle marks inactive
     expect(task.updateAgentState).toHaveBeenCalledWith('pm', true, 'sess-1');
     expect(task.updateAgentState).toHaveBeenCalledWith('pm', false);
+  });
+
+  it('registers the created session in the bridge registry as {task, agent}', async () => {
+    const agent = makeAgent();
+    const task = makeTask();
+    await new OpencodeRuntime().spawn(agent as any, task as any);
+    agent.queue.addMessage('go');
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(registrySet).toHaveBeenCalledWith('sess-1', { task, agent });
+  });
+
+  it('registers a resumed session (no session.create call) under its existing id', async () => {
+    const agent = makeAgent();
+    agent.session = { active: true, session_id: 'sess-existing' } as any;
+    const task = makeTask();
+    await new OpencodeRuntime().spawn(agent as any, task as any);
+    agent.queue.addMessage('continue');
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(create).not.toHaveBeenCalled();
+    expect(registrySet).toHaveBeenCalledWith('sess-existing', { task, agent });
+  });
+
+  it('de-registers the session from the bridge registry when the queue stops', async () => {
+    const agent = makeAgent();
+    const task = makeTask();
+    await new OpencodeRuntime().spawn(agent as any, task as any);
+    agent.queue.addMessage('go');
+    await new Promise((r) => setTimeout(r, 0));
+    expect(registrySet).toHaveBeenCalledWith('sess-1', { task, agent });
+
+    agent.queue.stop();
+    await agent.handle.running;
+
+    expect(registryDelete).toHaveBeenCalledWith('sess-1');
   });
 
   it('resolves running and flips isRunning false when the queue stops', async () => {
@@ -108,6 +153,9 @@ describe('OpencodeRuntime.spawn', () => {
     expect(agent.handle).toBeTruthy();
     await expect(agent.handle.running).resolves.toBeUndefined();
     expect(agent.handle.isRunning).toBe(false);
+    // Never registered (no session was ever created), so nothing to evict either.
+    expect(registrySet).not.toHaveBeenCalled();
+    expect(registryDelete).not.toHaveBeenCalled();
   });
 
   it('abort() cancels via the AbortController signal', async () => {

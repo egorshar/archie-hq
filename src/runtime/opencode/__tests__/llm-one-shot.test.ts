@@ -12,6 +12,17 @@ vi.mock('@opencode-ai/sdk', () => ({ createOpencode: createMock }));
 vi.mock('../../../system/logger.js', () => ({
   logger: { error: vi.fn(), system: vi.fn(), warn: vi.fn(), debug: vi.fn(), info: vi.fn(), plain: vi.fn() },
 }));
+// server.ts's getOpencodeClient() now always boots the bridge alongside the
+// embedded server (Task 4) — stub its two side-effecting collaborators
+// (loopback listener + plugin file write) so this unit test, which exercises
+// the real server.ts/llm-one-shot.ts against a mocked SDK client only, stays
+// hermetic (no real socket, no real file write).
+const { startBridgeServer, writeBridgePlugin } = vi.hoisted(() => ({
+  startBridgeServer: vi.fn(async () => ({ url: 'http://127.0.0.1:1', token: 'tok', close: vi.fn(async () => {}) })),
+  writeBridgePlugin: vi.fn(async () => '/fake/.opencode/plugins/archie-bridge.ts'),
+}));
+vi.mock('../bridge/server.js', () => ({ startBridgeServer }));
+vi.mock('../bridge/plugin-source.js', () => ({ writeBridgePlugin }));
 
 import { OpencodeLlmOneShot } from '../llm-one-shot.js';
 
@@ -22,7 +33,13 @@ beforeEach(() => {
   sessionCreate.mockReset().mockResolvedValue({ data: { id: 'sess-1' } });
   sessionPrompt.mockReset();
   delete process.env.ARCHIE_OPENCODE_MODEL_HAIKU;
-  delete process.env.ARCHIE_OPENCODE_MODEL_DEFAULT;
+  // getOpencodeClient() resolves its own server-global config.model via
+  // resolveOpencodeModel('default') (server.ts) — set a valid passthrough-free
+  // route so that internal resolution succeeds independently of what each test
+  // is asserting about req.model resolution. The one test that needs
+  // ARCHIE_OPENCODE_MODEL_DEFAULT absent (model-cannot-be-resolved) deletes it
+  // itself before its request, and fails before ever reaching getOpencodeClient().
+  process.env.ARCHIE_OPENCODE_MODEL_DEFAULT = 'anthropic/claude-haiku-4-5';
 });
 
 describe('OpencodeLlmOneShot.text', () => {
@@ -49,6 +66,7 @@ describe('OpencodeLlmOneShot.text', () => {
   });
 
   it('returns null (no spawn) when the model cannot be resolved', async () => {
+    delete process.env.ARCHIE_OPENCODE_MODEL_DEFAULT; // req.model resolution must fail before any env fallback
     const out = await shot.text({ prompt: 'hi', model: 'haiku' }); // no env, no slash
     expect(out).toBeNull();
     expect(sessionCreate).not.toHaveBeenCalled();

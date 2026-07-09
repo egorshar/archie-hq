@@ -11,11 +11,9 @@ import type { RuntimeCapabilities } from '../../ports/capabilities.js';
 import { OPENCODE_RUNTIME_CAPABILITIES } from '../../ports/capabilities.js';
 import type { Agent } from '../../agents/agent.js';
 import type { Task } from '../../tasks/task.js';
-import { isPmAgent } from '../../types/agent.js';
 import { prepareAgentContext } from '../../agents/spawn.js';
 import { logger } from '../../system/logger.js';
-import { getOpencodeClient, concatPromptText } from './server.js';
-import { resolveOpencodeModel } from './model.js';
+import { getOpencodeClient, concatPromptText, sharedRegistry } from './server.js';
 
 export class OpencodeRuntime implements AgentRuntime {
   readonly kind = 'opencode' as const;
@@ -51,18 +49,15 @@ export class OpencodeRuntime implements AgentRuntime {
       let sessionId = agent.session.session_id;
       let firstResponse = true;
       try {
-        // Start the embedded server and resolve the model INSIDE the turn body so
-        // a startup failure (server can't spawn, model unresolvable) fails only
-        // this agent — logged here, marked inactive by the finally + Agent.spawn's
-        // crash wiring — instead of rejecting spawn() and surfacing as an
-        // unhandled rejection that crashes the process when recovery re-spawns.
+        // Start the embedded server INSIDE the turn body so a startup failure
+        // (server can't spawn) fails only this agent — logged here, marked
+        // inactive by the finally + Agent.spawn's crash wiring — instead of
+        // rejecting spawn() and surfacing as an unhandled rejection that
+        // crashes the process when recovery re-spawns. Model routing is
+        // server-global (`config.model`, set once in server.ts — spike.md §5)
+        // rather than per-prompt, so there's no per-agent model to resolve here;
+        // see server.ts's SERVER_MODEL_LOGICAL note for the shared-server caveat.
         const client = await getOpencodeClient();
-        // Logical model → opencode {providerID, modelID}. PM defaults to opus,
-        // other agents to sonnet, unless the def pins one; resolveOpencodeModel
-        // maps the logical name to a provider/model via env (throws with an
-        // actionable message if unresolvable).
-        const logicalModel = def.model || (isPmAgent(def) ? 'opus' : 'sonnet');
-        const model = resolveOpencodeModel(logicalModel);
 
         // Ensure a session (resume the stored one, else create).
         if (!sessionId) {
@@ -74,6 +69,11 @@ export class OpencodeRuntime implements AgentRuntime {
           }
           agent.session.session_id = sessionId;
         }
+        // Register this session with the bridge's SessionRegistry so bridged
+        // control-tool calls (post_to_user / report_completion /
+        // request_edit_mode) resolve to this Task/Agent pair; evicted in the
+        // `finally` below regardless of how the turn loop exits.
+        sharedRegistry.set(sessionId, { task, agent });
 
         while (!agent.queue.isStopped()) {
           let msg;
@@ -88,9 +88,11 @@ export class OpencodeRuntime implements AgentRuntime {
           // extends Omit<RequestInit, 'body'|'headers'|'method'> & SessionPromptData,
           // so `signal` merges into the same object as `path`/`body` (the
           // `@hey-api` fetch-client convention) rather than a second argument.
+          // No `body.model` here — opencode ignores it (spike.md §5); the model
+          // is set once, server-wide, via `config.model` in server.ts.
           const res = await client.session.prompt({
             path: { id: sessionId },
-            body: { model, parts: [{ type: 'text', text }], system: systemPrompt },
+            body: { parts: [{ type: 'text', text }], system: systemPrompt },
             signal: abortController.signal,
           });
 
@@ -117,6 +119,11 @@ export class OpencodeRuntime implements AgentRuntime {
       } catch (err) {
         if (!agent.queue.isStopped()) logger.error(def.id, 'opencode turn failed', err as Error);
       } finally {
+        // Evict the bridge registration on every exit path (normal, aborted, or
+        // errored) so a stale sessionId can't resolve control-tool calls to a
+        // dead Task/Agent pair. `sessionId` may still be unset if getOpencodeClient()
+        // or session.create() failed before registration ever ran.
+        if (sessionId) sharedRegistry.delete(sessionId);
         handle.isRunning = false;
         agent.backgroundTasks.clear();
         if (agent.pendingTeardown) {
