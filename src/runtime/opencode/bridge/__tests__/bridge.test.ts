@@ -161,4 +161,86 @@ describe('bridge server', () => {
       expect(body.ok).toBe(false);
     });
   });
+
+  describe('repo-tools whitelist + RO write rejection', () => {
+    // A minimal repo-agent session: `def.repo` + `metadata.repositories` are
+    // enough for the repo-tool handlers' `resolveGithub`/`requireAttached`
+    // helpers to run for real (no external mocking) — the attached repo has
+    // no `clone_path`, so a write tool that reaches its handler fails
+    // gracefully with a "no local clone" ToolResult instead of throwing. That
+    // graceful failure (`ok:true`, error text as the result) is exactly what
+    // distinguishes "dispatched" from "rejected pre-dispatch" (`ok:false`,
+    // read-only error) in the tests below.
+    function fakeRepoAgentSession() {
+      const task: any = {
+        taskId: 't1',
+        metadata: { repositories: { 'repo-agent': [{ github: 'org/repo' }] } },
+      };
+      const agent: any = {
+        def: { id: 'repo-agent', repo: { primary: 'org/repo', repos: [{ github: 'org/repo' }] } },
+      };
+      return { task, agent };
+    }
+
+    it('rejects a write repo-tool (push_branch) for a read-only session before dispatch', async () => {
+      const { task, agent } = fakeRepoAgentSession();
+      registry.set('ro-write', { task, agent, readOnly: true });
+      const res = await fetch(`${handle.url}/tool`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${handle.token}` },
+        body: JSON.stringify({ sessionId: 'ro-write', tool: 'push_branch', args: {} }),
+      });
+      const body: any = await res.json();
+      expect(body.ok).toBe(false);
+      expect(body.error).toMatch(/read-only/i);
+      expect(body.error).toMatch(/push_branch/);
+    });
+
+    it('dispatches a write repo-tool (push_branch) for an edit-mode (non-RO) session', async () => {
+      const { task, agent } = fakeRepoAgentSession();
+      registry.set('edit-write', { task, agent, readOnly: false });
+      const res = await fetch(`${handle.url}/tool`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${handle.token}` },
+        body: JSON.stringify({ sessionId: 'edit-write', tool: 'push_branch', args: {} }),
+      });
+      const body: any = await res.json();
+      // Reached the real handler (not pre-dispatch rejected): it fails
+      // gracefully because the fake attached repo has no clone_path.
+      expect(body.ok).toBe(true);
+      expect(body.result).toMatch(/no local clone/i);
+    });
+
+    it('allows a read repo-tool (list_branches) for a read-only session', async () => {
+      const { task, agent } = fakeRepoAgentSession();
+      registry.set('ro-read', { task, agent, readOnly: true });
+      const res = await fetch(`${handle.url}/tool`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${handle.token}` },
+        body: JSON.stringify({ sessionId: 'ro-read', tool: 'list_branches', args: {} }),
+      });
+      const body: any = await res.json();
+      expect(body.ok).toBe(true);
+    });
+
+    it('allows a read repo-tool (list_branches) for an edit-mode session', async () => {
+      const { task, agent } = fakeRepoAgentSession();
+      registry.set('edit-read', { task, agent, readOnly: false });
+      const res = await fetch(`${handle.url}/tool`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${handle.token}` },
+        body: JSON.stringify({ sessionId: 'edit-read', tool: 'list_branches', args: {} }),
+      });
+      const body: any = await res.json();
+      expect(body.ok).toBe(true);
+    });
+
+    it('includes repo-tool names in the /tools manifest', async () => {
+      const res = await fetch(`${handle.url}/tools`, { headers: { authorization: `Bearer ${handle.token}` } });
+      const body: any = await res.json();
+      expect(body.some((t: any) => t.name === 'push_branch')).toBe(true);
+      expect(body.some((t: any) => t.name === 'list_branches')).toBe(true);
+      expect(body.some((t: any) => t.name === 'get_pr_status')).toBe(true);
+    });
+  });
 });

@@ -1,27 +1,44 @@
 /**
  * opencode tool bridge — Archie-side HTTP listener.
  *
- * opencode's server runs as a child process; Archie's typed control tools
- * (which close over the live in-memory `Task`/`Agent`) are reached from an
- * opencode plugin via this localhost-only bridge. The plugin POSTs
- * `{ sessionId, tool, args }` to `/tool`; the bridge resolves the session in
- * the `SessionRegistry`, dispatches to one of a FIXED whitelist of control
- * tools, and returns `{ ok: true, result }` or `{ ok: false, error }`. `result`
- * is the tool's `ToolResult` unwrapped to a plain string (opencode's
- * custom-tool `execute` must return a string, not a JSON object).
+ * opencode's server runs as a child process; Archie's typed control tools and
+ * repo-host (git/PR) tools (which close over the live in-memory
+ * `Task`/`Agent`) are reached from an opencode plugin via this localhost-only
+ * bridge. The plugin POSTs `{ sessionId, tool, args }` to `/tool`; the bridge
+ * resolves the session in the `SessionRegistry`, dispatches to one of a FIXED
+ * whitelist built from the 3 control-tool handlers plus the session's
+ * repo-tool handlers (`createRepoToolHandlers`, from `src/agents/tools.ts` —
+ * the same handler bodies the Claude-path SDK MCP server uses), and returns
+ * `{ ok: true, result }` or `{ ok: false, error }`. `result` is the tool's
+ * `ToolResult` unwrapped to a plain string (opencode's custom-tool `execute`
+ * must return a string, not a JSON object).
+ *
+ * Read-only enforcement (defense in depth, layer 2 — layer 1 is the opencode
+ * plugin's `tool.execute.before` guard blocking built-in write tools):
+ * `POST /tool` rejects any tool name in `WRITE_REPO_TOOLS` for a session whose
+ * registry entry has `readOnly: true`, BEFORE the handler ever runs. The
+ * `GET /tools` manifest is NOT session-scoped — opencode's plugin fetches it
+ * once at plugin load, before any session exists — so it always lists every
+ * repo tool (including writes); RO enforcement lives entirely in the dispatch
+ * rejection below, not in what the manifest advertises.
  *
  * Security: binds to 127.0.0.1 only, requires a bearer token (constant-time
  * compared) on every request (including `GET /tools`), and dispatches ONLY
- * the three whitelisted tool names — never an arbitrary function. Never logs
- * the token, prompt content, or tool args.
+ * whitelisted tool names via `Map`/`Object.hasOwn` own-key lookups — never an
+ * arbitrary function, never a prototype-chain fallthrough. Never logs the
+ * token, prompt content, or tool args.
  */
 import { createServer, type IncomingMessage, type ServerResponse } from 'http';
 import { randomBytes, timingSafeEqual } from 'crypto';
 import type { AddressInfo } from 'net';
+import { z } from 'zod';
 import {
   postToUserHandler,
   reportCompletionHandler,
   requestEditModeHandler,
+  createRepoToolHandlers,
+  WRITE_REPO_TOOLS,
+  REPO_TOOL_SPECS,
   type PostToUserArgs,
   type ReportCompletionArgs,
   type RequestEditModeArgs,
@@ -29,7 +46,7 @@ import {
 } from '../../../agents/tools.js';
 import type { Agent } from '../../../agents/agent.js';
 import type { Task } from '../../../tasks/task.js';
-import type { SessionRegistry } from './registry.js';
+import type { SessionRegistry, BridgeSession } from './registry.js';
 import { logger } from '../../../system/logger.js';
 
 export interface BridgeHandle {
@@ -94,6 +111,56 @@ const TOOL_DESCRIPTORS: ToolDescriptor[] = [
     } satisfies Record<keyof RequestEditModeArgs, ArgSpec>,
   },
 ];
+
+/**
+ * Derive a JSON-serializable {@link ArgSpec} from a single zod field of a
+ * repo-tool's schema (`src/agents/tools.ts` `RepoToolSpec.schema`). Unwraps
+ * `.optional()`/`.default()`/`.nullable()` wrappers to find the base type and
+ * to determine optionality — mirrors how the hand-written `TOOL_DESCRIPTORS`
+ * above describe the 3 control tools, just derived instead of hand-written
+ * (the repo-tools surface is too large to keep a hand-written copy in sync).
+ */
+function zodFieldToArgSpec(field: z.ZodTypeAny): ArgSpec {
+  const optional = field.isOptional();
+  let inner: z.ZodTypeAny = field;
+  while (inner instanceof z.ZodOptional || inner instanceof z.ZodDefault || inner instanceof z.ZodNullable) {
+    inner = inner.unwrap() as z.ZodTypeAny;
+  }
+  let type: ArgSpec['type'];
+  if (inner instanceof z.ZodNumber) type = 'number';
+  else if (inner instanceof z.ZodBoolean) type = 'boolean';
+  else if (inner instanceof z.ZodObject || inner instanceof z.ZodArray) type = 'object';
+  else type = 'string';
+  return optional ? { type, optional: true } : { type };
+}
+
+// Repo-tool descriptors, derived from the same `REPO_TOOL_SPECS` the Claude
+// SDK MCP server and the opencode bridge dispatch both use — single source of
+// truth, no hand-maintained second copy that can drift. The `/tools` manifest
+// is not session-scoped (see file header), so this always lists every repo
+// tool, including writes; RO enforcement lives entirely in the dispatch
+// rejection in `handleToolRequest`.
+//
+// Computed lazily (not at module top level): this module sits in an existing
+// import cycle (`tools.ts` -> `system/backends.ts` -> opencode's `llm-one-shot.ts`
+// -> `server.ts` -> `bridge/server.ts` -> back to `tools.ts`), so `REPO_TOOL_SPECS`
+// is not guaranteed to be populated yet at the moment this module first
+// evaluates. Deferring to first call (and caching) sidesteps the ordering
+// hazard entirely — by the time any HTTP request is handled, both modules
+// have fully loaded.
+let repoToolDescriptorsCache: ToolDescriptor[] | null = null;
+function getRepoToolDescriptors(): ToolDescriptor[] {
+  if (!repoToolDescriptorsCache) {
+    repoToolDescriptorsCache = REPO_TOOL_SPECS.map((spec) => ({
+      name: spec.name,
+      description: spec.description,
+      argsSchema: Object.fromEntries(
+        Object.entries(spec.schema).map(([key, zodType]) => [key, zodFieldToArgSpec(zodType)]),
+      ),
+    }));
+  }
+  return repoToolDescriptorsCache;
+}
 
 /**
  * opencode built-in write-shaped tool names to block for read-only sessions.
@@ -168,6 +235,33 @@ function unwrapToolResult(result: ToolResult): string {
   return JSON.stringify(result);
 }
 
+type BoundHandler = (args: unknown) => Promise<ToolResult>;
+
+/**
+ * Build the full own-key-only handler map for one session: the 3 fixed
+ * control-tool handlers (bound to this session's `agent`/`task`) plus the
+ * session's repo-tool handlers (`createRepoToolHandlers`, already bound to
+ * `agent`/`task` — same handler bodies the Claude-path SDK MCP server uses).
+ * A `Map`, never a plain object, for the same prototype-fallthrough reason as
+ * `TOOL_WHITELIST` above: `Object.keys(repoHandlers)` only ever yields the
+ * fixed, own, enumerable tool names `createRepoToolHandlers` assigned, so
+ * merging them into the `Map` cannot smuggle in a `constructor`/`__proto__`
+ * style name — the eventual `handlers.has(toolName)` lookup is a real `Map`
+ * lookup, not a property access that could fall through to
+ * `Object.prototype`.
+ */
+function buildSessionHandlers(session: BridgeSession): Map<string, BoundHandler> {
+  const handlers = new Map<string, BoundHandler>();
+  for (const [name, handler] of TOOL_WHITELIST) {
+    handlers.set(name, (args: unknown) => handler(session.agent, session.task, args));
+  }
+  const repoHandlers = createRepoToolHandlers(session.agent, session.task);
+  for (const name of Object.keys(repoHandlers)) {
+    handlers.set(name, repoHandlers[name]!);
+  }
+  return handlers;
+}
+
 async function handleToolRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -205,14 +299,22 @@ async function handleToolRequest(
     return;
   }
 
-  if (!TOOL_WHITELIST.has(toolName)) {
+  // Read-only enforcement, layer 2 (see file header) — reject a write
+  // repo-tool for a read-only session BEFORE it ever reaches the handler.
+  if (session.readOnly && WRITE_REPO_TOOLS.includes(toolName)) {
+    sendJson(res, 200, { ok: false, error: `read-only: ${toolName} not permitted` });
+    return;
+  }
+
+  const handlers = buildSessionHandlers(session);
+  if (!handlers.has(toolName)) {
     sendJson(res, 200, { ok: false, error: `unknown tool (not permitted): ${toolName}` });
     return;
   }
-  const handler = TOOL_WHITELIST.get(toolName)!;
+  const handler = handlers.get(toolName)!;
 
   try {
-    const result = await handler(session.agent, session.task, args);
+    const result = await handler(args);
     sendJson(res, 200, { ok: true, result: unwrapToolResult(result) });
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
@@ -221,7 +323,7 @@ async function handleToolRequest(
 }
 
 function handleToolsList(res: ServerResponse): void {
-  sendJson(res, 200, TOOL_DESCRIPTORS);
+  sendJson(res, 200, [...TOOL_DESCRIPTORS, ...getRepoToolDescriptors()]);
 }
 
 /**
