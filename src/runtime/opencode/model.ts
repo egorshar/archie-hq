@@ -33,3 +33,18 @@ export function resolveOpencodeModel(model: string): OpencodeModelRef {
       `or ARCHIE_OPENCODE_MODEL_DEFAULT to a "provider/model" id (e.g. anthropic/claude-haiku-4-5).`,
   );
 }
+
+/**
+ * The server-global model route as a `provider/model` string, for the footer.
+ * config.model is server-wide in opencode (spike.md §5), so this reflects the
+ * single default route. Returns null when unresolved (never throws — the footer
+ * is best-effort). modelDisplayLabel() beautifies the `anthropic/claude-*` shape.
+ */
+export function opencodeFooterModel(): string | null {
+  try {
+    const m = resolveOpencodeModel('default');
+    return `${m.providerID}/${m.modelID}`;
+  } catch {
+    return null;
+  }
+}

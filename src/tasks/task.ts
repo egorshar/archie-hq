@@ -11,6 +11,8 @@ import { CLI_CHANNEL_KEY } from '../types/task.js';
 import type { AgentDef } from '../types/agent.js';
 import { isPmAgent, isRepoAgent } from '../types/agent.js';
 import { modelDisplayLabel, resolveAgentModel } from '../agents/model-label.js';
+import { getAgentRuntime } from '../system/backends.js';
+import { opencodeFooterModel } from '../runtime/opencode/model.js';
 import { prCardFingerprint, prCardTitlePlain } from '../system/pr-card-format.js';
 import { getGitHubClient } from '../connectors/github/client.js';
 import { createKeyedLock } from '../system/keyed-lock.js';
@@ -673,6 +675,10 @@ export class Task {
    * As specialists join, the footer grows (e.g. `Opus 4.8 + Sonnet 4.6 (1M)`).
    */
   private collectModelsUsed(): string[] {
+    if (getAgentRuntime().kind === 'opencode') {
+      const route = opencodeFooterModel();
+      if (route) return [route];
+    }
     const raw: string[] = [];
     const pmDef = this.team.find((d) => isPmAgent(d));
     if (pmDef) raw.push(resolveAgentModel(pmDef));

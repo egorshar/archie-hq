@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { resolveOpencodeModel } from '../model.js';
+import { resolveOpencodeModel, opencodeFooterModel } from '../model.js';
 
 const ENV_KEYS = ['ARCHIE_OPENCODE_MODEL_HAIKU', 'ARCHIE_OPENCODE_MODEL_SONNET', 'ARCHIE_OPENCODE_MODEL_DEFAULT'];
 const saved: Record<string, string | undefined> = {};
@@ -56,5 +56,16 @@ describe('resolveOpencodeModel', () => {
   it('ignores a malformed (no-slash) env value and throws', () => {
     process.env.ARCHIE_OPENCODE_MODEL_HAIKU = 'not-a-ref';
     expect(() => resolveOpencodeModel('haiku')).toThrow(/Cannot resolve/);
+  });
+});
+
+describe('opencodeFooterModel', () => {
+  it('returns the resolved default route as provider/model', () => {
+    process.env.ARCHIE_OPENCODE_MODEL_DEFAULT = 'anthropic/claude-haiku-4-5';
+    expect(opencodeFooterModel()).toBe('anthropic/claude-haiku-4-5');
+  });
+  it('returns null when unresolved', () => {
+    delete process.env.ARCHIE_OPENCODE_MODEL_DEFAULT;
+    expect(opencodeFooterModel()).toBeNull();
   });
 });
