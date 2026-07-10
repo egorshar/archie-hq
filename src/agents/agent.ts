@@ -56,17 +56,6 @@ export class Agent {
   readonly backgroundTasks: Set<string> = new Set();
 
   /**
-   * Whether this agent has delivered a user-facing message (`post_to_user`)
-   * during the current turn. The opencode runtime resets it at the start of
-   * each turn; `report_completion` reads it (opencode only) to drop a redundant
-   * trailing "task completed" confirmation when the substantive answer was
-   * already posted this turn — the double-post symptom a weaker model exhibits
-   * (observed live). The Claude path sets it but never reads
-   * it, so its behavior is unchanged.
-   */
-  postedToUserThisTurn = false;
-
-  /**
    * A task teardown (complete/stop) deferred until this agent's current turn
    * ends. The spawn loop runs it when it sees the SDK `result` event, so the
    * triggering tool's response and the Stop hook's control round-trip both

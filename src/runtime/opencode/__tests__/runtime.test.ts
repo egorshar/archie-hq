@@ -4,10 +4,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 // `vi.fn()` referenced inside one throws "Cannot access before initialization"
 // under this vitest version, so the mock fns are created inside vi.hoisted
 // (same pattern as llm-one-shot.test.ts).
-const { getOpencodeClient, registrySet, registryDelete } = vi.hoisted(() => ({
+const { getOpencodeClient, registrySet, registryDelete, registryGet } = vi.hoisted(() => ({
   getOpencodeClient: vi.fn(),
   registrySet: vi.fn(),
   registryDelete: vi.fn(),
+  registryGet: vi.fn(),
 }));
 vi.mock('../server.js', () => ({
   getOpencodeClient,
@@ -16,7 +17,7 @@ vi.mock('../server.js', () => ({
     const t = parts.filter((p: any) => p?.type === 'text').map((p: any) => p.text).join('');
     return t || null;
   },
-  sharedRegistry: { set: registrySet, delete: registryDelete },
+  sharedRegistry: { set: registrySet, delete: registryDelete, get: registryGet },
 }));
 // '../model.js' is NOT mocked here — this test drives the real
 // resolveAgentOpencodeModel/resolveOpencodeModel resolution (via

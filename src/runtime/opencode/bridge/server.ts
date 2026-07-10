@@ -352,10 +352,45 @@ type BoundHandler = (args: unknown) => Promise<ToolResult>;
  * lookup, not a property access that could fall through to
  * `Object.prototype`.
  */
+/**
+ * opencode double-post dedup — kept entirely in the bridge so the shared tool
+ * handlers and the core `Agent` stay runtime-agnostic. A weaker opencode model
+ * sometimes posts its answer via `post_to_user` AND passes a redundant "task
+ * completed" summary to `report_completion`, producing two user-facing
+ * messages. `markUserPost` records a successful post for the turn;
+ * `scrubRedundantCompletion` strips `report_completion`'s message when one
+ * already went out (completion is still recorded — only the duplicate delivery
+ * is dropped). The per-turn flag lives on the opencode-only `BridgeSession` and
+ * is reset each turn by the runtime.
+ */
+export function markUserPost(session: BridgeSession, result: ToolResult): void {
+  if (result?.content?.[0]?.text?.startsWith('Message posted')) {
+    session.postedThisTurn = true;
+  }
+}
+
+export function scrubRedundantCompletion(session: BridgeSession, args: unknown): unknown {
+  if (session.postedThisTurn && args && typeof args === 'object' && (args as { message?: unknown }).message) {
+    return { ...(args as object), message: undefined };
+  }
+  return args;
+}
+
 function buildSessionHandlers(session: BridgeSession): Map<string, BoundHandler> {
   const handlers = new Map<string, BoundHandler>();
   for (const [name, handler] of TOOL_WHITELIST) {
-    handlers.set(name, (args: unknown) => handler(session.agent, session.task, args));
+    if (name === 'post_to_user') {
+      handlers.set(name, async (args: unknown) => {
+        const result = await handler(session.agent, session.task, args);
+        markUserPost(session, result);
+        return result;
+      });
+    } else if (name === 'report_completion') {
+      handlers.set(name, (args: unknown) =>
+        handler(session.agent, session.task, scrubRedundantCompletion(session, args)));
+    } else {
+      handlers.set(name, (args: unknown) => handler(session.agent, session.task, args));
+    }
   }
   // Every agent gets research (like the control tools above) — folds the
   // Claude-path budget/persistence/defense-tag logic into the handler itself

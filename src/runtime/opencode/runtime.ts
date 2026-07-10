@@ -251,9 +251,11 @@ export class OpencodeRuntime implements AgentRuntime {
           }
           const text = msg.from ? `[From ${msg.from}]: ${msg.content}` : msg.content;
 
-          // Fresh per-turn state: report_completion drops a redundant trailing
-          // message only when a post_to_user already fired in THIS turn.
-          agent.postedToUserThisTurn = false;
+          // Fresh per-turn state for the bridge's double-post dedup: clear the
+          // "a user post fired this turn" flag on the session registry entry
+          // (opencode-only state — never on the core Agent).
+          const regForTurn = sharedRegistry.get(sessionId);
+          if (regForTurn) regForTurn.postedThisTurn = false;
 
           // Model is routed PER TURN from the agent's tier (agentModel, resolved
           // above); config.model (server.ts) is only the fallback when omitted.

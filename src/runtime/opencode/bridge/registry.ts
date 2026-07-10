@@ -19,6 +19,15 @@ export interface BridgeSession {
    * built-in tools.
    */
   readOnly: boolean;
+  /**
+   * Whether a user-facing message (`post_to_user`) has succeeded during the
+   * current turn. Set by the bridge's `post_to_user` dispatch, read by its
+   * `report_completion` dispatch to drop a redundant trailing message (the
+   * double-post a weaker opencode model exhibits), and reset per turn by the
+   * runtime. Lives here — on the opencode-only session — so the dedup never
+   * touches the core `Agent` or the runtime-agnostic tool handlers.
+   */
+  postedThisTurn?: boolean;
 }
 
 export class SessionRegistry {
