@@ -2,7 +2,7 @@
 
 How Archie runs its agents on [opencode](https://opencode.ai) instead of the Claude Agent SDK, selected by `AGENT_RUNTIME=opencode`. This document explains the internals — the embedded server, the tool bridge, read-only enforcement, the turn model, model routing, skills, and external MCP. For setup/config (env vars, installing the CLI) see `docs/guides/opencode-setup.md`; for the backend-seam resolution see `docs/architecture/backends.md`.
 
-All opencode/vendor code is confined to `src/runtime/opencode/`, behind the Phase-0 `AgentRuntime` port. `AGENT_RUNTIME=claude` remains the default and is unaffected.
+All opencode/vendor code is confined to `src/runtime/opencode/`, behind the `AgentRuntime` port. `AGENT_RUNTIME=claude` remains the default and is unaffected.
 
 ## Why this shape
 
@@ -65,7 +65,7 @@ Two consequences drive the whole design:
 A loopback-only HTTP server (`startBridgeServer`) with a bearer token and a `SessionRegistry` mapping each opencode `sessionId → { task, agent, readOnly }`. The generated plugin bakes in the bridge URL + token.
 
 - **`GET /tools`** — the tool manifest (names + arg schemas). The generated plugin fetches this at load and registers one opencode custom tool per entry.
-- **`POST /tool`** — dispatch. The plugin's `tool.execute` forwards `{ sessionId, tool, args }`; the bridge resolves the session's `{ task, agent }` and calls the in-process handler. Dispatch is a Map keyed by tool name (never a prototype-walkable object — a prototype-chain bypass was a real bug caught in review); body parsing rejects non-objects (400) and caps at 1 MiB (413).
+- **`POST /tool`** — dispatch. The plugin's `tool.execute` forwards `{ sessionId, tool, args }`; the bridge resolves the session's `{ task, agent }` and calls the in-process handler. Dispatch is a Map keyed by tool name (never a plain object, so a crafted tool name like `constructor` can't walk the prototype chain to reach live state); body parsing rejects non-objects (400) and caps at 1 MiB (413).
 - **`GET /policy?sessionId=`** — read-only policy for the plugin guard (see Read-only enforcement).
 
 **Arg-schema fidelity.** The bridge encodes each tool's full (possibly nested) zod schema into the manifest, and the generated plugin rebuilds a faithful zod schema — nested objects/arrays + field descriptions — rather than a bare `any`. Without this a structured arg (e.g. `spawn_repo_agent`'s `repos: [{ github, … }]`) reached the model shapeless and it guessed wrong.
@@ -101,17 +101,17 @@ opencode's built-in write/edit/bash tools have **no per-session permission surfa
 
 **`editModeApplies`.** `/policy` also returns whether edit-mode approval could ever make this session writable (i.e. it's a repo agent). The plugin's block message uses it: a read-only *repo* agent is told to request edit mode; a non-repo agent (PM/plugin) is told edit mode won't grant command execution — so a weaker model stops chasing edit mode to run a command (a dead-end that only re-blocks).
 
-> No OS sandbox. Unlike the Claude runtime (bubblewrap), read-only here is guard-enforced, not kernel-enforced; agent bash/egress are unsandboxed. A firewall + bash sandbox is Phase 3.
+> No OS sandbox. Unlike the Claude runtime (bubblewrap), read-only here is guard-enforced, not kernel-enforced; agent bash/egress are unsandboxed. A firewall + bash sandbox is planned future work.
 
 ## Model routing (`model.ts`, `runtime.ts`)
 
 Routing is **per agent, per turn**. Each turn sends `body.model = { providerID, modelID }` resolved from the agent's own tier via `resolveAgentOpencodeModel(def)` — `resolveAgentModel(def)` (the Claude runtime's alias: PM → `opus`, others → `sonnet`, or `def.model`) → strip the Claude-only `[1m]` suffix → `resolveOpencodeModel(alias)` → the `ARCHIE_OPENCODE_MODEL_<TIER>` route. The server-global `config.model` (set once at boot from the `default` route) is only the fallback when a turn omits `body.model`.
 
-(The B.1 spike wrongly concluded `body.model` was ignored — it was tested as a string; the SDK expects the `{providerID, modelID}` object, which does route per turn.)
+(`body.model` must be the `{ providerID, modelID }` object — a `provider/model` string is ignored.)
 
 ## Skills (`skills.ts`)
 
-opencode has a native `skill` tool that discovers `SKILL.md` files by the **serve process's working directory at startup** (confirmed by probe — NOT per-session; `query.directory` does nothing for skills). Since Archie runs one shared server, skills are staged **globally**: at boot the runtime links the union of every agent's `skillsPath` + `coreSkillsPath` into `<serveRoot>/.opencode/skills` (`stageOpencodeSkills`, reusing the dependency-free `agents/skill-linking.ts`). Because the serve cwd is the clean git-bounded serve root, opencode sees only the staged skills — not the repo's own `.claude/skills`.
+opencode has a native `skill` tool that discovers `SKILL.md` files by the **serve process's working directory at startup** — NOT per-session (`query.directory` does not affect skill discovery). Since Archie runs one shared server, skills are staged **globally**: at boot the runtime links the union of every agent's `skillsPath` + `coreSkillsPath` into `<serveRoot>/.opencode/skills` (`stageOpencodeSkills`, reusing the dependency-free `agents/skill-linking.ts`). Because the serve cwd is the clean git-bounded serve root, opencode sees only the staged skills — not the repo's own `.claude/skills`.
 
 Consequences vs the Claude runtime (which scopes skills per-agent via separate workspaces): **every opencode agent sees every staged skill** — prompts steer which to use. True per-agent scoping would require per-agent serve processes (dropping the shared singleton). A `SKILL.md` must carry both `name:` and `description:` frontmatter — opencode skips one missing `name:` (Claude derives it from the directory).
 
@@ -129,7 +129,7 @@ The opencode agent commits via its built-in `bash`. `configureGitIdentity` is fo
 
 ## Capabilities (`ports/capabilities.ts`)
 
-`OPENCODE_RUNTIME_CAPABILITIES` is **declarative** (spec P3: document parity, degrade gracefully) — nothing branches on it yet. Current: `skills: true`, `oneMillionContext: true` (a property of the configured model, e.g. glm-5.2 — Archie sets no context flag), `osSandbox: false` (Phase 3), `effort: false` (opencode has no per-turn reasoning-effort knob), `backgroundTasks: false` (opencode has subtasks, but the runtime doesn't yet track them into busy/idle accounting).
+`OPENCODE_RUNTIME_CAPABILITIES` is **declarative** (it documents parity and degrades gracefully) — nothing branches on it yet. Current: `skills: true`, `oneMillionContext: true` (a property of the configured model, e.g. glm-5.2 — Archie sets no context flag), `osSandbox: false`, `effort: false` (opencode has no per-turn reasoning-effort knob), `backgroundTasks: false` (opencode has subtasks, but the runtime doesn't yet track them into busy/idle accounting).
 
 ## File map
 
@@ -152,7 +152,7 @@ The opencode agent commits via its built-in `bash`. `configureGitIdentity` is fo
 
 ## Known limitations / follow-ups
 
-- **No OS sandbox** (Phase 3) — RO is guard-enforced; bash/egress unsandboxed.
+- **No OS sandbox** — RO is guard-enforced; bash/egress unsandboxed (a sandbox is planned future work).
 - **Skills are global, not per-agent** — a shared server can't scope per agent without per-agent serve processes.
 - **`backgroundTasks` unwired** — opencode subtasks aren't tracked into busy/idle accounting.
 - **Per-role model routing is server-global for `config.model`** — the per-turn `body.model` handles per-agent routing; the boot-time default is one route.

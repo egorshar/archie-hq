@@ -78,7 +78,7 @@ Commits: the agent commits via its built-in bash. The clone's local git identity
 
 ## Known limitations
 
-- **No OS sandbox (Phase 3).** Unlike the Claude runtime, the opencode runtime has no kernel-level sandbox: read-only mode is guard-enforced (the plugin `before` hook + bridge dispatch), not enforced by the OS, and agent bash/egress are unsandboxed. A firewall + bash sandbox for opencode is Phase 3.
+- **No OS sandbox.** Unlike the Claude runtime, the opencode runtime has no kernel-level sandbox: read-only mode is guard-enforced (the plugin `before` hook + bridge dispatch), not enforced by the OS, and agent bash/egress are unsandboxed. A firewall + bash sandbox for opencode is planned future work.
 - **Skills are global, not per-agent.** Because one shared embedded server serves all agents and opencode discovers skills by the serve cwd, every opencode agent sees every staged skill (the Claude runtime scopes skills per agent via separate workspaces). Prompts steer each agent to its own domain skill. True per-agent scoping would require per-agent serve processes (dropping the shared singleton) — a deferred follow-up.
 - **A staged `SKILL.md` needs a `name:` frontmatter field** to appear under opencode (it also requires `description:`). Skills that rely on Claude deriving the name from the directory (no `name:` in frontmatter) are silently skipped by opencode — fix the plugin's `SKILL.md`.
 - **`web_research`** needs a `PERPLEXITY_API_KEY`; without it the tool is present but the research call fails.
