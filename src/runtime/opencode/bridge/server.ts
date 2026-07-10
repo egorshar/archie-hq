@@ -59,7 +59,7 @@ import {
 import { createResearchToolHandler } from '../../../mcp/research-tools.js';
 import type { Agent } from '../../../agents/agent.js';
 import type { Task } from '../../../tasks/task.js';
-import { isPmAgent } from '../../../types/agent.js';
+import { isPmAgent, isRepoAgent } from '../../../types/agent.js';
 import type { SessionRegistry, BridgeSession } from './registry.js';
 import { logger } from '../../../system/logger.js';
 
@@ -519,7 +519,15 @@ function handlePolicyRequest(req: IncomingMessage, res: ServerResponse, registry
     return;
   }
 
-  sendJson(res, 200, { readOnly: session.readOnly, blockedTools: session.readOnly ? RO_BUILTIN_BLOCK : [] });
+  // `editModeApplies`: true only for a repo agent, whose read-only state edit-mode
+  // approval would flip to writable. For the PM / plugin agents it is always false —
+  // they never gain built-in write/command execution — so the plugin guard can tell
+  // the model "edit mode won't grant this" instead of nudging it to request edit mode.
+  sendJson(res, 200, {
+    readOnly: session.readOnly,
+    blockedTools: session.readOnly ? RO_BUILTIN_BLOCK : [],
+    editModeApplies: isRepoAgent(session.agent.def),
+  });
 }
 
 /**

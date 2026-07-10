@@ -139,13 +139,13 @@ describe('bridge server', () => {
       expect(res.status).toBe(401);
     });
 
-    it('returns readOnly:true with the RO_BUILTIN_BLOCK set for a read-only session', async () => {
-      const { task, agent } = fakeSession();
+    it('returns readOnly:true with the RO_BUILTIN_BLOCK set for a read-only session (PM: editModeApplies false)', async () => {
+      const { task, agent } = fakeSession(); // pm-agent → not a repo agent
       registry.set('s1', { task, agent, readOnly: true });
       const res = await fetch(`${handle.url}/policy?sessionId=s1`, { headers: { authorization: `Bearer ${handle.token}` } });
       expect(res.status).toBe(200);
       const body: any = await res.json();
-      expect(body).toEqual({ readOnly: true, blockedTools: RO_BUILTIN_BLOCK });
+      expect(body).toEqual({ readOnly: true, blockedTools: RO_BUILTIN_BLOCK, editModeApplies: false });
     });
 
     it('returns readOnly:false with an empty blockedTools set for an edit-mode session', async () => {
@@ -154,7 +154,16 @@ describe('bridge server', () => {
       const res = await fetch(`${handle.url}/policy?sessionId=s1`, { headers: { authorization: `Bearer ${handle.token}` } });
       expect(res.status).toBe(200);
       const body: any = await res.json();
-      expect(body).toEqual({ readOnly: false, blockedTools: [] });
+      expect(body).toEqual({ readOnly: false, blockedTools: [], editModeApplies: false });
+    });
+
+    it('editModeApplies:true for a read-only REPO agent (edit mode would make it writable)', async () => {
+      const { task, agent } = fakeSession();
+      agent.def.repo = { repos: [{ github: 'org/r', baseBranch: 'main' }], primary: 'org/r' };
+      registry.set('s1', { task, agent, readOnly: true });
+      const res = await fetch(`${handle.url}/policy?sessionId=s1`, { headers: { authorization: `Bearer ${handle.token}` } });
+      const body: any = await res.json();
+      expect(body).toEqual({ readOnly: true, blockedTools: RO_BUILTIN_BLOCK, editModeApplies: true });
     });
 
     it('returns not-ok for an unknown session instead of throwing', async () => {

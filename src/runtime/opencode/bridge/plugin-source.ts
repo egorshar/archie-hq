@@ -140,21 +140,21 @@ export const ArchieBridgePlugin = async (pluginCtx) => {
         headers: { authorization: "Bearer " + BRIDGE_TOKEN },
       });
     } catch {
-      return { blockedTools: FAIL_CLOSED_BLOCKED_TOOLS };
+      return { blockedTools: FAIL_CLOSED_BLOCKED_TOOLS, editModeApplies: false };
     }
     if (!r.ok) {
-      return { blockedTools: FAIL_CLOSED_BLOCKED_TOOLS };
+      return { blockedTools: FAIL_CLOSED_BLOCKED_TOOLS, editModeApplies: false };
     }
     let j;
     try {
       j = await r.json();
     } catch {
-      return { blockedTools: FAIL_CLOSED_BLOCKED_TOOLS };
+      return { blockedTools: FAIL_CLOSED_BLOCKED_TOOLS, editModeApplies: false };
     }
     if (!j || !Array.isArray(j.blockedTools)) {
-      return { blockedTools: FAIL_CLOSED_BLOCKED_TOOLS };
+      return { blockedTools: FAIL_CLOSED_BLOCKED_TOOLS, editModeApplies: false };
     }
-    return { blockedTools: j.blockedTools };
+    return { blockedTools: j.blockedTools, editModeApplies: j.editModeApplies === true };
   }
 
   return {
@@ -162,7 +162,14 @@ export const ArchieBridgePlugin = async (pluginCtx) => {
     "tool.execute.before": async (input, output) => {
       const policy = await resolvePolicy(input.sessionID);
       if (policy.blockedTools.includes(input.tool)) {
-        throw new Error("read-only mode: " + input.tool + " not permitted");
+        // A read-only REPO agent can gain this via edit-mode approval; a
+        // non-repo agent (PM / plugin) never can — tell it so it doesn't chase
+        // edit mode to run commands (a dead-end that only re-blocks).
+        throw new Error(
+          policy.editModeApplies
+            ? "read-only mode: " + input.tool + " not permitted — edit mode is not yet approved for this repo."
+            : "read-only mode: " + input.tool + " not permitted. You cannot run shell commands or edit files, and edit mode does NOT grant this (it only lets repo agents change code) — do not request edit mode to run a command or script.",
+        );
       }
     },
   };

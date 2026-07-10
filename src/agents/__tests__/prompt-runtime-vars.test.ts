@@ -58,6 +58,29 @@ describe('claude-render byte-identical regression', () => {
     expect(out).not.toContain('{{');
   });
 
+  it('opencode render of pm-agent tells the PM it cannot execute commands / must not request edit mode for them', async () => {
+    const out = await loadPrompt('pm-agent', {
+      ...runtimePromptVars('opencode'),
+      TEAM_LIST: '',
+      TEAM_EXPERTISE: '',
+      PM_INTEGRATIONS: '',
+    });
+    expect(out).toContain('You cannot run shell commands or scripts yourself');
+    expect(out).toContain('edit mode does NOT grant you command execution');
+    expect(out).not.toContain('{{');
+  });
+
+  it('claude render of pm-agent has NO command-execution note (byte-identical: empty var)', async () => {
+    const out = await loadPrompt('pm-agent', {
+      ...runtimePromptVars('claude'),
+      TEAM_LIST: '',
+      TEAM_EXPERTISE: '',
+      PM_INTEGRATIONS: '',
+    });
+    expect(out).not.toContain('You cannot run shell commands or scripts yourself');
+    expect(out).not.toContain('{{');
+  });
+
   it('opencode render of pm-agent enforces single-delivery completion (no redundant confirm)', async () => {
     const out = await loadPrompt('pm-agent', {
       ...runtimePromptVars('opencode'),

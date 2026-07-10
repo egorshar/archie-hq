@@ -81,9 +81,20 @@ const OPENCODE_COMPLETION_MESSAGE_GUIDANCE = `**Deliver your answer exactly once
 - You already delivered the answer via \`post_to_user\` this turn
 - After internal coordination steps that don't need user visibility`;
 
+// prompts/pm-agent.md — appended to the request_edit_mode bullet. Under opencode
+// the PM has no shell/command execution (parity with Claude), and — unlike a repo
+// agent — edit-mode approval can never grant it any (edit mode only makes repo
+// agents writable). A weaker model conflated the two: it hit the read-only bash
+// block, requested edit mode to "unblock", and dead-ended after approval. This
+// note heads that off. CLAUDE is empty (byte-identical render); the leading space
+// keeps the opencode append clean after the bullet's closing paren.
+const OPENCODE_PM_COMMAND_EXECUTION_NOTE =
+  ' You cannot run shell commands or scripts yourself, and edit mode does NOT grant you command execution — it only lets repo agents change code. If a request needs running a command or script that is not a repo code change (e.g. a local analysis script), tell the user you can\'t execute commands rather than requesting edit mode.';
+
 export function runtimePromptVars(kind: RuntimeKind): Record<string, string> {
   const claude = kind === 'claude';
   return {
+    PM_COMMAND_EXECUTION_NOTE: claude ? '' : OPENCODE_PM_COMMAND_EXECUTION_NOTE,
     TOOL_READ: claude ? 'Read' : 'read',
     TOOL_GREP: claude ? 'Grep' : 'grep',
     TOOL_GLOB: claude ? 'Glob' : 'glob',
