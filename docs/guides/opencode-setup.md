@@ -1,6 +1,6 @@
 # opencode runtime setup guide
 
-This guide covers running Archie's agent runtime on [opencode](https://opencode.ai) instead of the Claude Agent SDK, selected via `AGENT_RUNTIME=opencode`. This is Phase 2-A: the opencode-backed `AgentRuntime` boots, creates sessions, prompts, and routes models, but it does not yet expose Archie's tools to the opencode agent — see "What Phase 2-A does and does not do" below before relying on this for real tasks. `AGENT_RUNTIME=claude` remains the default and is unaffected by anything in this guide.
+This guide covers running Archie's agent runtime on [opencode](https://opencode.ai) instead of the Claude Agent SDK, selected via `AGENT_RUNTIME=opencode`. It is a full runtime: the PM and specialist agents boot, create sessions, use tools (Archie's own plus opencode's built-ins), enforce read-only mode, route models per agent, and drive real end-to-end tasks (investigate → edit → commit → push → open a merge request, posting back to Slack/CLI). `AGENT_RUNTIME=claude` remains the default and is unaffected by anything in this guide.
 
 ## Overview
 
@@ -10,12 +10,12 @@ Setting `AGENT_RUNTIME=opencode` swaps the active `AgentRuntime` and `LlmOneShot
 
 Two separate things are required, and both matter:
 
-- **The `@opencode-ai/sdk` npm package** — already pinned in `package.json` (`"@opencode-ai/sdk": "1.17.16"`) and installed by `npm install`. This is the TypeScript client `src/runtime/opencode/server.ts` uses to start and talk to the embedded server.
+- **The `@opencode-ai/sdk` npm package** — pinned in `package.json` and installed by `npm install`. This is the TypeScript client `src/runtime/opencode/server.ts` uses to start and talk to the embedded server.
 - **The `opencode` CLI binary, on `PATH`** — the SDK package does not bundle a server binary; `createOpencode()` spawns the `opencode` executable itself (`opencode serve --hostname=... --port=...`, via `cross-spawn`) and talks to it over HTTP. If `opencode` is not on `PATH`, spawning the embedded server fails at first use — the first PM/specialist agent spawn or one-shot call under `AGENT_RUNTIME=opencode` — not at boot.
 
-Install the CLI with `npm install -g opencode-ai@latest` or the official install script (`curl -fsSL https://opencode.ai/install | bash`); check opencode's own docs for the currently recommended method. In a container image, install it in the same build stage as Archie's other runtime dependencies so it ends up on `PATH` for the app user.
+The CLI version must match the SDK. The Docker images install it automatically from the `@opencode-ai/sdk` pin in `package.json` (`Dockerfile.dev` / `Dockerfile.prod`: `npm i -g opencode-ai@"$(node -p "require('./package.json').dependencies['@opencode-ai/sdk']")"`), so there is a single source of truth and no hardcoded version to keep in sync. For a local (non-container) install, install the matching version yourself — `npm install -g opencode-ai@<same version as @opencode-ai/sdk>` — or the official install script (`curl -fsSL https://opencode.ai/install | bash`); check opencode's own docs for the currently recommended method.
 
-The embedded server is started lazily, once per process, on an ephemeral port (`port: 0`), and reused for the rest of the process's lifetime — it is not restarted per task or per agent (`getOpencodeClient()` in `src/runtime/opencode/server.ts`).
+The embedded server is started lazily, once per process, on an ephemeral port (`port: 0`), and reused for the rest of the process's lifetime — it is not restarted per task or per agent (`getOpencodeClient()` in `src/runtime/opencode/server.ts`). It is terminated on process shutdown (SIGINT/SIGTERM → `closeOpencodeBridge()`), so a dev-server reload doesn't leak orphaned `opencode serve` children.
 
 ## Provider/auth config — `OPENCODE_CONFIG_PATH`
 
@@ -29,39 +29,50 @@ See opencode's own configuration docs for that file's schema. Archie only needs 
 
 ## Model routing — `ARCHIE_OPENCODE_MODEL_*`
 
-Archie's agents pass a *logical* model name (`'opus'`, `'sonnet'`, `'haiku'`, or whatever a specific agent definition pins via its own `model` field) rather than a concrete opencode model id. `resolveOpencodeModel()` (`src/runtime/opencode/model.ts`) maps that logical name to an opencode `{ providerID, modelID }` pair, in this order:
+Model routing is **per agent, per turn**. Each agent runs on its own tier — the same tier it would use under the Claude runtime (PM → `opus`, specialists and plugin agents → `sonnet`, unless an agent definition pins its own `model`) — rather than a single server-wide model. `resolveAgentOpencodeModel(def)` (`src/runtime/opencode/model.ts`) derives the agent's logical tier and maps it to an opencode `{ providerID, modelID }`, which the runtime sends as `body.model` on every `promptAsync` call. The server-global `config.model` (set once at boot from the `default` route) is only the fallback used when a turn omits `body.model`.
 
-1. **Passthrough** — if the logical name itself contains a `/` (e.g. an agent is configured with `model: 'anthropic/claude-opus-4-8'` directly), it's split on the first `/` into `providerID`/`modelID` and used as-is; no env lookup happens at all.
-2. **Per-tier env** — otherwise, `ARCHIE_OPENCODE_MODEL_<UPPER(name)>` (e.g. `ARCHIE_OPENCODE_MODEL_SONNET` for the logical name `'sonnet'`). The value must be a `provider/model` string.
-3. **Default env** — `ARCHIE_OPENCODE_MODEL_DEFAULT`, same `provider/model` format, used when no per-tier var matched.
-4. **Throw** — if neither resolves, `resolveOpencodeModel()` throws an error naming exactly which env var to set; it never silently guesses a model.
+The logical-name → `provider/model` mapping (`resolveOpencodeModel()`) resolves in this order:
 
-By default, the PM agent's logical model is `'opus'` and other agents (specialists, plugin agents) default to `'sonnet'`, unless an agent definition pins its own `model`. Concretely, with:
+1. **Passthrough** — if the logical name itself contains a `/` (e.g. an agent configured with `model: 'anthropic/claude-opus-4-8'` directly), it's split on the first `/` into `providerID`/`modelID` and used as-is; no env lookup.
+2. **Per-tier env** — otherwise, `ARCHIE_OPENCODE_MODEL_<UPPER(name)>` (e.g. `ARCHIE_OPENCODE_MODEL_SONNET` for `'sonnet'`). The value must be a `provider/model` string. (The Claude-only `[1m]` 1M-context suffix on a tier name is stripped before lookup.)
+3. **Default env** — `ARCHIE_OPENCODE_MODEL_DEFAULT`, same format, used when no per-tier var matched.
+4. **Throw** — if neither resolves, it throws an error naming exactly which env var to set; it never silently guesses. (On an agent turn this is caught and the turn falls back to the server default rather than failing.)
+
+So to run the PM on a capable model and specialists on a cheaper/faster one, set the tiers to different routes, e.g.:
 
 ```bash
 ARCHIE_OPENCODE_MODEL_DEFAULT=anthropic/claude-haiku-4-5
-ARCHIE_OPENCODE_MODEL_OPUS=anthropic/claude-opus-4-8
-ARCHIE_OPENCODE_MODEL_SONNET=anthropic/claude-sonnet-5
+ARCHIE_OPENCODE_MODEL_OPUS=anthropic/claude-opus-4-8      # PM
+ARCHIE_OPENCODE_MODEL_SONNET=anthropic/claude-sonnet-5    # specialists
 ```
 
-the PM resolves to `anthropic/claude-opus-4-8`, a specialist resolves to `anthropic/claude-sonnet-5`, and any other logical name with no per-tier var of its own (e.g. a one-shot call requesting `'haiku'` with no `ARCHIE_OPENCODE_MODEL_HAIKU` set) falls back to `anthropic/claude-haiku-4-5` via `_DEFAULT`.
+The PM's turns run on `claude-opus-4-8`, a specialist's on `claude-sonnet-5`, and any tier with no per-tier var of its own (e.g. a one-shot requesting `'haiku'` with no `ARCHIE_OPENCODE_MODEL_HAIKU`) falls back to `_DEFAULT`. Note that configured repo agents may pin `model: opus` in their plugin frontmatter — those resolve to the OPUS tier, so to see PM/specialist divergence a specialist must be on a non-OPUS tier. The message footer shows each agent's actual route, deduped, as the team grows.
+
+Picking a capable model for the PM matters: opencode PM orchestration (multi-step delegation, edit-mode requests, MR creation) needs a strong model; weaker models may fail to parse the request or mis-drive the flow.
 
 ## Boot-time validation
 
-`assertBackendConfig()` (`src/system/backends.ts`), called once early in boot, fails fast if `AGENT_RUNTIME=opencode` is set with no model route configured at all — that is, no environment variable whose name starts with `ARCHIE_OPENCODE_MODEL_` is present anywhere in `process.env`. The thrown error names both `ARCHIE_OPENCODE_MODEL_DEFAULT` and the per-tier alternative, so a misconfigured deployment fails at boot with an actionable message instead of failing deep inside the first agent spawn. Note that this check only requires *at least one* such var to exist — setting just `ARCHIE_OPENCODE_MODEL_DEFAULT` satisfies it, but a logical name with neither its own per-tier var nor `_DEFAULT` set still throws later, at resolution time inside `resolveOpencodeModel()`, not at boot.
+`assertBackendConfig()` (`src/system/backends.ts`), called once early in boot, fails fast if `AGENT_RUNTIME=opencode` is set with no model route configured at all — that is, no environment variable whose name starts with `ARCHIE_OPENCODE_MODEL_` is present. The thrown error names both `ARCHIE_OPENCODE_MODEL_DEFAULT` and the per-tier alternative, so a misconfigured deployment fails at boot with an actionable message. This check only requires *at least one* such var; a logical name with neither its own per-tier var nor `_DEFAULT` still throws later at resolution time. In practice set `ARCHIE_OPENCODE_MODEL_DEFAULT` — the embedded server resolves the `default` route for `config.model` at boot, so it is effectively required.
 
 The resolved backend matrix (`repoHost`/`runtime`) is logged at boot and exposed on `GET /health`, so `runtime=opencode` is observable without reading environment variables directly.
 
-## What Phase 2-A does and does not do
+## How the runtime works
 
-Phase 2-A — the scope of this guide — wires the opencode-backed `AgentRuntime` and `LlmOneShot` into the resolver and gives it a working turn loop:
+opencode's `session.prompt` is agentic (it runs an agent with tools), not a bare text completion, so Archie's tools have to be exposed to it. The runtime does this with a hybrid model:
 
-- **Does:** boot under `AGENT_RUNTIME=opencode`, create an opencode session per agent, send a prompt, stream the assistant's reply into Archie's logs/CLI, reach idle after the reply, and cleanly abort the in-flight prompt on task teardown.
-- **Does not yet:** expose any of Archie's tools to the opencode agent. Archie agents normally talk to Slack via the `post_to_user` tool (and complete tasks via `report_completion`); a Phase 2-A opencode agent has no tool bridge at all, so it can investigate and reason within its own session, but it cannot post to Slack, attach artifacts, or complete a task — its replies land only in logs/CLI, never in a Slack thread.
+- **Built-in tools** (file read/edit, bash, webfetch) are opencode's own and do the file/shell work.
+- **Archie's in-process control tools** run behind a **localhost HTTP bridge** (`src/runtime/opencode/bridge/`) — a loopback listener with a bearer token and a `sessionId → {task, agent}` registry, reached from opencode via a generated plugin dropped into `<serverCwd>/.opencode/plugins/`. This is what lets the out-of-process opencode agent call tools that are closures over the live in-memory `Task`. Bridged tools: `post_to_user` / `report_completion` / `request_edit_mode`, the repo-tools, the base agent-tools (`send_message_to_agent`, `log_finding`, `share_artifact`; all agents), `web_research` (all agents), and comms/orchestration/scheduling (PM only).
+- **External domain MCP servers** (the plugins' HTTP/OAuth MCP servers) map to opencode's native `config.mcp`, with OAuth headers injected from the orchestrator. A per-turn `body.tools` denylist scopes each agent to the external servers it declared.
 
-That gap is closed in later phases, not here:
+Turn mechanics: a turn is fired with `session.promptAsync` (returns immediately) and completes on the SSE `session.idle` event via an in-process completion registry — so a long agentic turn can't trip the HTTP client's headers timeout the way a held-open `session.prompt` would. A stale session (`NotFoundError`) is reset and retried once; a transient turn error is routed into the task's bounded recovery loop rather than hanging the task `in_progress`.
 
-- **Phase 2-B** adds the in-process tool bridge, permission guards, and read-only enforcement — the pieces that let an opencode agent actually call Archie's tools (including `post_to_user`) — plus the live SSE event stream in place of the current single-shot `session.prompt()` return.
-- **Phase 2-C** adds `activity.ts` tool-name aliases, a `read_skill` tool / `AGENTS.md` equivalent, and session reset-retry.
+Read-only enforcement: a plugin `tool.execute.before` guard blocks opencode's built-in write/edit/bash tools for non-edit sessions (querying the bridge's bearer-gated `/policy` per call, fail-closed), and the bridge rejects write repo-tools for read-only sessions — matching the Claude runtime's `disallowedTools` list. A session is writable only when it is a repo agent in edit mode; the PM, plugin agents, and read-only repo agents cannot use built-in writes.
 
-Until Phase 2-B lands, treat `AGENT_RUNTIME=opencode` as a plumbing and model-routing validation path, not a way to run real end-user tasks end to end.
+Prompt parity: per-runtime prompt variables (`src/agents/prompt-runtime-vars.ts`) soften Claude-specific `Skill`-tool references for opencode (which has no native `Skill` tool); the Claude render is byte-identical.
+
+Commits: the agent commits via its built-in bash. The clone's local git identity is set to the bot at clone-creation time (`configureGitIdentity` in `setupSharedClone`), so commits carry the bot identity and satisfy host committer push-rules — set `GITLAB_BOT_EMAIL` to a verified email of the token account for a GitLab host that enforces committer verification.
+
+## Known limitations
+
+- **No OS sandbox (Phase 3).** Unlike the Claude runtime, the opencode runtime has no kernel-level sandbox: read-only mode is guard-enforced (the plugin `before` hook + bridge dispatch), not enforced by the OS, and agent bash/egress are unsandboxed. A firewall + bash sandbox for opencode is Phase 3.
+- **`web_research`** needs a `PERPLEXITY_API_KEY`; without it the tool is present but the research call fails.
