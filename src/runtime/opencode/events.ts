@@ -2,15 +2,22 @@
  * opencode event consumer (spec §3.3 item 2). One global SSE subscription for
  * the whole embedded server (the server is a process-lifetime singleton). Each
  * event is correlated to a live Archie turn via the bridge sharedRegistry
- * (sessionID → {task, agent}); unknown sessions (one-shot LLM calls, evicted
- * turns) are ignored. Pure observability: it feeds the status line and logs
- * idle/error, and NEVER throws into or stalls a turn. The idle mechanism itself
- * stays prompt()-return (runtime.ts) in P2-C; session.idle is logged only.
+ * (sessionID → {task, agent}) for the status line, and to the turn-completion
+ * registry (by sessionID) that drives the runtime's async turn loop. Unknown
+ * sessions (one-shot LLM calls that use the blocking prompt, evicted turns) are
+ * ignored — the turn-completion registry no-ops when no waiter is registered.
+ * NEVER throws into or stalls a turn.
+ *
+ * Turn completion (session.promptAsync path): promptAsync returns immediately,
+ * so `session.idle` — not the HTTP response — signals the turn finished. This
+ * consumer resolves the runtime's waiter on idle (with the reply text streamed
+ * via `message.part.updated` text `delta`s) and rejects it on `session.error`.
  */
 import type { OpencodeClient } from './server.js';
 import type { SessionRegistry } from './bridge/registry.js';
 import { REPO_TOOL_SPECS } from '../../agents/tools.js';
 import { logger } from '../../system/logger.js';
+import { turnCompletion } from './turn-completion.js';
 
 export interface EventConsumerHandle {
   stop(): void;
@@ -44,6 +51,15 @@ function canonicalToolName(tool: string): string {
   return isRepoTool(tool) ? `mcp__repo-tools__${tool}` : tool;
 }
 
+/** JSON.stringify that never throws (circular/odd values → String()). */
+function safeStringify(v: unknown): string {
+  try {
+    return typeof v === 'string' ? v : JSON.stringify(v) ?? String(v);
+  } catch {
+    return String(v);
+  }
+}
+
 /** Correlate one opencode event to a live turn and feed the status line. Never throws. */
 export function handleOpencodeEvent(ev: unknown, registry: SessionRegistry): void {
   try {
@@ -52,17 +68,32 @@ export function handleOpencodeEvent(ev: unknown, registry: SessionRegistry): voi
 
     if (e.type === 'session.idle') {
       const sid = e.properties?.sessionID;
-      if (sid && registry.get(sid)) logger.debug('opencode', `session idle: ${sid}`);
+      if (typeof sid === 'string') {
+        if (registry.get(sid)) logger.debug('opencode', `session idle: ${sid}`);
+        turnCompletion.completeTurn(sid); // resolve the runtime's waiter (no-op if none)
+      }
       return;
     }
     if (e.type === 'session.error') {
       const sid = e.properties?.sessionID;
-      if (sid && registry.get(sid)) logger.warn('opencode', `session error: ${sid}`);
+      if (typeof sid === 'string') {
+        if (registry.get(sid)) logger.warn('opencode', `session error: ${sid}`);
+        const detail = e.properties?.error ?? e.properties;
+        turnCompletion.failTurn(sid, new Error(`opencode session error: ${safeStringify(detail)}`));
+      }
       return;
     }
     if (e.type === 'message.part.updated') {
       const part = e.properties?.part;
-      if (!part || part.type !== 'tool' || typeof part.tool !== 'string') return;
+      if (!part || typeof part.sessionID !== 'string') return;
+      // Streamed assistant text — accumulate the incremental `delta` (NOT
+      // `part.text`, which is cumulative and would double-count) for the turn's
+      // reply text. Best-effort: log-only, so a missing delta just omits a chunk.
+      if (part.type === 'text' && typeof e.properties?.delta === 'string') {
+        turnCompletion.appendText(part.sessionID, e.properties.delta);
+        return;
+      }
+      if (part.type !== 'tool' || typeof part.tool !== 'string') return;
       const session = registry.get(part.sessionID);
       if (!session) return; // unknown / one-shot / evicted
       // Tool parts fire multiple times per call (pending -> running -> completed),

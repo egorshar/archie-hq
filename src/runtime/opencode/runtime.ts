@@ -1,10 +1,13 @@
 /**
  * OpencodeRuntime — the AgentRuntime backed by an embedded opencode server
- * (spec §3.3, Phase 2-A). Self-contained: it replicates the plumbing subset of
- * spawnAgent() for opencode (thin seam), reusing prepareAgentContext() for the
- * shared launch inputs. The turn primitive is client.session.prompt(): its
- * return is the session.idle/Stop equivalent. The live SSE event stream, the
- * in-process tool bridge, guards, and read-only enforcement are Phase 2-B.
+ * (spec §3.3). Self-contained: it replicates the plumbing subset of spawnAgent()
+ * for opencode (thin seam), reusing prepareAgentContext() for the shared launch
+ * inputs. The turn primitive is `session.promptAsync` (returns immediately, HTTP
+ * 204); the turn's completion is the `session.idle` SSE event, delivered via the
+ * turn-completion registry that `events.ts` drives — NOT the HTTP response.
+ * (This replaced the blocking `session.prompt`, whose held-open request tripped
+ * undici's headers timeout on long turns.) Tool bridge, guards, and read-only
+ * enforcement are Phase 2-B; per-agent MCP scoping is B.3.
  */
 import type { AgentRuntime } from '../../ports/agent-runtime.js';
 import type { RuntimeCapabilities } from '../../ports/capabilities.js';
@@ -13,8 +16,9 @@ import type { Agent } from '../../agents/agent.js';
 import type { Task } from '../../tasks/task.js';
 import { prepareAgentContext } from '../../agents/spawn.js';
 import { logger } from '../../system/logger.js';
-import { getOpencodeClient, concatPromptText, sharedRegistry, type OpencodeClient } from './server.js';
+import { getOpencodeClient, sharedRegistry, type OpencodeClient } from './server.js';
 import { buildToolAllowlist } from './tool-allowlist.js';
+import { turnCompletion } from './turn-completion.js';
 
 const SESSION_NOT_FOUND_RE = /session.*not.*found|not.*found.*session/i;
 
@@ -58,58 +62,84 @@ export function isSessionNotFound(res: unknown): boolean {
   return false;
 }
 
+/** True when a promptAsync result/throw is an error (non-2xx) rather than the 204 accept. */
+function isErrorResult(res: unknown): boolean {
+  return res instanceof Error || (res != null && typeof res === 'object' && (res as { error?: unknown }).error != null);
+}
+
 /**
- * Issue one prompt with session-not-found recovery: on a not-found result —
- * whether `client.session.prompt` RETURNS a not-found result object or THROWS
- * a not-found-shaped error (a stale session can surface either way) — discard
- * the stale session, create a fresh one (re-register with the bridge), and
- * retry the SAME prompt exactly once. A second not-found (or the retry
- * throwing) gives up: a returned not-found result is passed back as-is, and a
- * thrown error from the retry propagates (bounded to exactly one retry either
- * way). Clearing agent.session.session_id here also means an outer recovery
- * re-spawn starts fresh — removing the infinite "not found → recover →
- * repeat" hot-loop at its source. Errors that are NOT session-not-found are
- * never masked: they rethrow immediately, before any reset happens.
+ * Run ONE turn via `session.promptAsync` (returns immediately, HTTP 204) and
+ * await completion off the SSE stream (`session.idle` → the turn-completion
+ * registry), NOT the HTTP response — so a long turn can't trip undici's headers
+ * timeout the way the blocking `session.prompt` did (2026-07-10).
+ *
+ * Session-not-found recovery is preserved: `promptAsync` still returns/throws a
+ * 404 fast on a stale session, so on not-found we discard it, create a fresh
+ * session (re-register with the bridge + clear `agent.session.session_id` so an
+ * outer recovery re-spawn also starts fresh), and retry ONCE. A non-not-found
+ * error is surfaced (thrown) — the caller's turn-loop catch logs it. `onSession`
+ * is called with the active session id (initial + after a reset) so the caller
+ * can keep its abort target current.
+ *
+ * Returns the accumulated reply text (best-effort, streamed text deltas) or ''
+ * when recovery can't produce a fresh session. Rejects only if the turn itself
+ * errored (`session.error`) or promptAsync surfaced a non-recoverable error.
  */
-export async function promptWithRecovery(args: {
+export async function runPromptTurn(args: {
   client: OpencodeClient;
   agent: Agent;
   task: Task;
   sessionId: string;
   readOnly: boolean;
   body: { parts: { type: 'text'; text: string }[]; system: string; tools?: Record<string, boolean> };
-  signal: AbortSignal;
-}): Promise<{ res: unknown; sessionId: string }> {
-  const { client, agent, task, readOnly, body, signal } = args;
+  onSession?: (sessionId: string) => void;
+}): Promise<{ reply: string; sessionId: string }> {
+  const { client, agent, task, readOnly, body, onSession } = args;
   let sessionId = args.sessionId;
+  onSession?.(sessionId);
 
-  let res: unknown;
-  try {
-    res = await client.session.prompt({ path: { id: sessionId }, body, signal });
-    if (!isSessionNotFound(res)) return { res, sessionId };
-  } catch (err) {
-    // A stale session can make the SDK throw instead of returning a not-found
-    // result. Only recover from a session-not-found-shaped throw; anything
-    // else is an unrelated failure and must propagate untouched.
-    if (!isSessionNotFound(err)) throw err;
-    res = err; // fallback return value if recovery itself can't produce a fresh result
+  // Register the completion waiter BEFORE firing so no idle/text event is missed.
+  const fire = async (sid: string): Promise<{ res: unknown; turn: Promise<string> }> => {
+    const turn = turnCompletion.waitForTurn(sid);
+    try {
+      const res = await client.session.promptAsync({ path: { id: sid }, body });
+      return { res, turn };
+    } catch (err) {
+      return { res: err, turn }; // hand a thrown error back as `res` for uniform handling
+    }
+  };
+
+  let { res, turn } = await fire(sessionId);
+
+  if (isSessionNotFound(res)) {
+    turnCompletion.cancelTurn(sessionId, 'session not found — resetting');
+    logger.warn(agent.def.id, `opencode session ${sessionId} not found — resetting and retrying once`);
+    sharedRegistry.delete(sessionId);
+    agent.session.session_id = undefined;
+    const created = await client.session.create({ body: { title: `archie-${task.taskId}-${agent.def.id}` } });
+    const fresh = (created as { data?: { id?: string } })?.data?.id;
+    if (!fresh) {
+      logger.error(agent.def.id, 'opencode session.create returned no id during recovery');
+      return { reply: '', sessionId };
+    }
+    sessionId = fresh;
+    agent.session.session_id = sessionId;
+    sharedRegistry.set(sessionId, { task, agent, readOnly });
+    onSession?.(sessionId);
+    ({ res, turn } = await fire(sessionId));
   }
 
-  logger.warn(agent.def.id, `opencode session ${sessionId} not found — resetting and retrying once`);
-  sharedRegistry.delete(sessionId);
-  agent.session.session_id = undefined;
-  const created = await client.session.create({ body: { title: `archie-${task.taskId}-${agent.def.id}` } });
-  const fresh = (created as any)?.data?.id;
-  if (!fresh) {
-    logger.error(agent.def.id, 'opencode session.create returned no id during recovery');
-    return { res, sessionId };
+  if (isErrorResult(res)) {
+    // Non-recoverable (400, still-not-found after reset, or a thrown network
+    // error). Discard the waiter and surface it to the turn-loop catch.
+    turnCompletion.cancelTurn(sessionId, 'promptAsync error');
+    throw res instanceof Error ? res : new Error(`opencode promptAsync failed: ${JSON.stringify((res as { error?: unknown }).error)}`);
   }
-  sessionId = fresh;
-  agent.session.session_id = sessionId;
-  sharedRegistry.set(sessionId, { task, agent, readOnly });
 
-  res = await client.session.prompt({ path: { id: sessionId }, body, signal });
-  return { res, sessionId };
+  // Accepted (204). Await the async turn's completion via session.idle (resolves
+  // with the streamed reply text) — an in-process promise, no held-open request.
+  const reply = await turn; // rejects on session.error
+  return { reply, sessionId };
 }
 
 export class OpencodeRuntime implements AgentRuntime {
@@ -148,14 +178,24 @@ export class OpencodeRuntime implements AgentRuntime {
     // in RO_BUILTIN_BLOCK).
     const readOnly = !(repo && repo.editAllowed);
 
-    // Per-agent controller — aborts THIS agent's in-flight prompt only, never the
-    // shared server. Task teardown calls handle.abort() after stopping the queue.
-    const abortController = new AbortController();
+    // Abort target — the current opencode session id + shared client, kept
+    // current as the loop resumes/resets sessions. Task teardown calls
+    // handle.abort() AFTER stopping the queue. With the promptAsync turn model
+    // there's no held-open HTTP request to abort; instead we unblock the
+    // in-flight `await turn` (turn-completion registry) and tell opencode to
+    // abort the running turn server-side.
+    let currentSessionId: string | undefined = agent.session.session_id;
+    let clientRef: OpencodeClient | undefined;
 
     const handle = {
       running: Promise.resolve() as Promise<void>,
       isRunning: true,
-      abort: () => abortController.abort(),
+      abort: () => {
+        const sid = currentSessionId;
+        if (!sid) return;
+        turnCompletion.cancelTurn(sid, 'aborted');
+        clientRef?.session.abort({ path: { id: sid } }).catch(() => {});
+      },
     };
 
     handle.running = (async () => {
@@ -171,6 +211,7 @@ export class OpencodeRuntime implements AgentRuntime {
         // rather than per-prompt, so there's no per-agent model to resolve here;
         // see server.ts's SERVER_MODEL_LOGICAL note for the shared-server caveat.
         const client = await getOpencodeClient();
+        clientRef = client;
 
         // Ensure a session (resume the stored one, else create).
         if (!sessionId) {
@@ -182,6 +223,7 @@ export class OpencodeRuntime implements AgentRuntime {
           }
           agent.session.session_id = sessionId;
         }
+        currentSessionId = sessionId;
         // Register this session with the bridge's SessionRegistry so bridged
         // control-tool calls (post_to_user / report_completion /
         // request_edit_mode) resolve to this Task/Agent pair; evicted in the
@@ -203,20 +245,21 @@ export class OpencodeRuntime implements AgentRuntime {
           // message only when a post_to_user already fired in THIS turn.
           agent.postedToUserThisTurn = false;
 
-          // client.session.prompt is single-argument: Options<SessionPromptData>
-          // extends Omit<RequestInit, 'body'|'headers'|'method'> & SessionPromptData,
-          // so `signal` merges into the same object as `path`/`body` (the
-          // `@hey-api` fetch-client convention) rather than a second argument.
           // No `body.model` here — opencode ignores it (spike.md §5); the model
-          // is set once, server-wide, via `config.model` in server.ts.
+          // is set once, server-wide, via `config.model` in server.ts. `tools`
+          // is the per-agent external-MCP denylist (see tool-allowlist.ts).
           const toolAllow = buildToolAllowlist(agent);
           const body = {
             parts: [{ type: 'text' as const, text }],
             system: systemPrompt,
             ...(Object.keys(toolAllow).length > 0 ? { tools: toolAllow } : {}),
           };
-          const { res, sessionId: activeId } = await promptWithRecovery({
-            client, agent, task, sessionId, readOnly, body, signal: abortController.signal,
+          // Fire via promptAsync + await completion off the SSE session.idle
+          // event (runPromptTurn), not the HTTP response — a long turn no longer
+          // trips undici's headers timeout.
+          const { reply, sessionId: activeId } = await runPromptTurn({
+            client, agent, task, sessionId, readOnly, body,
+            onSession: (sid) => { currentSessionId = sid; },
           });
           sessionId = activeId;
 
@@ -225,12 +268,11 @@ export class OpencodeRuntime implements AgentRuntime {
             task.updateAgentState(def.id, true, sessionId);
           }
 
-          const reply = concatPromptText(res);
           if (reply) logger.agent(def.id, reply);
 
-          // Prompt-return = the session.idle/Stop equivalent for P2-A: the turn
-          // ended. Mark inactive so the quiescence/idle path runs, and flush any
-          // teardown a tool deferred during the turn.
+          // session.idle (the turn completed) is the Stop equivalent: mark
+          // inactive so the quiescence/idle path runs, and flush any teardown a
+          // tool deferred during the turn.
           task.updateAgentState(def.id, false);
           if (agent.pendingTeardown) {
             const teardown = agent.pendingTeardown;
@@ -243,11 +285,15 @@ export class OpencodeRuntime implements AgentRuntime {
       } catch (err) {
         if (!agent.queue.isStopped()) logger.error(def.id, 'opencode turn failed', err as Error);
       } finally {
-        // Evict the bridge registration on every exit path (normal, aborted, or
-        // errored) so a stale sessionId can't resolve control-tool calls to a
-        // dead Task/Agent pair. `sessionId` may still be unset if getOpencodeClient()
-        // or session.create() failed before registration ever ran.
-        if (sessionId) sharedRegistry.delete(sessionId);
+        // Evict the bridge registration + resolve any lingering turn waiter on
+        // every exit path (normal, aborted, or errored) so a stale sessionId
+        // can't resolve control-tool calls to a dead Task/Agent pair and no
+        // completion promise is left dangling. `sessionId` may still be unset if
+        // getOpencodeClient()/session.create() failed before registration ran.
+        if (sessionId) {
+          sharedRegistry.delete(sessionId);
+          turnCompletion.cancelTurn(sessionId, 'turn loop exited');
+        }
         handle.isRunning = false;
         agent.backgroundTasks.clear();
         if (agent.pendingTeardown) {

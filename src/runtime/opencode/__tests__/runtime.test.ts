@@ -25,7 +25,11 @@ const { prepareAgentContext } = vi.hoisted(() => ({ prepareAgentContext: vi.fn()
 vi.mock('../../../agents/spawn.js', () => ({ prepareAgentContext }));
 
 import { MessageQueue } from '../../../agents/message-queue.js';
-import { OpencodeRuntime, isSessionNotFound, promptWithRecovery } from '../runtime.js';
+import { OpencodeRuntime, isSessionNotFound, runPromptTurn } from '../runtime.js';
+import { turnCompletion } from '../turn-completion.js';
+
+/** Let runPromptTurn reach its `await turn` (after the mocked promptAsync microtasks). */
+const tick = () => new Promise((r) => setTimeout(r, 0));
 
 function makeAgent() {
   return {
@@ -44,12 +48,20 @@ function makeTask() {
 }
 
 describe('OpencodeRuntime.spawn', () => {
-  let prompt: ReturnType<typeof vi.fn>;
+  let promptAsync: ReturnType<typeof vi.fn>;
   let create: ReturnType<typeof vi.fn>;
+  let abort: ReturnType<typeof vi.fn>;
   beforeEach(() => {
     create = vi.fn(async () => ({ data: { id: 'sess-1' } }));
-    prompt = vi.fn(async () => ({ data: { parts: [{ type: 'text', text: 'hi there' }] } }));
-    getOpencodeClient.mockResolvedValue({ session: { create, prompt } });
+    // promptAsync returns 204 immediately; the real server then emits
+    // session.idle when the async turn finishes. Simulate that by completing
+    // the turn on a microtask, so turns resolve like the old prompt()-return.
+    promptAsync = vi.fn(async (req: any) => {
+      queueMicrotask(() => turnCompletion.completeTurn(req.path.id));
+      return { data: {} };
+    });
+    abort = vi.fn(async () => ({ data: {} }));
+    getOpencodeClient.mockResolvedValue({ session: { create, promptAsync, abort } });
     registrySet.mockReset();
     registryDelete.mockReset();
     prepareAgentContext.mockReset();
@@ -59,7 +71,7 @@ describe('OpencodeRuntime.spawn', () => {
     });
   });
 
-  it('creates a session, prompts with NO body.model + the system prompt, sets a live handle', async () => {
+  it('fires promptAsync with NO body.model + the system prompt, completes on idle, sets a live handle', async () => {
     const agent = makeAgent();
     const task = makeTask();
     await new OpencodeRuntime().spawn(agent as any, task as any);
@@ -69,11 +81,11 @@ describe('OpencodeRuntime.spawn', () => {
     expect(agent.sandbox).toEqual({ cwd: '/w' });
 
     agent.queue.addMessage('investigate the login bug', 'alice');
-    await new Promise((r) => setTimeout(r, 0));
+    await tick();
 
     expect(create).toHaveBeenCalledTimes(1);
-    expect(prompt).toHaveBeenCalledTimes(1);
-    const body = prompt.mock.calls[0][0].body;
+    expect(promptAsync).toHaveBeenCalledTimes(1);
+    const body = promptAsync.mock.calls[0][0].body;
     // Model routing is server-global (config.model, set in server.ts) — opencode
     // ignores body.model, so it must not be sent (spike.md §5).
     expect(body).not.toHaveProperty('model');
@@ -210,21 +222,24 @@ describe('OpencodeRuntime.spawn', () => {
     expect(registrySet).toHaveBeenCalledWith('sess-1', { task, agent, readOnly: true });
   });
 
-  it('abort() cancels via the AbortController signal', async () => {
+  it('abort() unblocks the in-flight turn and tells opencode to abort the session', async () => {
     const agent = makeAgent();
     const task = makeTask();
-    let seenSignal: AbortSignal | undefined;
-    prompt.mockImplementation(async (req: any) => {
-      seenSignal = req?.signal;
-      return { data: { parts: [{ type: 'text', text: 'ok' }] } };
-    });
+    // A promptAsync that does NOT auto-complete: the turn stays in-flight
+    // (awaiting session.idle) so abort() has something to cancel.
+    promptAsync.mockImplementation(async () => ({ data: {} }));
     await new OpencodeRuntime().spawn(agent as any, task as any);
     agent.queue.addMessage('go');
-    await new Promise((r) => setTimeout(r, 0));
-    expect(seenSignal).toBeInstanceOf(AbortSignal);
-    expect(seenSignal!.aborted).toBe(false);
+    await tick();
+
+    // Turn is parked on `await turn`. Abort cancels the waiter + aborts the
+    // opencode-side turn; there is no held-open request / AbortSignal anymore.
     agent.handle.abort();
-    expect(seenSignal!.aborted).toBe(true);
+    expect(abort).toHaveBeenCalledWith({ path: { id: 'sess-1' } });
+
+    agent.queue.stop();
+    await agent.handle.running; // resolves — the cancelled turn unblocked the loop
+    expect(agent.handle.isRunning).toBe(false);
   });
 });
 
@@ -265,85 +280,86 @@ describe('isSessionNotFound', () => {
   });
 });
 
-describe('promptWithRecovery', () => {
-  it('resets the session and retries once on not-found', async () => {
-    const prompt = vi.fn()
-      .mockResolvedValueOnce({ error: { status: 404 } })
-      .mockResolvedValueOnce({ data: { info: {}, parts: [{ type: 'text', text: 'ok' }] } });
-    const create = vi.fn().mockResolvedValue({ data: { id: 'S2' } });
-    const client = { session: { prompt, create } } as any;
+describe('runPromptTurn (promptAsync + session.idle completion)', () => {
+  const body = { parts: [{ type: 'text' as const, text: 'hi' }], system: 's' };
+
+  it('awaits session.idle completion and returns the streamed reply text', async () => {
+    const promptAsync = vi.fn().mockResolvedValue({ data: {} }); // 204 accept
+    const client = { session: { promptAsync, create: vi.fn() } } as any;
     const agent = { def: { id: 'pm' }, session: { session_id: 'S1' } } as any;
     const task = { taskId: 'T1' } as any;
 
-    const { res, sessionId } = await promptWithRecovery({
-      client, agent, task, sessionId: 'S1', readOnly: false,
-      body: { parts: [{ type: 'text', text: 'hi' }], system: 's' },
-      signal: new AbortController().signal,
-    });
+    const p = runPromptTurn({ client, agent, task, sessionId: 'S1', readOnly: false, body });
+    await tick(); // reaches `await turn`
+    turnCompletion.appendText('S1', 'po');
+    turnCompletion.appendText('S1', 'ng');
+    turnCompletion.completeTurn('S1'); // simulate session.idle
 
+    const { reply, sessionId } = await p;
+    expect(promptAsync).toHaveBeenCalledTimes(1);
+    expect(sessionId).toBe('S1');
+    expect(reply).toBe('pong');
+  });
+
+  it('resets the session and retries once on a not-found promptAsync result', async () => {
+    const promptAsync = vi.fn()
+      .mockResolvedValueOnce({ error: { name: 'NotFoundError', data: { message: 'Session not found: S1' } } })
+      .mockResolvedValueOnce({ data: {} }); // 204 on the fresh session
+    const create = vi.fn().mockResolvedValue({ data: { id: 'S2' } });
+    const client = { session: { promptAsync, create } } as any;
+    const agent = { def: { id: 'pm' }, session: { session_id: 'S1' } } as any;
+    const task = { taskId: 'T1' } as any;
+
+    const p = runPromptTurn({ client, agent, task, sessionId: 'S1', readOnly: false, body });
+    await tick();
+    turnCompletion.completeTurn('S2'); // idle for the fresh session
+
+    const { sessionId } = await p;
     expect(create).toHaveBeenCalledTimes(1);
-    expect(prompt).toHaveBeenCalledTimes(2);
+    expect(promptAsync).toHaveBeenCalledTimes(2);
     expect(sessionId).toBe('S2');
-    expect(agent.session.session_id).toBe('S2');
-    expect((res as any).data.parts[0].text).toBe('ok'); // res is the successful retry
+    expect(agent.session.session_id).toBe('S2'); // outer recovery re-spawn starts fresh
   });
 
-  it('gives up after a second not-found (no third prompt)', async () => {
-    const prompt = vi.fn().mockResolvedValue({ error: { status: 404 } });
+  it('gives up (throws) after a second not-found — bounded to one retry', async () => {
+    const promptAsync = vi.fn().mockResolvedValue({ error: { name: 'NotFoundError', data: { message: 'Session not found' } } });
     const create = vi.fn().mockResolvedValue({ data: { id: 'S2' } });
-    const client = { session: { prompt, create } } as any;
+    const client = { session: { promptAsync, create } } as any;
     const agent = { def: { id: 'pm' }, session: { session_id: 'S1' } } as any;
     const task = { taskId: 'T1' } as any;
 
-    await promptWithRecovery({
-      client, agent, task, sessionId: 'S1', readOnly: false,
-      body: { parts: [{ type: 'text', text: 'hi' }], system: 's' },
-      signal: new AbortController().signal,
-    });
-
+    await expect(
+      runPromptTurn({ client, agent, task, sessionId: 'S1', readOnly: false, body }),
+    ).rejects.toThrow();
     expect(create).toHaveBeenCalledTimes(1);
-    expect(prompt).toHaveBeenCalledTimes(2); // initial + one retry, then stop
+    expect(promptAsync).toHaveBeenCalledTimes(2); // initial + one retry, then give up
   });
 
-  it('resets the session and retries once when the initial prompt call THROWS not-found', async () => {
-    const notFoundErr = Object.assign(new Error('Session not found'), { status: 404 });
-    const prompt = vi.fn()
-      .mockRejectedValueOnce(notFoundErr)
-      .mockResolvedValueOnce({ data: { info: {}, parts: [{ type: 'text', text: 'ok' }] } });
-    const create = vi.fn().mockResolvedValue({ data: { id: 'S2' } });
-    const client = { session: { prompt, create } } as any;
-    const agent = { def: { id: 'pm' }, session: { session_id: 'S1' } } as any;
-    const task = { taskId: 'T1' } as any;
-
-    const { res, sessionId } = await promptWithRecovery({
-      client, agent, task, sessionId: 'S1', readOnly: false,
-      body: { parts: [{ type: 'text', text: 'hi' }], system: 's' },
-      signal: new AbortController().signal,
-    });
-
-    expect(create).toHaveBeenCalledTimes(1);
-    expect(prompt).toHaveBeenCalledTimes(2);
-    expect(sessionId).toBe('S2');
-    expect(agent.session.session_id).toBe('S2'); // outer recovery re-spawn would start fresh, not stale
-    expect((res as any).data.parts[0].text).toBe('ok');
-  });
-
-  it('rethrows a non-not-found error from the initial prompt call without recovering', async () => {
-    const otherErr = new Error('ECONNRESET');
-    const prompt = vi.fn().mockRejectedValueOnce(otherErr);
+  it('surfaces a non-not-found promptAsync error without recovering', async () => {
+    const promptAsync = vi.fn().mockRejectedValueOnce(new Error('ECONNRESET'));
     const create = vi.fn();
-    const client = { session: { prompt, create } } as any;
+    const client = { session: { promptAsync, create } } as any;
     const agent = { def: { id: 'pm' }, session: { session_id: 'S1' } } as any;
     const task = { taskId: 'T1' } as any;
 
-    await expect(promptWithRecovery({
-      client, agent, task, sessionId: 'S1', readOnly: false,
-      body: { parts: [{ type: 'text', text: 'hi' }], system: 's' },
-      signal: new AbortController().signal,
-    })).rejects.toThrow('ECONNRESET');
-
+    await expect(
+      runPromptTurn({ client, agent, task, sessionId: 'S1', readOnly: false, body }),
+    ).rejects.toThrow('ECONNRESET');
     expect(create).not.toHaveBeenCalled();
-    expect(prompt).toHaveBeenCalledTimes(1);
-    expect(agent.session.session_id).toBe('S1'); // untouched — not treated as a stale session
+    expect(promptAsync).toHaveBeenCalledTimes(1);
+    expect(agent.session.session_id).toBe('S1'); // untouched — not a stale session
+  });
+
+  it('rejects when the turn errors (session.error)', async () => {
+    const promptAsync = vi.fn().mockResolvedValue({ data: {} });
+    const client = { session: { promptAsync, create: vi.fn() } } as any;
+    const agent = { def: { id: 'pm' }, session: { session_id: 'S1' } } as any;
+    const task = { taskId: 'T1' } as any;
+
+    const p = runPromptTurn({ client, agent, task, sessionId: 'S1', readOnly: false, body });
+    await tick();
+    turnCompletion.failTurn('S1', new Error('provider error')); // simulate session.error
+
+    await expect(p).rejects.toThrow('provider error');
   });
 });
