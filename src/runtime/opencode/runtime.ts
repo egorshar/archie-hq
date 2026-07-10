@@ -16,7 +16,7 @@ import type { Task } from '../../tasks/task.js';
 import { prepareAgentContext } from '../../agents/spawn.js';
 import { logger } from '../../system/logger.js';
 import { sharedRegistry, closeBridge } from './server.js';
-import { getAgentServe, scheduleIdleReap, markAllServesStale, closeServePool, type AgentServeSpec, type ServeHandle } from './serve-pool.js';
+import { getAgentServe, scheduleIdleReap, markAllServesStale, closeServePool, evictTask, type AgentServeSpec, type ServeHandle } from './serve-pool.js';
 import { closeOneShotServe } from './llm-one-shot.js';
 import type { OpencodeClient } from './embedded-server.js';
 import { buildToolAllowlist } from './tool-allowlist.js';
@@ -180,6 +180,17 @@ export class OpencodeRuntime implements AgentRuntime {
    */
   async onPluginsRefreshed(): Promise<void> {
     markAllServesStale('plugins');
+  }
+
+  /** Close this task's serve children and rm their synthetic serve roots
+   * (pool.evictTask) — the ONLY place serve roots are removed (P3a A5).
+   * Best-effort: never throws into task teardown. */
+  async onTaskTeardown(taskId: string): Promise<void> {
+    try {
+      await evictTask(taskId);
+    } catch (err) {
+      logger.warn('opencode', `evictTask(${taskId}) failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   async spawn(agent: Agent, task: Task): Promise<void> {

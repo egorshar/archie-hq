@@ -56,4 +56,14 @@ export interface AgentRuntime {
    * (a failure must never break the plugins refresh).
    */
   onPluginsRefreshed?(): Promise<void>;
+  /**
+   * Called when a task is torn down (stop/complete), after its agents' queues
+   * are stopped. Lets a runtime release per-task process state — the opencode
+   * runtime closes the task's per-agent serve children and removes their
+   * synthetic serve roots (P3a evictTask); the Claude runtime holds no
+   * per-task process state, so it omits this. Optional and invoked as
+   * `getAgentRuntime().onTaskTeardown?.(taskId)` (same precedent as
+   * `shutdown?()`); implementations must be best-effort and never throw.
+   */
+  onTaskTeardown?(taskId: string): Promise<void>;
 }

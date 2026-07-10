@@ -145,6 +145,16 @@ describe('OpencodeRuntime.spawn', () => {
     expect(markAllServesStale).toHaveBeenCalledWith('plugins');
   });
 
+  it('onTaskTeardown evicts the task from the serve pool (close children + rm synthetic roots)', async () => {
+    await new OpencodeRuntime().onTaskTeardown('t1');
+    expect(evictTaskMock).toHaveBeenCalledWith('t1');
+  });
+
+  it('onTaskTeardown is best-effort: an evictTask failure never throws', async () => {
+    evictTaskMock.mockRejectedValueOnce(new Error('EBUSY'));
+    await expect(new OpencodeRuntime().onTaskTeardown('t1')).resolves.toBeUndefined();
+  });
+
   it('arms the idle reap while parked and disarms when a message lands', async () => {
     const agent = makeAgent();
     const task = makeTask();
