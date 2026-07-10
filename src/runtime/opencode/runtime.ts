@@ -18,30 +18,42 @@ import { getOpencodeClient, concatPromptText, sharedRegistry, type OpencodeClien
 const SESSION_NOT_FOUND_RE = /session.*not.*found|not.*found.*session/i;
 
 /**
+ * True when an error-shaped object signals a missing session. Checks a 404
+ * status, a not-found error name, and a not-found message — at the object's own
+ * level and one level down under `.data.message` (opencode nests the human
+ * message there). `NotFoundError` is treated as a session-not-found signal
+ * because the only endpoint promptWithRecovery drives is session-scoped
+ * (`session.prompt`), so a NotFoundError there is always the session.
+ */
+function errorSignalsNotFound(e: any): boolean {
+  if (!e || typeof e !== 'object') return false;
+  if (e.status === 404) return true;
+  if (typeof e.name === 'string' && (e.name === 'NotFoundError' || SESSION_NOT_FOUND_RE.test(e.name))) return true;
+  if (typeof e.message === 'string' && SESSION_NOT_FOUND_RE.test(e.message)) return true;
+  if (typeof e.data?.message === 'string' && SESSION_NOT_FOUND_RE.test(e.data.message)) return true;
+  return false;
+}
+
+/**
  * Detect opencode's "session does not exist" signal — a stale stored
- * session_id after a server restart / session GC. Covers BOTH shapes the SDK
- * can hand back: a RETURNED result object (HTTP error status / prompt info
- * error name — the two places concatPromptText already inspects) and a
- * THROWN/caught error object (an `Error`-like value with a `status` and/or
- * `name`/`message`), since a stale session can surface either way depending on
- * how the client wraps the underlying HTTP response. Session-not-found is the
- * ONE recoverable case; other errors surface normally. (Confirm the exact
- * status/name against the P2-C spike.)
+ * session_id after a server restart / session-store loss / GC. Covers BOTH
+ * shapes the SDK can hand back:
+ *   • a RETURNED result object whose `.error` carries the failure. The live
+ *     opencode shape (confirmed in the P2-C smoke) is
+ *     `res.error = { name: "NotFoundError", data: { message: "Session not found: <id>" } }`
+ *     — concatPromptText logs exactly this via `res.error`. The older
+ *     `res.data.info.error.name` location is also covered.
+ *   • a THROWN/caught error object carrying `name`/`message`/`status`/`data`
+ *     directly (a stale session can surface either way).
+ * Session-not-found is the ONE recoverable case; other errors surface normally.
  */
 export function isSessionNotFound(res: unknown): boolean {
-  const r = res as {
-    error?: any;
-    data?: { info?: { error?: { name?: string } } };
-    status?: number;
-    name?: string;
-    message?: string;
-  };
-  if (r?.error?.status === 404) return true;
-  if (r?.status === 404) return true;
-  const resultName = r?.data?.info?.error?.name;
-  if (typeof resultName === 'string' && SESSION_NOT_FOUND_RE.test(resultName)) return true;
-  if (typeof r?.name === 'string' && SESSION_NOT_FOUND_RE.test(r.name)) return true;
-  if (typeof r?.message === 'string' && SESSION_NOT_FOUND_RE.test(r.message)) return true;
+  const r = res as any;
+  if (!r || typeof r !== 'object') return false;
+  if (errorSignalsNotFound(r.error)) return true; // returned-result path (live shape)
+  const infoName = r.data?.info?.error?.name;
+  if (typeof infoName === 'string' && SESSION_NOT_FOUND_RE.test(infoName)) return true;
+  if (errorSignalsNotFound(r)) return true; // thrown/caught path (error object itself)
   return false;
 }
 

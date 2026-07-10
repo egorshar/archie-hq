@@ -241,6 +241,17 @@ describe('isSessionNotFound', () => {
   it('false on an unrelated error', () => {
     expect(isSessionNotFound({ data: { info: { error: { name: 'ProviderAuthError' } } } })).toBe(false);
   });
+  it('true for the LIVE opencode not-found shape (captured in the P2-C smoke)', () => {
+    // Exact payload observed live: res.error = { name, data: { message } }.
+    expect(
+      isSessionNotFound({
+        error: { name: 'NotFoundError', data: { message: 'Session not found: ses_0b551f041ffeSJnK79rv9NGkOV' } },
+      }),
+    ).toBe(true);
+  });
+  it('false for an unrelated NotFoundError-less error object', () => {
+    expect(isSessionNotFound({ error: { name: 'ProviderAuthError', data: { message: 'bad key' } } })).toBe(false);
+  });
   it('true for a thrown-shaped not-found error object (status)', () => {
     const err = Object.assign(new Error('boom'), { status: 404 });
     expect(isSessionNotFound(err)).toBe(true);
