@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { resolveOpencodeModel, opencodeFooterModel, resolveAgentOpencodeModel } from '../model.js';
+import { resolveOpencodeModel, opencodeFooterModel, resolveAgentOpencodeModel, opencodeAgentRoute } from '../model.js';
 import { modelDisplayLabel } from '../../../agents/model-label.js';
 import type { AgentDef } from '../../../types/agent.js';
 
@@ -112,5 +112,23 @@ describe('resolveAgentOpencodeModel', () => {
   it('falls back to the DEFAULT tier when the agent tier is unset', () => {
     process.env.ARCHIE_OPENCODE_MODEL_DEFAULT = 'openrouter/z-ai/glm-5.2';
     expect(resolveAgentOpencodeModel(def({ isPm: false }))).toEqual({ providerID: 'openrouter', modelID: 'z-ai/glm-5.2' });
+  });
+});
+
+describe('opencodeAgentRoute', () => {
+  it('returns the agent route trimmed so a claude-wrapped id beautifies', () => {
+    process.env.ARCHIE_OPENCODE_MODEL_OPUS = 'openrouter/anthropic/claude-haiku-4-5';
+    // provider-wrapper prefix trimmed to the claude id, so modelDisplayLabel can beautify it.
+    expect(opencodeAgentRoute(def({ isPm: true }))).toBe('anthropic/claude-haiku-4-5');
+  });
+
+  it('passes a non-claude route through unchanged', () => {
+    process.env.ARCHIE_OPENCODE_MODEL_SONNET = 'openrouter/z-ai/glm-5.2';
+    expect(opencodeAgentRoute(def({ isPm: false }))).toBe('openrouter/z-ai/glm-5.2');
+  });
+
+  it('returns null when the route cannot be resolved', () => {
+    // no tiers and no DEFAULT set (ENV_KEYS cleared in beforeEach) → resolve throws → null
+    expect(opencodeAgentRoute(def({ isPm: false }))).toBeNull();
   });
 });

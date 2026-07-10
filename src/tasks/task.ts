@@ -12,7 +12,7 @@ import type { AgentDef } from '../types/agent.js';
 import { isPmAgent, isRepoAgent } from '../types/agent.js';
 import { modelDisplayLabel, resolveAgentModel } from '../agents/model-label.js';
 import { getAgentRuntime } from '../system/backends.js';
-import { opencodeFooterModel } from '../runtime/opencode/model.js';
+import { opencodeFooterModel, opencodeAgentRoute } from '../runtime/opencode/model.js';
 import { prCardFingerprint, prCardTitlePlain } from '../system/pr-card-format.js';
 import { getGitHubClient } from '../connectors/github/client.js';
 import { createKeyedLock } from '../system/keyed-lock.js';
@@ -676,8 +676,19 @@ export class Task {
    */
   private collectModelsUsed(): string[] {
     if (getAgentRuntime().kind === 'opencode') {
+      // Per-role parity: same agent set as the Claude branch (PM first, then each
+      // spawned agent), each mapped to its OWN opencode route, deduped in order.
+      const raw: string[] = [];
+      const pmDef = this.team.find((d) => isPmAgent(d));
+      if (pmDef) { const r = opencodeAgentRoute(pmDef); if (r) raw.push(r); }
+      for (const a of this.agentProcesses.values()) { const r = opencodeAgentRoute(a.def); if (r) raw.push(r); }
+      const seen = new Set<string>();
+      const out: string[] = [];
+      for (const m of raw) { if (seen.has(m)) continue; seen.add(m); out.push(m); }
+      if (out.length > 0) return out;
+      // Nothing resolved (e.g. no agent context yet) → the server default route.
       const route = opencodeFooterModel();
-      if (route) return [route];
+      return route ? [route] : [];
     }
     const raw: string[] = [];
     const pmDef = this.team.find((d) => isPmAgent(d));

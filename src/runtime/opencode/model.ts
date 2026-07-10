@@ -83,3 +83,20 @@ export function opencodeFooterModel(): string | null {
     return null;
   }
 }
+
+/**
+ * The opencode route a specific agent will run on, as a beautify-ready string
+ * for the footer (any provider-wrapper prefix trimmed so a claude id begins at
+ * `anthropic/claude-`/`claude-`, matching opencodeFooterModel's trimming).
+ * Returns null when unresolved (never throws — the footer is best-effort).
+ */
+export function opencodeAgentRoute(def: AgentDef): string | null {
+  try {
+    const m = resolveAgentOpencodeModel(def);
+    const route = `${m.providerID}/${m.modelID}`;
+    const match = CLAUDE_ID_IN_ROUTE_RE.exec(route);
+    return match ? match[0] : route;
+  } catch {
+    return null;
+  }
+}
