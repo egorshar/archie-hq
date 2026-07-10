@@ -55,7 +55,6 @@ const READ_ONLY_PERMISSION = {
 const SERVER_MODEL_LOGICAL = 'default';
 
 let clientPromise: Promise<OpencodeClient> | null = null;
-let bridgeHandle: BridgeHandle | null = null;
 let eventConsumer: EventConsumerHandle | null = null;
 /**
  * Set while `closeOpencodeBridge` is tearing down. Guards the shutdown-during-
@@ -76,6 +75,34 @@ let shuttingDown = false;
 let serverHandle: { close(): void } | null = null;
 
 /**
+ * Bridge singleton (P3a §2): ONE loopback listener + sharedRegistry for the
+ * whole process, shared by every per-agent serve child. Children get their own
+ * bearer tokens via bridge.mintChildToken (bridge/server.ts, A4); this module
+ * only owns the listener's lifecycle.
+ */
+let bridgePromise: Promise<BridgeHandle> | null = null;
+
+export function getBridge(): Promise<BridgeHandle> {
+  if (!bridgePromise) {
+    bridgePromise = startBridgeServer(sharedRegistry).catch((err) => {
+      bridgePromise = null; // allow a later call to retry a failed startup
+      throw err;
+    });
+  }
+  return bridgePromise;
+}
+
+/** Close the bridge listener (idempotent; no-op if never started) and clear the
+ * singleton so a later getBridge() re-boots cleanly. */
+export async function closeBridge(): Promise<void> {
+  if (!bridgePromise) return;
+  const p = bridgePromise;
+  bridgePromise = null;
+  const handle = await p.catch(() => null);
+  if (handle) await handle.close();
+}
+
+/**
  * Lazily start (once) and reuse the embedded opencode server's client.
  *
  * On first call: starts the bridge listener (`startBridgeServer`), places the
@@ -93,8 +120,7 @@ export function getOpencodeClient(): Promise<OpencodeClient> {
   if (!clientPromise) {
     shuttingDown = false;
     clientPromise = (async () => {
-      const bridge = await startBridgeServer(sharedRegistry);
-      bridgeHandle = bridge;
+      const bridge = await getBridge();
       try {
         // Run the serve child in a clean, git-bounded staging root (NOT the repo
         // cwd) so opencode's skill discovery — which scans the serve process's
@@ -141,8 +167,7 @@ export function getOpencodeClient(): Promise<OpencodeClient> {
         eventConsumer = startEventConsumer(r.client, sharedRegistry);
         return r.client;
       } catch (err) {
-        await bridge.close().catch(() => {});
-        bridgeHandle = null;
+        await closeBridge().catch(() => {});
         throw err;
       }
     })().catch((err) => {
@@ -175,11 +200,7 @@ export async function closeOpencodeBridge(): Promise<void> {
       // best-effort: the child may already be gone
     }
   }
-  if (bridgeHandle) {
-    const handle = bridgeHandle;
-    bridgeHandle = null;
-    await handle.close();
-  }
+  await closeBridge();
   clientPromise = null;
 }
 
