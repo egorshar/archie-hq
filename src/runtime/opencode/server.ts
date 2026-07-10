@@ -20,7 +20,7 @@ import { startEventConsumer, type EventConsumerHandle } from './events.js';
 import { buildOpencodeMcpConfig } from './mcp-config.js';
 import { startEmbeddedServer, prepareServeRoot, type OpencodeClient } from './embedded-server.js';
 import { stageOpencodeSkills } from './skills.js';
-import { WORKDIR } from '../../system/workdir.js';
+import { WORKDIR, getPluginsHeadInfo } from '../../system/workdir.js';
 
 export type { OpencodeClient };
 
@@ -107,8 +107,7 @@ export function getOpencodeClient(): Promise<OpencodeClient> {
         // server's native `skill` tool exposes them (global; see skills.ts).
         // Best-effort: a staging failure must not sink the server boot.
         try {
-          const n = await stageOpencodeSkills(join(serveRoot, '.opencode', 'skills'));
-          logger.system(`opencode: staged skills from ${n} source(s)`);
+          await stageServeRootSkills('boot');
         } catch (err) {
           logger.warn('opencode', `skill staging failed (agents run without skills): ${err instanceof Error ? err.message : String(err)}`);
         }
@@ -182,6 +181,88 @@ export async function closeOpencodeBridge(): Promise<void> {
     await handle.close();
   }
   clientPromise = null;
+}
+
+/** Absolute path of the embedded serve root's staged-skills dir. */
+const serveRootSkillsDir = (): string => join(WORKDIR, 'opencode-server', '.opencode', 'skills');
+
+/**
+ * Stage the union of every agent's skills into the embedded serve root and log
+ * provenance. The ONE place staging + its log line live, shared by the boot
+ * path (`trigger='boot'`) and the plugins-refresh re-stage
+ * (`trigger='plugins-refresh'`). `linkAgentSkills` is clear-and-rebuild, so this
+ * is idempotent and needs no extra cleanup. The plugins HEAD short SHA is read
+ * best-effort (a cheap `git log -1` via `getPluginsHeadInfo`); a failure to read
+ * it only omits the SHA from the log, never blocks staging. Throws only if the
+ * staging itself fails — callers wrap it best-effort.
+ */
+async function stageServeRootSkills(trigger: 'boot' | 'plugins-refresh'): Promise<void> {
+  const n = await stageOpencodeSkills(serveRootSkillsDir());
+  let head: string | undefined;
+  try {
+    head = (await getPluginsHeadInfo())?.shortSha;
+  } catch {
+    head = undefined; // provenance is optional — never let it break staging/logging
+  }
+  logger.system(`opencode: staged skills from ${n} source(s) (trigger=${trigger}${head ? `, plugins=${head}` : ''})`);
+}
+
+/**
+ * Re-stage state. Concurrent triggers coalesce: while a re-stage runs, further
+ * calls flip `restageQueued` so EXACTLY ONE trailing run follows, guaranteeing
+ * the final on-disk staging reflects the newest plugins state (a burst collapses
+ * to at most one in-flight + one trailing run).
+ *
+ * We deliberately do NOT pause agent turns during `linkAgentSkills`' rm+rebuild.
+ * That leaves a brief window where a skill path is momentarily absent, but a
+ * transient skill-read miss is acceptable and self-heals on the agent's retry —
+ * far cheaper than coupling re-staging to every in-flight turn's lifecycle.
+ */
+let restageInFlight: Promise<void> | null = null;
+let restageQueued = false;
+
+/**
+ * Re-stage the shared embedded server's skills dir against the current agent set
+ * (call AFTER the registry is rebuilt so `getAllAgentDefs()` reflects the new
+ * plugins). Contract:
+ *   - NO-OP when the embedded server has NOT started. The check reads the
+ *     `clientPromise` singleton SYNCHRONOUSLY and never awaits/creates it, so
+ *     re-staging never boots the server just to stage.
+ *   - Best-effort: a failed re-stage is logged and swallowed — it must never
+ *     break the plugins refresh or crash the daemon; the previous staging
+ *     remains in effect.
+ *   - Serialized + coalesced (see `restageInFlight`/`restageQueued`).
+ */
+export async function restageOpencodeSkills(): Promise<void> {
+  // Synchronous singleton read — `null` means "never started". Do NOT touch
+  // getOpencodeClient() here (that would boot the server).
+  if (clientPromise === null) return;
+
+  if (restageInFlight) {
+    // A re-stage is already running; schedule exactly one trailing run so the
+    // final state reflects the newest plugins, and share the in-flight promise.
+    restageQueued = true;
+    return restageInFlight;
+  }
+
+  restageInFlight = (async () => {
+    try {
+      do {
+        restageQueued = false;
+        try {
+          await stageServeRootSkills('plugins-refresh');
+        } catch (err) {
+          logger.warn(
+            'opencode',
+            `skill re-stage failed after plugins refresh (previous staging remains in effect): ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      } while (restageQueued);
+    } finally {
+      restageInFlight = null;
+    }
+  })();
+  return restageInFlight;
 }
 
 /** Concatenate the text parts of a session.prompt() response, or null on error/empty. */

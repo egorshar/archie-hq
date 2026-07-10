@@ -202,6 +202,77 @@ describe('opencode server singleton', () => {
     expect(startBridgeServer).toHaveBeenCalledTimes(2);
   });
 
+  it('restageOpencodeSkills is a NO-OP (and does not boot the server) when the singleton is not started', async () => {
+    const { restageOpencodeSkills } = await import('../server.js');
+    await expect(restageOpencodeSkills()).resolves.toBeUndefined();
+    // Server never touched: no boot side effects, no staging.
+    expect(startBridgeServer).not.toHaveBeenCalled();
+    expect(startEmbeddedServer).not.toHaveBeenCalled();
+    expect(stageOpencodeSkills).not.toHaveBeenCalled();
+  });
+
+  it('restageOpencodeSkills re-stages the serve root with trigger=plugins-refresh once the server is started', async () => {
+    startEmbeddedServer.mockResolvedValue({ client: { session: {} }, close: vi.fn() });
+    // resetModules() (beforeEach) gives server.js a fresh logger singleton — spy
+    // on THAT instance, imported from the same reset module graph.
+    const { logger } = await import('../../../system/logger.js');
+    const sys = vi.spyOn(logger, 'system').mockImplementation(() => {});
+    const { getOpencodeClient, restageOpencodeSkills } = await import('../server.js');
+    await getOpencodeClient(); // boot → one staging call (trigger=boot)
+    stageOpencodeSkills.mockClear();
+    sys.mockClear();
+
+    await restageOpencodeSkills();
+
+    expect(stageOpencodeSkills).toHaveBeenCalledTimes(1);
+    expect(stageOpencodeSkills).toHaveBeenCalledWith(join(SERVE_ROOT, '.opencode', 'skills'));
+    expect(sys).toHaveBeenCalledWith(expect.stringContaining('trigger=plugins-refresh'));
+    sys.mockRestore();
+  });
+
+  it('restageOpencodeSkills is best-effort: a staging failure is logged and swallowed (previous staging stays in effect)', async () => {
+    startEmbeddedServer.mockResolvedValue({ client: { session: {} }, close: vi.fn() });
+    const { logger } = await import('../../../system/logger.js');
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    const { getOpencodeClient, restageOpencodeSkills } = await import('../server.js');
+    await getOpencodeClient();
+    stageOpencodeSkills.mockRejectedValueOnce(new Error('disk full'));
+
+    // Must NOT throw — a failed re-stage can't break the plugins refresh.
+    await expect(restageOpencodeSkills()).resolves.toBeUndefined();
+    expect(warn).toHaveBeenCalledWith(
+      'opencode',
+      expect.stringContaining('previous staging remains in effect'),
+    );
+    warn.mockRestore();
+  });
+
+  it('coalesces a concurrent double-trigger into one in-flight + exactly one trailing run', async () => {
+    startEmbeddedServer.mockResolvedValue({ client: { session: {} }, close: vi.fn() });
+    const { getOpencodeClient, restageOpencodeSkills } = await import('../server.js');
+    await getOpencodeClient();
+    stageOpencodeSkills.mockClear();
+
+    // Make each staging run block until we release it, so we can fire concurrent
+    // triggers while the first run is in flight.
+    const resolvers: Array<(v: number) => void> = [];
+    stageOpencodeSkills.mockImplementation(() => new Promise<number>((res) => resolvers.push(res)));
+
+    const p1 = restageOpencodeSkills(); // starts run #1
+    const p2 = restageOpencodeSkills(); // queued (in-flight)
+    const p3 = restageOpencodeSkills(); // still queued — collapses onto the same trailing run
+    await Promise.resolve();
+    expect(stageOpencodeSkills).toHaveBeenCalledTimes(1); // only run #1 started so far
+
+    resolvers[0](0); // finish run #1 → trailing run #2 starts
+    await new Promise((r) => setTimeout(r, 0));
+    expect(stageOpencodeSkills).toHaveBeenCalledTimes(2); // exactly one trailing run
+
+    resolvers[1](0); // finish run #2 → no further runs (queue drained)
+    await Promise.all([p1, p2, p3]);
+    expect(stageOpencodeSkills).toHaveBeenCalledTimes(2);
+  });
+
   it('concatPromptText joins text parts and returns null when empty', async () => {
     const { concatPromptText } = await import('../server.js');
     expect(concatPromptText({ data: { parts: [

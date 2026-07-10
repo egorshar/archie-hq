@@ -15,7 +15,7 @@ import type { Agent } from '../../agents/agent.js';
 import type { Task } from '../../tasks/task.js';
 import { prepareAgentContext } from '../../agents/spawn.js';
 import { logger } from '../../system/logger.js';
-import { getOpencodeClient, closeOpencodeBridge, sharedRegistry, type OpencodeClient } from './server.js';
+import { getOpencodeClient, closeOpencodeBridge, restageOpencodeSkills, sharedRegistry, type OpencodeClient } from './server.js';
 import { buildToolAllowlist } from './tool-allowlist.js';
 import { turnCompletion } from './turn-completion.js';
 import { resolveAgentOpencodeModel } from './model.js';
@@ -152,6 +152,17 @@ export class OpencodeRuntime implements AgentRuntime {
   /** Tear down the embedded server + bridge on process shutdown (no-op if never booted). */
   async shutdown(): Promise<void> {
     await closeOpencodeBridge();
+  }
+
+  /**
+   * Re-stage the shared embedded server's skills dir after a plugins hot-reload
+   * so the native `skill` tool serves the updated skill set (boot stages it only
+   * once). No-op when the server never started; best-effort (never throws) — see
+   * `restageOpencodeSkills`. The Claude runtime omits this method (it re-links
+   * skills per spawn, so it has no process-global staging to refresh).
+   */
+  async onPluginsRefreshed(): Promise<void> {
+    await restageOpencodeSkills();
   }
 
   async spawn(agent: Agent, task: Task): Promise<void> {
