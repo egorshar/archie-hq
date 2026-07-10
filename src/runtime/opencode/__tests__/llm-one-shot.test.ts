@@ -1,35 +1,41 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-const { startEmbeddedServer, prepareServeRoot, sessionCreate, sessionPrompt } = vi.hoisted(() => {
+const { startEmbeddedServerMock, prepareServeRootMock, sessionCreate, sessionPrompt, fakeServer } = vi.hoisted(() => {
   const sessionCreate = vi.fn();
   const sessionPrompt = vi.fn();
   const client = { session: { create: sessionCreate, prompt: sessionPrompt } };
+  const fakeServer = {
+    client,
+    url: 'http://127.0.0.1:1',
+    close: vi.fn(),
+    onExit: vi.fn(),
+  };
   return {
-    startEmbeddedServer: vi.fn(async () => ({ client, close: vi.fn() })),
-    prepareServeRoot: vi.fn(async () => {}),
+    startEmbeddedServerMock: vi.fn(async (_opts: { cwd: string; config: Record<string, unknown> }) => fakeServer),
+    prepareServeRootMock: vi.fn(async (_root: string) => {}),
     sessionCreate,
     sessionPrompt,
+    fakeServer,
   };
 });
 
-// getOpencodeClient() boots the embedded server (manual `opencode serve` spawn)
-// alongside the bridge + skill staging — stub those side-effecting collaborators
-// so this unit test exercises the real server.ts/llm-one-shot.ts against a mocked
-// client only (no real spawn, socket, file write, or skill staging).
-vi.mock('../embedded-server.js', () => ({ startEmbeddedServer, prepareServeRoot }));
-vi.mock('../skills.js', () => ({ stageOpencodeSkills: vi.fn(async () => 0) }));
+// The one-shot utility serve (P3a §7) boots its OWN tiny embedded server
+// directly via embedded-server.js — no bridge, no skills, no MCP. Stub the
+// embedded-server boundary so this unit test exercises llm-one-shot.ts against
+// a mocked client only (no real spawn, socket, or file write). `concatPromptText`
+// is still consumed from the real `../server.js` (unchanged), so it is NOT
+// mocked here — only the collaborators llm-one-shot.ts itself calls are.
+vi.mock('../embedded-server.js', () => ({
+  startEmbeddedServer: startEmbeddedServerMock,
+  prepareServeRoot: prepareServeRootMock,
+  SERVE_PERMISSION: { edit: 'allow', bash: 'allow', webfetch: 'allow', external_directory: 'allow' },
+}));
 vi.mock('../../../system/workdir.js', () => ({ WORKDIR: '/fake-workdir' }));
 vi.mock('../../../system/logger.js', () => ({
   logger: { error: vi.fn(), system: vi.fn(), warn: vi.fn(), debug: vi.fn(), info: vi.fn(), plain: vi.fn() },
 }));
-const { startBridgeServer, writeBridgePlugin } = vi.hoisted(() => ({
-  startBridgeServer: vi.fn(async () => ({ url: 'http://127.0.0.1:1', token: 'tok', close: vi.fn(async () => {}) })),
-  writeBridgePlugin: vi.fn(async () => '/fake/.opencode/plugins/archie-bridge.ts'),
-}));
-vi.mock('../bridge/server.js', () => ({ startBridgeServer }));
-vi.mock('../bridge/plugin-source.js', () => ({ writeBridgePlugin }));
 
-import { OpencodeLlmOneShot } from '../llm-one-shot.js';
+import { OpencodeLlmOneShot, closeOneShotServe } from '../llm-one-shot.js';
 
 const MODEL = 'anthropic/claude-haiku-4-5'; // passthrough — avoids env lookup
 const shot = new OpencodeLlmOneShot();
@@ -37,14 +43,26 @@ const shot = new OpencodeLlmOneShot();
 beforeEach(() => {
   sessionCreate.mockReset().mockResolvedValue({ data: { id: 'sess-1' } });
   sessionPrompt.mockReset();
+  startEmbeddedServerMock.mockClear();
+  prepareServeRootMock.mockClear();
+  fakeServer.close.mockClear();
   delete process.env.ARCHIE_OPENCODE_MODEL_HAIKU;
-  // getOpencodeClient() resolves its own server-global config.model via
-  // resolveOpencodeModel('default') (server.ts) — set a valid passthrough-free
-  // route so that internal resolution succeeds independently of what each test
-  // is asserting about req.model resolution. The one test that needs
+  // getOneShotClient() resolves the utility serve's own config.model via
+  // resolveOpencodeModel('haiku') — set DEFAULT as the fallback so that
+  // internal resolution succeeds independently of what each test is asserting
+  // about req.model resolution. The one test that needs
   // ARCHIE_OPENCODE_MODEL_DEFAULT absent (model-cannot-be-resolved) deletes it
-  // itself before its request, and fails before ever reaching getOpencodeClient().
-  process.env.ARCHIE_OPENCODE_MODEL_DEFAULT = 'anthropic/claude-haiku-4-5';
+  // itself before its request, and fails before ever reaching getOneShotClient().
+  process.env.ARCHIE_OPENCODE_MODEL_DEFAULT = 'openrouter/z-ai/glm-4.7';
+});
+
+afterEach(async () => {
+  // Reset the module-level utility-serve singleton so each test's boot
+  // assertions (call counts, cwd/config passed to startEmbeddedServer) are
+  // independent of test order.
+  await closeOneShotServe();
+  delete process.env.ARCHIE_OPENCODE_MODEL_DEFAULT;
+  delete process.env.ARCHIE_OPENCODE_MODEL_HAIKU;
 });
 
 describe('OpencodeLlmOneShot.text', () => {
@@ -75,6 +93,28 @@ describe('OpencodeLlmOneShot.text', () => {
     const out = await shot.text({ prompt: 'hi', model: 'haiku' }); // no env, no slash
     expect(out).toBeNull();
     expect(sessionCreate).not.toHaveBeenCalled();
+  });
+
+  it('boots ONE utility serve outside the pool and reuses it across calls (spec §7/A6)', async () => {
+    sessionPrompt.mockResolvedValue({ data: { info: {}, parts: [{ type: 'text', text: 'ok' }] } });
+    const oneShot = new OpencodeLlmOneShot();
+    await oneShot.text({ model: 'haiku', prompt: 'a' });
+    await oneShot.text({ model: 'haiku', prompt: 'b' });
+    expect(startEmbeddedServerMock).toHaveBeenCalledTimes(1);
+    const opts = startEmbeddedServerMock.mock.calls[0][0];
+    expect(opts.cwd).toContain('opencode-server/one-shot');
+    expect(opts.config.model).toBe('openrouter/z-ai/glm-4.7'); // haiku route → DEFAULT fallback
+    expect(opts.config.mcp).toBeUndefined(); // no skills, no plugin, no MCP — one-shots never use tools
+  });
+
+  it('closeOneShotServe closes the child and a later call re-boots', async () => {
+    sessionPrompt.mockResolvedValue({ data: { info: {}, parts: [{ type: 'text', text: 'ok' }] } });
+    const oneShot = new OpencodeLlmOneShot();
+    await oneShot.text({ model: 'haiku', prompt: 'a' });
+    await closeOneShotServe();
+    expect(fakeServer.close).toHaveBeenCalledTimes(1);
+    await oneShot.text({ model: 'haiku', prompt: 'b' });
+    expect(startEmbeddedServerMock).toHaveBeenCalledTimes(2);
   });
 });
 
