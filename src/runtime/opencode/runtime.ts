@@ -277,7 +277,7 @@ export class OpencodeRuntime implements AgentRuntime {
           // mode transition) — the single turn-boundary recycle point (P3a §5).
           // A boot failure throws to the outer catch → the agent is marked
           // inactive and the task's bounded recovery loop runs (parity with the
-          // old in-turn getOpencodeClient failure).
+          // old in-turn embedded-client-boot failure).
           const serve = await getAgentServe(agent, task, serveSpec);
           clientRef = serve.client;
           lastServe = serve;

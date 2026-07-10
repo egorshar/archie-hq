@@ -6,54 +6,10 @@ import { tmpdir } from 'os';
 // Delegate to the REAL linkAgentSkills so these tests exercise production
 // symlinking behavior, not a hand-copied reimplementation that could drift
 // from src/agents/skill-linking.ts. Wrapping it in vi.fn() keeps it spyable
-// for the call-shape assertions below (stageOpencodeSkills tests override the
-// implementation with a no-op since they use non-existent fixture paths).
+// for the call-shape assertions below.
 vi.mock('../../../agents/skill-linking.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../../agents/skill-linking.js')>();
   return { ...actual, linkAgentSkills: vi.fn(actual.linkAgentSkills) };
-});
-
-const getAllAgentDefs = vi.fn();
-vi.mock('../../../agents/registry.js', () => ({ getAllAgentDefs }));
-
-describe('stageOpencodeSkills', () => {
-  beforeEach(async () => {
-    vi.resetModules();
-    getAllAgentDefs.mockReset();
-    const { linkAgentSkills } = await import('../../../agents/skill-linking.js');
-    vi.mocked(linkAgentSkills).mockReset();
-    vi.mocked(linkAgentSkills).mockResolvedValue(undefined);
-  });
-
-  it('stages the deduped union of every agent\'s skill sources', async () => {
-    getAllAgentDefs.mockReturnValue([
-      { skillsPath: '/plugins/pm/skills', coreSkillsPath: '/core/skills' },
-      { skillsPath: '/plugins/helper/skills', coreSkillsPath: '/core/skills' }, // core dup
-      { skillsPath: undefined, coreSkillsPath: undefined },                     // no skills
-      { skillsPath: '/plugins/pm/skills' },                                     // pm dup
-    ]);
-    const { stageOpencodeSkills } = await import('../skills.js');
-    const { linkAgentSkills } = await import('../../../agents/skill-linking.js');
-
-    const n = await stageOpencodeSkills('/serve/.opencode/skills');
-
-    expect(linkAgentSkills).toHaveBeenCalledTimes(1);
-    const [dir, sources] = vi.mocked(linkAgentSkills).mock.calls[0] as unknown as [string, string[]];
-    expect(dir).toBe('/serve/.opencode/skills');
-    expect([...sources].sort()).toEqual(['/core/skills', '/plugins/helper/skills', '/plugins/pm/skills']);
-    expect(n).toBe(3);
-  });
-
-  it('stages nothing when no agent declares skills', async () => {
-    getAllAgentDefs.mockReturnValue([{ skillsPath: undefined }, {}]);
-    const { stageOpencodeSkills } = await import('../skills.js');
-    const { linkAgentSkills } = await import('../../../agents/skill-linking.js');
-
-    const n = await stageOpencodeSkills('/serve/.opencode/skills');
-
-    expect(n).toBe(0);
-    expect(linkAgentSkills).toHaveBeenCalledWith('/serve/.opencode/skills', []);
-  });
 });
 
 // Per-agent tests with real file system behavior.
@@ -66,10 +22,10 @@ async function makeSkillSource(root: string, name: string, skills: string[]): Pr
 describe('stageAgentSkills (per-agent, P3a §4)', () => {
   beforeEach(async () => {
     vi.resetModules();
-    // The stageOpencodeSkills tests above override the shared mock with a
-    // no-op (their fixture paths don't exist on disk). Restore delegation to
-    // the REAL linkAgentSkills here so these tests exercise production
-    // symlinking behavior end to end, regardless of run order.
+    // Restore delegation to the REAL linkAgentSkills here so these tests
+    // exercise production symlinking behavior end to end, regardless of run
+    // order (vi.resetModules() clears the module-level mock's call history
+    // but not its implementation override from a previous test file run).
     const { linkAgentSkills } = await import('../../../agents/skill-linking.js');
     const actual = await vi.importActual<typeof import('../../../agents/skill-linking.js')>(
       '../../../agents/skill-linking.js',
