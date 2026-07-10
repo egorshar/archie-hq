@@ -20,7 +20,6 @@ import { SessionRegistry } from './bridge/registry.js';
 import { resolveOpencodeModel } from './model.js';
 import { startEventConsumer, type EventConsumerHandle } from './events.js';
 import { buildOpencodeMcpConfig } from './mcp-config.js';
-import { repoBotIdentity } from '../../connectors/shared/repo-url.js';
 
 export type OpencodeClient = Awaited<ReturnType<typeof createOpencode>>['client'];
 
@@ -73,28 +72,6 @@ let eventConsumer: EventConsumerHandle | null = null;
  * or the opencode boot fails, the bridge (if started) is closed and the
  * promise is cleared so a later call can retry cleanly.
  */
-/**
- * Force the git committer + author identity for commits the opencode agent
- * makes via its built-in `bash` tool. The `opencode serve` child inherits this
- * process's env, and `GIT_COMMITTER_*`/`GIT_AUTHOR_*` env vars take precedence
- * over BOTH the clone's local `user.email` (set by `configureGitIdentity`) AND
- * the host's global `~/.gitconfig` — so the agent's `git commit` always uses the
- * bot identity, satisfying host push rules that require the committer email to
- * be the token account's verified email (e.g. GitLab
- * `project_*_bot_*@noreply.*`). Without it the agent committed with the host
- * user's personal identity and the first push was rejected (pre-receive hook
- * declined; 2026-07-10 dev-metrics MR run). No-op when no bot identity is
- * configured; idempotent. Exported for testing.
- */
-export function applyBotGitIdentityEnv(): void {
-  const identity = repoBotIdentity();
-  if (!identity) return;
-  process.env.GIT_COMMITTER_NAME = identity.name;
-  process.env.GIT_COMMITTER_EMAIL = identity.email;
-  process.env.GIT_AUTHOR_NAME = identity.name;
-  process.env.GIT_AUTHOR_EMAIL = identity.email;
-}
-
 export function getOpencodeClient(): Promise<OpencodeClient> {
   if (!clientPromise) {
     clientPromise = (async () => {
@@ -106,9 +83,6 @@ export function getOpencodeClient(): Promise<OpencodeClient> {
 
         const model = resolveOpencodeModel(SERVER_MODEL_LOGICAL);
         const mcp = await buildOpencodeMcpConfig();
-        // Set BEFORE createOpencode: the serve child inherits process.env, so
-        // the agent's bash `git commit` picks up the bot committer identity.
-        applyBotGitIdentityEnv();
         // port 0 → an ephemeral free port (the SDK parses the actual URL the
         // server prints). Avoids colliding with the default 4096 when a prior
         // embedded server lingers or multiple instances run.

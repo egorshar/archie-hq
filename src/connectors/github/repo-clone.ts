@@ -14,7 +14,7 @@ import { promisify } from 'util';
 import * as path from 'path';
 import * as fs from 'fs/promises';
 import { logger } from '../../system/logger.js';
-import { fetchOrigin } from './client.js';
+import { fetchOrigin, configureGitIdentity } from './client.js';
 import { repoCloneUrl } from '../shared/repo-url.js';
 
 const execAsync = promisify(exec);
@@ -181,6 +181,16 @@ export async function setupSharedClone(
   if (checkout.type === 'new_branch') {
     await gitExec(clonePath, `checkout -b ${checkout.name}`);
   }
+
+  // Set the clone's local committer identity to the current bot BEFORE the
+  // clone is handed to an agent. The opencode agent commits via raw `bash git
+  // commit`, so if identity were configured only as a later, separate step
+  // (spawn.ts prepareAgentContext) a commit could land first and fall back to
+  // the host's global ~/.gitconfig — which failed GitLab's push rule (committer
+  // must be the token account's verified email; 2026-07-10 dev-metrics MR run).
+  // Doing it here makes "identity set" a precondition of the clone existing, and
+  // overwrites any stale value left by a reused base cache / earlier bot token.
+  await configureGitIdentity(clonePath);
 
   return { clone_path: clonePath, branch: resultBranch, base_branch: defaultBranch };
 }
