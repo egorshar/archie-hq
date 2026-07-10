@@ -6,6 +6,10 @@ Archie ships continuously, so changes are grouped by the **date they landed** on
 
 _Changes on `main` that haven't been summarized into a dated entry yet._
 
+## 2026-07-09
+
+_No changes landed on `main` this day._
+
 ## 2026-07-08
 
 - **Repos can now require a human ask before Archie merges a PR, instead of merging the instant it turns green.** A new per-repo `autoMerge` flag defaults to off everywhere: Archie holds a ready PR and posts a single "ready to merge" nudge instead of merging it; asking Archie to merge arms auto-merge, and it lands the moment GitHub reports the PR clean, no repeat approval needed. _Technical: repo frontmatter `autoMerge` boolean threaded through the registry; new `merge` approval type resolved atomically across Slack/API/CLI; per-PR `merge_armed`/`merge_ready_notified` markers reset on branch reuse to close a fail-open path; 8/9 ACs verified live, AC9 (first real post-deploy merge-on-request) waived to an operator step. PR #187._
