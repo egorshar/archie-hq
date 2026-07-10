@@ -57,17 +57,26 @@ export const CLAUDE_RUNTIME_CAPABILITIES: RuntimeCapabilities = {
 };
 
 /**
- * opencode runtime. No built-in OS sandbox (Phase 3 adds a firewall + guard
- * enforcement), no 1M-context / effort / background-task event parity yet.
- * Native skills ARE supported: the embedded server exposes opencode's `skill`
- * tool over the union of agent skills staged at its working dir (see
- * runtime/opencode/skills.ts). Individual flags are raised as later work earns
- * them.
+ * opencode runtime. These flags are declarative (spec P3: document parity,
+ * degrade gracefully) — nothing branches on them yet. No built-in OS sandbox
+ * (Phase 3 adds a firewall + guard enforcement). Native skills ARE supported:
+ * the embedded server exposes opencode's `skill` tool over the union of agent
+ * skills staged at its working dir (see runtime/opencode/skills.ts).
  */
 export const OPENCODE_RUNTIME_CAPABILITIES: RuntimeCapabilities = {
   osSandbox: false,
   skills: true,
-  oneMillionContext: false,
+  // Available through the configured model (e.g. glm-5.2 has a 1M window) — a
+  // model property, not something Archie toggles. Pick a 1M model for large
+  // tasks. See docs/guides/opencode-setup.md.
+  oneMillionContext: true,
+  // No per-turn reasoning-effort control: the opencode prompt body has no effort
+  // field, and the SDK's `reasoning` is only a per-model can-it-reason
+  // descriptor — not a per-turn knob (unlike the Claude SDK's `effort`).
   effort: false,
+  // opencode HAS subtasks/subagents (SubtaskPart, surfaced via
+  // message.part.updated), but the runtime doesn't yet feed them into the agent
+  // busy/idle accounting the way the Claude SDK path does — a follow-up if
+  // opencode agents start spawning subtasks.
   backgroundTasks: false,
 };

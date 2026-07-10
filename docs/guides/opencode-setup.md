@@ -50,6 +50,8 @@ The PM's turns run on `claude-opus-4-8`, a specialist's on `claude-sonnet-5`, an
 
 Picking a capable model for the PM matters: opencode PM orchestration (multi-step delegation, edit-mode requests, MR creation) needs a strong model; weaker models may fail to parse the request or mis-drive the flow.
 
+Context window: the opencode runtime uses whatever context window the configured model provides — Archie sets no context flag (unlike the Claude runtime's `[1m]` beta). For large tasks, choose a 1M-context model (e.g. `openrouter/z-ai/glm-5.2`) for the tiers that need it. `capabilities.oneMillionContext` is `true` for opencode on that basis, but it's ultimately a property of the model you route to.
+
 ## Boot-time validation
 
 `assertBackendConfig()` (`src/system/backends.ts`), called once early in boot, fails fast if `AGENT_RUNTIME=opencode` is set with no model route configured at all — that is, no environment variable whose name starts with `ARCHIE_OPENCODE_MODEL_` is present. The thrown error names both `ARCHIE_OPENCODE_MODEL_DEFAULT` and the per-tier alternative, so a misconfigured deployment fails at boot with an actionable message. This check only requires *at least one* such var; a logical name with neither its own per-tier var nor `_DEFAULT` still throws later at resolution time. In practice set `ARCHIE_OPENCODE_MODEL_DEFAULT` — the embedded server resolves the `default` route for `config.model` at boot, so it is effectively required.
