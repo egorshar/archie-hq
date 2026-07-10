@@ -33,7 +33,7 @@ describe('startEmbeddedServer handle surface (P3a)', () => {
     expect(exited).toHaveBeenCalledTimes(1);
   });
 
-  it('rejects on pre-start exit and does NOT fire late onExit subscribers', async () => {
+  it('rejects on pre-start exit', async () => {
     const proc = fakeProc();
     spawnMock.mockReturnValue(proc);
     const p = startEmbeddedServer({ cwd: '/tmp/x', config: {} });

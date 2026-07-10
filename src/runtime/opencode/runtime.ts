@@ -272,6 +272,11 @@ export class OpencodeRuntime implements AgentRuntime {
             disarmReap();
           }
 
+          // A message can land in the same tick task.stop() runs (the queue is
+          // drained, not rejected). Re-check before acquiring so a stopped task
+          // never re-boots a reaped child or re-creates an evicted serve root.
+          if (agent.queue.isStopped()) break;
+
           // Acquire this agent's serve child for the turn: boots on demand,
           // reuses a warm handle, recycles a stale one (plugins push / RO→RW
           // mode transition) — the single turn-boundary recycle point (P3a §5).
@@ -358,11 +363,17 @@ export class OpencodeRuntime implements AgentRuntime {
         // Evict the bridge registration + resolve any lingering turn waiter on
         // every exit path (normal, aborted, or errored) so a stale sessionId
         // can't resolve control-tool calls to a dead Task/Agent pair and no
-        // completion promise is left dangling. `sessionId` may still be unset if
-        // getAgentServe()/session.create() failed before registration ran.
-        if (sessionId) {
-          sharedRegistry.delete(sessionId);
-          turnCompletion.cancelTurn(sessionId, 'turn loop exited');
+        // completion promise is left dangling. Use the LIVE id: runPromptTurn's
+        // 404 recovery registers a fresh session (reported via onSession →
+        // currentSessionId) but the loop-local `sessionId` only advances on a
+        // successful turn — if the retried turn then throws, deleting the old
+        // `sessionId` would leak the fresh registry entry. `currentSessionId`
+        // may still be unset if getAgentServe()/session.create() failed before
+        // any registration ran.
+        const liveId = currentSessionId ?? sessionId;
+        if (liveId) {
+          sharedRegistry.delete(liveId);
+          turnCompletion.cancelTurn(liveId, 'turn loop exited');
         }
         // Agent wind-down (P3a data flow): close this agent's child if one was
         // acquired (root kept — evictTask rm's it at task teardown; sessions

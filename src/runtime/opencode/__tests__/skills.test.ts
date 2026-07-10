@@ -1,7 +1,19 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { mkdir, readdir, mkdtemp, readFile, readlink, writeFile } from 'fs/promises';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { mkdir, readdir, mkdtemp, readFile, readlink, writeFile, rm } from 'fs/promises';
 import { join } from 'path';
 import { tmpdir } from 'os';
+
+// Track every mkdtemp root so afterEach can remove it — otherwise these dirs
+// accumulate under the OS temp dir across runs.
+const tmpRoots: string[] = [];
+async function tmpRoot(prefix: string): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), prefix));
+  tmpRoots.push(dir);
+  return dir;
+}
+afterEach(async () => {
+  await Promise.all(tmpRoots.splice(0).map((d) => rm(d, { recursive: true, force: true })));
+});
 
 // Delegate to the REAL linkAgentSkills so these tests exercise production
 // symlinking behavior, not a hand-copied reimplementation that could drift
@@ -36,7 +48,7 @@ describe('stageAgentSkills (per-agent, P3a §4)', () => {
 
   it("links only the agent's own sources; plugin shadows core on a name collision", async () => {
     const { stageAgentSkills } = await import('../skills.js');
-    const root = await mkdtemp(join(tmpdir(), 'oc-skills-'));
+    const root = await tmpRoot('oc-skills-');
     const plugin = await makeSkillSource(root, 'plugin-skills', ['deploy', 'shared']);
     const core = await makeSkillSource(root, 'core-skills', ['review', 'shared']);
     const dest = join(root, 'dest');
@@ -48,7 +60,7 @@ describe('stageAgentSkills (per-agent, P3a §4)', () => {
 
   it('stages an empty dir and returns 0 when the def declares no skills', async () => {
     const { stageAgentSkills } = await import('../skills.js');
-    const root = await mkdtemp(join(tmpdir(), 'oc-skills-'));
+    const root = await tmpRoot('oc-skills-');
     const dest = join(root, 'dest');
     const n = await stageAgentSkills({ id: 'pm-agent' } as any, dest);
     expect(n).toBe(0);
@@ -59,7 +71,7 @@ describe('stageAgentSkills (per-agent, P3a §4)', () => {
 describe('excludeOpencodeFromGit', () => {
   it('appends .opencode/ to .git/info/exclude exactly once across repeat calls', async () => {
     const { excludeOpencodeFromGit } = await import('../skills.js');
-    const clone = await mkdtemp(join(tmpdir(), 'oc-clone-'));
+    const clone = await tmpRoot('oc-clone-');
     await mkdir(join(clone, '.git', 'info'), { recursive: true });
     await writeFile(join(clone, '.git', 'info', 'exclude'), '# existing entries\nnode_modules/\n');
     await excludeOpencodeFromGit(clone);
@@ -71,7 +83,7 @@ describe('excludeOpencodeFromGit', () => {
 
   it('creates .git/info/exclude when the file (or info dir) is missing', async () => {
     const { excludeOpencodeFromGit } = await import('../skills.js');
-    const clone = await mkdtemp(join(tmpdir(), 'oc-clone-'));
+    const clone = await tmpRoot('oc-clone-');
     await mkdir(join(clone, '.git'), { recursive: true });
     await excludeOpencodeFromGit(clone);
     const content = await readFile(join(clone, '.git', 'info', 'exclude'), 'utf8');
