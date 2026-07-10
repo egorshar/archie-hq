@@ -44,6 +44,7 @@ import { initEventPersistence } from './tasks/persistence.js';
 import { initReminderScheduler } from './system/reminder-scheduler.js';
 import { initMemory } from './memory/index.js';
 import { assertBackendConfig, getBackendMatrix, resolveRepoHostKind, getGitLabHost } from './system/backends.js';
+import { closeOpencodeBridge } from './runtime/opencode/server.js';
 
 /**
  * Application configuration
@@ -298,6 +299,14 @@ async function main(): Promise<void> {
         }
       }
       server.close();
+      // Terminate the embedded opencode serve child + bridge (no-op under the
+      // Claude runtime / if it never booted). Without this the serve child is
+      // orphaned on every restart, leaking one process per dev reload.
+      try {
+        await closeOpencodeBridge();
+      } catch (err) {
+        logger.error('index', 'Error closing opencode bridge', err);
+      }
       logger.plain('Server closed');
       process.exit(0);
     };

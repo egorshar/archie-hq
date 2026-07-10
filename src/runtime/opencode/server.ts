@@ -57,6 +57,14 @@ const SERVER_MODEL_LOGICAL = 'default';
 let clientPromise: Promise<OpencodeClient> | null = null;
 let bridgeHandle: BridgeHandle | null = null;
 let eventConsumer: EventConsumerHandle | null = null;
+/**
+ * Handle for the embedded `opencode serve` child process. `createOpencode`
+ * returns `{ client, server: { url, close() } }`; keeping `server` is what lets
+ * `closeOpencodeBridge` actually terminate the child on shutdown. Without it the
+ * child was orphaned on every dev reload (a fresh one spawned per restart —
+ * ~10 leaked `opencode serve` processes observed on 2026-07-10).
+ */
+let serverHandle: { close(): void } | null = null;
 
 /**
  * Lazily start (once) and reuse the embedded opencode server's client.
@@ -94,6 +102,7 @@ export function getOpencodeClient(): Promise<OpencodeClient> {
             mcp,
           },
         });
+        serverHandle = r.server;
         eventConsumer = startEventConsumer(r.client, sharedRegistry);
         return r.client;
       } catch (err) {
@@ -110,20 +119,32 @@ export function getOpencodeClient(): Promise<OpencodeClient> {
 }
 
 /**
- * Close the bridge listener, if one was started. No-op if the embedded server
- * (and its bridge) never booted. Intended to be called from a process-level
- * shutdown path; never logs the bridge token.
+ * Tear down the embedded opencode server: stop the SSE event consumer, close
+ * the `opencode serve` child process, and close the bridge listener. No-op for
+ * any piece that never booted. Intended to be called from a process-level
+ * shutdown path (SIGINT/SIGTERM); never logs the bridge token. Clears the
+ * cached client promise so a later `getOpencodeClient` re-boots cleanly.
  */
 export async function closeOpencodeBridge(): Promise<void> {
   if (eventConsumer) {
     eventConsumer.stop();
     eventConsumer = null;
   }
+  if (serverHandle) {
+    const handle = serverHandle;
+    serverHandle = null;
+    try {
+      handle.close();
+    } catch {
+      // best-effort: the child may already be gone
+    }
+  }
   if (bridgeHandle) {
     const handle = bridgeHandle;
     bridgeHandle = null;
     await handle.close();
   }
+  clientPromise = null;
 }
 
 /** Concatenate the text parts of a session.prompt() response, or null on error/empty. */

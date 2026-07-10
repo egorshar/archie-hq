@@ -131,6 +131,28 @@ describe('opencode server singleton', () => {
     expect(close).toHaveBeenCalledTimes(1);
   });
 
+  it('closeOpencodeBridge closes the embedded serve child exactly once (no orphaned process)', async () => {
+    const serverClose = vi.fn();
+    createOpencode.mockResolvedValue({ client: {}, server: { close: serverClose } });
+    const { getOpencodeClient, closeOpencodeBridge } = await import('../server.js');
+    await getOpencodeClient();
+
+    await closeOpencodeBridge();
+    await closeOpencodeBridge();
+
+    expect(serverClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('closeOpencodeBridge clears the cached client so a later call re-boots the server', async () => {
+    createOpencode.mockResolvedValue({ client: { session: {} }, server: { close: vi.fn() } });
+    const { getOpencodeClient, closeOpencodeBridge } = await import('../server.js');
+    await getOpencodeClient();
+    await closeOpencodeBridge();
+    await getOpencodeClient();
+
+    expect(createOpencode).toHaveBeenCalledTimes(2);
+  });
+
   it('closes the bridge and clears the client promise when createOpencode fails, allowing a clean retry', async () => {
     const close = vi.fn(async () => {});
     startBridgeServer.mockResolvedValueOnce(makeBridgeHandle({ close }));
