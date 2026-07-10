@@ -38,18 +38,28 @@ function translate(name: string, cfg: any): McpEntry | null {
 }
 
 export async function buildOpencodeMcpConfig(): Promise<Record<string, McpEntry>> {
-  const { servers } = getRootMcpConfig();
-  // Reuse Archie's OAuth binding on a shallow copy (it mutates in place: injects
-  // Authorization headers into http/sse entries, deletes entries whose refresh
-  // fails). Operating on a copy keeps plugin-loader's cached config clean.
-  const bound: Record<string, any> = {};
-  for (const [name, cfg] of Object.entries(servers ?? {})) bound[name] = { ...(cfg as object) };
-  await applyOAuthBindings(bound);
+  // Fail-soft at the top level too (spec: a broken plugin integration must not
+  // sink server boot). `translate()` already skips bad entries per-server, but
+  // an unexpected throw from the binding step (e.g. `applyOAuthBindings` on a
+  // pathological server name, outside its own per-entry try/catch) must not
+  // reach `createOpencode` — degrade to no MCP servers rather than no server.
+  try {
+    const { servers } = getRootMcpConfig();
+    // Reuse Archie's OAuth binding on a shallow copy (it mutates in place: injects
+    // Authorization headers into http/sse entries, deletes entries whose refresh
+    // fails). Operating on a copy keeps plugin-loader's cached config clean.
+    const bound: Record<string, any> = {};
+    for (const [name, cfg] of Object.entries(servers ?? {})) bound[name] = { ...(cfg as object) };
+    await applyOAuthBindings(bound);
 
-  const out: Record<string, McpEntry> = {};
-  for (const [name, cfg] of Object.entries(bound)) {
-    const entry = translate(name, cfg);
-    if (entry) out[name] = entry;
+    const out: Record<string, McpEntry> = {};
+    for (const [name, cfg] of Object.entries(bound)) {
+      const entry = translate(name, cfg);
+      if (entry) out[name] = entry;
+    }
+    return out;
+  } catch (err) {
+    logger.warn('opencode', `MCP config build failed — starting with no MCP servers: ${err instanceof Error ? err.message : String(err)}`);
+    return {};
   }
-  return out;
 }

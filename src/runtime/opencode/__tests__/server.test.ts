@@ -13,6 +13,13 @@ vi.mock('../bridge/server.js', () => ({ startBridgeServer }));
 const resolveOpencodeModel = vi.fn();
 vi.mock('../model.js', () => ({ resolveOpencodeModel }));
 
+// Mock the MCP-config builder so the createOpencode call-args assertion is
+// hermetic: it reflects this mock, NOT ambient disk/vault state. (The real
+// buildOpencodeMcpConfig reads workdir/plugins/.mcp.json and the OAuth vault,
+// so its output varies by ARCHIE_SECRETS_KEY / installed plugins — unsuitable
+// for a deterministic call-args assertion.)
+vi.mock('../mcp-config.js', () => ({ buildOpencodeMcpConfig: vi.fn(async () => ({})) }));
+
 function makeBridgeHandle(overrides: Partial<{ url: string; token: string; close: () => Promise<void> }> = {}) {
   return {
     url: overrides.url ?? 'http://127.0.0.1:9999',
