@@ -57,14 +57,16 @@ export const CLAUDE_RUNTIME_CAPABILITIES: RuntimeCapabilities = {
 };
 
 /**
- * opencode runtime — least-capable baseline. No built-in OS sandbox
- * (Phase 3 adds a firewall + guard enforcement), no native Skills, no
- * 1M-context / effort / background-task event parity yet. Individual flags are
- * raised as later work earns them.
+ * opencode runtime. No built-in OS sandbox (Phase 3 adds a firewall + guard
+ * enforcement), no 1M-context / effort / background-task event parity yet.
+ * Native skills ARE supported: the embedded server exposes opencode's `skill`
+ * tool over the union of agent skills staged at its working dir (see
+ * runtime/opencode/skills.ts). Individual flags are raised as later work earns
+ * them.
  */
 export const OPENCODE_RUNTIME_CAPABILITIES: RuntimeCapabilities = {
   osSandbox: false,
-  skills: false,
+  skills: true,
   oneMillionContext: false,
   effort: false,
   backgroundTasks: false,

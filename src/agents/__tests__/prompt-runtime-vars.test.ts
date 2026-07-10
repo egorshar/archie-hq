@@ -11,12 +11,14 @@ describe('runtimePromptVars', () => {
     expect(v.SKILL_GUIDANCE).toContain('Skill');
   });
 
-  it('opencode uses lowercase tool names and softened, Skill-tool-free guidance', () => {
+  it('opencode uses lowercase tool names and the lowercase `skill`-tool guidance', () => {
     const v = runtimePromptVars('opencode');
     expect(v.TOOL_READ).toBe('read');
     expect(v.TOOL_GREP).toBe('grep');
     expect(v.TOOL_BASH).toBe('bash');
-    expect(v.SKILL_GUIDANCE).not.toMatch(/`Skill` tool/);
+    // opencode's native tool is lowercase `skill`; Claude's capital `Skill` must not leak.
+    expect(v.SKILL_GUIDANCE).toContain('`skill` tool');
+    expect(v.SKILL_GUIDANCE).not.toMatch(/`Skill`/);
   });
 });
 
@@ -44,14 +46,15 @@ describe('claude-render byte-identical regression', () => {
     expect(out).not.toContain('{{');
   });
 
-  it('opencode render of pm-agent has NO `Skill`-tool reference and no unresolved vars', async () => {
+  it('opencode render of pm-agent references the lowercase `skill` tool, not Claude\'s `Skill`', async () => {
     const out = await loadPrompt('pm-agent', {
       ...runtimePromptVars('opencode'),
       TEAM_LIST: '',
       TEAM_EXPERTISE: '',
       PM_INTEGRATIONS: '',
     });
-    expect(out).not.toMatch(/`Skill`/);
+    expect(out).not.toMatch(/`Skill`/);        // Claude's capital tool name must not leak
+    expect(out).toContain('`skill` tool');      // opencode's lowercase native tool
     expect(out).not.toContain('{{');
   });
 
@@ -100,11 +103,10 @@ describe('claude-render byte-identical regression', () => {
     expect(out).not.toContain('{{');
   });
 
-  it('opencode render of plugin-agent has NO `Skill`-tool reference and no unresolved vars', async () => {
+  it('opencode render of plugin-agent references the lowercase `skill` tool, not `Skill`', async () => {
     const out = await loadPrompt('plugin-agent', runtimePromptVars('opencode'));
     expect(out).not.toMatch(/`Skill`/);
-    // The Skill bullet is softened to a tool-free domain-guidance line.
-    expect(out).toContain('- Domain guidance is available in your context (AGENTS.md and the task briefing)');
+    expect(out).toContain('- **skill** — Load and use domain-specific skills from your skills directory');
     expect(out).not.toContain('{{');
   });
 });

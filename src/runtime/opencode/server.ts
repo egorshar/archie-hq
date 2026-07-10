@@ -10,7 +10,6 @@
  * bridge-equipped server; one-shots simply never call the bridged control
  * tools).
  */
-import { createOpencode } from '@opencode-ai/sdk';
 import { join } from 'node:path';
 import { logger } from '../../system/logger.js';
 import { writeBridgePlugin } from './bridge/plugin-source.js';
@@ -19,8 +18,11 @@ import { SessionRegistry } from './bridge/registry.js';
 import { resolveOpencodeModel } from './model.js';
 import { startEventConsumer, type EventConsumerHandle } from './events.js';
 import { buildOpencodeMcpConfig } from './mcp-config.js';
+import { startEmbeddedServer, prepareServeRoot, type OpencodeClient } from './embedded-server.js';
+import { stageOpencodeSkills } from './skills.js';
+import { WORKDIR } from '../../system/workdir.js';
 
-export type OpencodeClient = Awaited<ReturnType<typeof createOpencode>>['client'];
+export type { OpencodeClient };
 
 /**
  * Shared session registry: opencode sessionId -> the live Archie
@@ -94,16 +96,32 @@ export function getOpencodeClient(): Promise<OpencodeClient> {
       const bridge = await startBridgeServer(sharedRegistry);
       bridgeHandle = bridge;
       try {
-        const pluginsDir = join(process.cwd(), '.opencode', 'plugins');
+        // Run the serve child in a clean, git-bounded staging root (NOT the repo
+        // cwd) so opencode's skill discovery — which scans the serve process's
+        // working directory — sees only the skills WE stage, not the repo's own
+        // `.claude/skills`. `git init` makes the root its own worktree so
+        // opencode's upward walk stops here instead of reaching the repo.
+        const serveRoot = join(WORKDIR, 'opencode-server');
+        await prepareServeRoot(serveRoot);
+        // Stage the union of all agents' skills into the serve root so the shared
+        // server's native `skill` tool exposes them (global; see skills.ts).
+        // Best-effort: a staging failure must not sink the server boot.
+        try {
+          const n = await stageOpencodeSkills(join(serveRoot, '.opencode', 'skills'));
+          logger.system(`opencode: staged skills from ${n} source(s)`);
+        } catch (err) {
+          logger.warn('opencode', `skill staging failed (agents run without skills): ${err instanceof Error ? err.message : String(err)}`);
+        }
+
+        const pluginsDir = join(serveRoot, '.opencode', 'plugins');
         await writeBridgePlugin(pluginsDir, bridge.url, bridge.token);
 
         const model = resolveOpencodeModel(SERVER_MODEL_LOGICAL);
         const mcp = await buildOpencodeMcpConfig();
-        // port 0 → an ephemeral free port (the SDK parses the actual URL the
-        // server prints). Avoids colliding with the default 4096 when a prior
-        // embedded server lingers or multiple instances run.
-        const r = await createOpencode({
-          port: 0,
+        // Manual spawn (embedded-server.ts) with cwd = serveRoot — the one thing
+        // the SDK's createOpencode can't do. port 0 → an ephemeral free port.
+        const r = await startEmbeddedServer({
+          cwd: serveRoot,
           config: {
             model: `${model.providerID}/${model.modelID}`,
             permission: READ_ONLY_PERMISSION,
@@ -114,13 +132,13 @@ export function getOpencodeClient(): Promise<OpencodeClient> {
           // Teardown ran while this boot was in flight — close the just-spawned
           // child instead of re-establishing it (else it outlives shutdown).
           try {
-            r.server.close();
+            r.close();
           } catch {
             // best-effort
           }
           throw new Error('opencode server boot aborted during shutdown');
         }
-        serverHandle = r.server;
+        serverHandle = { close: r.close };
         eventConsumer = startEventConsumer(r.client, sharedRegistry);
         return r.client;
       } catch (err) {

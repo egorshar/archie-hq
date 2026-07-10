@@ -1,22 +1,27 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const { createMock, sessionCreate, sessionPrompt } = vi.hoisted(() => {
+const { startEmbeddedServer, prepareServeRoot, sessionCreate, sessionPrompt } = vi.hoisted(() => {
   const sessionCreate = vi.fn();
   const sessionPrompt = vi.fn();
   const client = { session: { create: sessionCreate, prompt: sessionPrompt } };
-  const createMock = vi.fn(async () => ({ client }));
-  return { createMock, sessionCreate, sessionPrompt };
+  return {
+    startEmbeddedServer: vi.fn(async () => ({ client, close: vi.fn() })),
+    prepareServeRoot: vi.fn(async () => {}),
+    sessionCreate,
+    sessionPrompt,
+  };
 });
 
-vi.mock('@opencode-ai/sdk', () => ({ createOpencode: createMock }));
+// getOpencodeClient() boots the embedded server (manual `opencode serve` spawn)
+// alongside the bridge + skill staging — stub those side-effecting collaborators
+// so this unit test exercises the real server.ts/llm-one-shot.ts against a mocked
+// client only (no real spawn, socket, file write, or skill staging).
+vi.mock('../embedded-server.js', () => ({ startEmbeddedServer, prepareServeRoot }));
+vi.mock('../skills.js', () => ({ stageOpencodeSkills: vi.fn(async () => 0) }));
+vi.mock('../../../system/workdir.js', () => ({ WORKDIR: '/fake-workdir' }));
 vi.mock('../../../system/logger.js', () => ({
   logger: { error: vi.fn(), system: vi.fn(), warn: vi.fn(), debug: vi.fn(), info: vi.fn(), plain: vi.fn() },
 }));
-// server.ts's getOpencodeClient() now always boots the bridge alongside the
-// embedded server (Task 4) — stub its two side-effecting collaborators
-// (loopback listener + plugin file write) so this unit test, which exercises
-// the real server.ts/llm-one-shot.ts against a mocked SDK client only, stays
-// hermetic (no real socket, no real file write).
 const { startBridgeServer, writeBridgePlugin } = vi.hoisted(() => ({
   startBridgeServer: vi.fn(async () => ({ url: 'http://127.0.0.1:1', token: 'tok', close: vi.fn(async () => {}) })),
   writeBridgePlugin: vi.fn(async () => '/fake/.opencode/plugins/archie-bridge.ts'),

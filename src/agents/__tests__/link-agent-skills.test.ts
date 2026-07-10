@@ -12,7 +12,7 @@ import { mkdtemp, mkdir, symlink, writeFile, rm, readlink } from 'fs/promises';
 import { existsSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { linkAgentSkills } from '../spawn.js';
+import { linkAgentSkills } from '../skill-linking.js';
 
 let tmp: string;
 beforeEach(async () => { tmp = await mkdtemp(join(tmpdir(), 'las-')); });

@@ -1,8 +1,17 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { join } from 'node:path';
 
-const createOpencode = vi.fn();
-vi.mock('@opencode-ai/sdk', () => ({ createOpencode }));
+// The embedded server is now started via a manual `opencode serve` spawn in a
+// clean, git-bounded serve root (embedded-server.ts) — not the SDK's
+// createOpencode. Mock that boundary + the skill staging + the workdir root.
+const startEmbeddedServer = vi.fn();
+const prepareServeRoot = vi.fn(async () => {});
+vi.mock('../embedded-server.js', () => ({ startEmbeddedServer, prepareServeRoot }));
+
+const stageOpencodeSkills = vi.fn(async () => 0);
+vi.mock('../skills.js', () => ({ stageOpencodeSkills }));
+
+vi.mock('../../../system/workdir.js', () => ({ WORKDIR: '/fake-workdir' }));
 
 const writeBridgePlugin = vi.fn();
 vi.mock('../bridge/plugin-source.js', () => ({ writeBridgePlugin }));
@@ -13,12 +22,11 @@ vi.mock('../bridge/server.js', () => ({ startBridgeServer }));
 const resolveOpencodeModel = vi.fn();
 vi.mock('../model.js', () => ({ resolveOpencodeModel }));
 
-// Mock the MCP-config builder so the createOpencode call-args assertion is
-// hermetic: it reflects this mock, NOT ambient disk/vault state. (The real
-// buildOpencodeMcpConfig reads workdir/plugins/.mcp.json and the OAuth vault,
-// so its output varies by ARCHIE_SECRETS_KEY / installed plugins — unsuitable
-// for a deterministic call-args assertion.)
+// Mock the MCP-config builder so the startEmbeddedServer call-args assertion is
+// hermetic: it reflects this mock, NOT ambient disk/vault state.
 vi.mock('../mcp-config.js', () => ({ buildOpencodeMcpConfig: vi.fn(async () => ({})) }));
+
+const SERVE_ROOT = join('/fake-workdir', 'opencode-server');
 
 function makeBridgeHandle(overrides: Partial<{ url: string; token: string; close: () => Promise<void> }> = {}) {
   return {
@@ -31,7 +39,11 @@ function makeBridgeHandle(overrides: Partial<{ url: string; token: string; close
 describe('opencode server singleton', () => {
   beforeEach(() => {
     vi.resetModules();
-    createOpencode.mockReset();
+    startEmbeddedServer.mockReset();
+    prepareServeRoot.mockReset();
+    prepareServeRoot.mockResolvedValue(undefined);
+    stageOpencodeSkills.mockReset();
+    stageOpencodeSkills.mockResolvedValue(0);
     writeBridgePlugin.mockReset();
     startBridgeServer.mockReset();
     resolveOpencodeModel.mockReset();
@@ -43,35 +55,37 @@ describe('opencode server singleton', () => {
 
   it('starts the embedded server once and reuses the client', async () => {
     const client = { session: {} };
-    createOpencode.mockResolvedValue({ client, server: {} });
+    startEmbeddedServer.mockResolvedValue({ client, close: vi.fn() });
     const { getOpencodeClient } = await import('../server.js');
     const a = await getOpencodeClient();
     const b = await getOpencodeClient();
     expect(a).toBe(client);
     expect(b).toBe(client);
-    expect(createOpencode).toHaveBeenCalledTimes(1);
+    expect(startEmbeddedServer).toHaveBeenCalledTimes(1);
     expect(startBridgeServer).toHaveBeenCalledTimes(1);
   });
 
-  it('ALWAYS wires in the bridge + config.model + config.permission, regardless of which caller boots the server first', async () => {
+  it('ALWAYS wires bridge + skills + config.model + config.permission in a clean serve root', async () => {
     const client = { session: {} };
-    createOpencode.mockResolvedValue({ client, server: {} });
+    startEmbeddedServer.mockResolvedValue({ client, close: vi.fn() });
     const { getOpencodeClient, sharedRegistry } = await import('../server.js');
 
-    // Simulates the one-shot LLM path calling with no arguments — no caller
-    // opts in or out of the bridge; the server always starts with it.
     const result = await getOpencodeClient();
 
     expect(result).toBe(client);
     expect(startBridgeServer).toHaveBeenCalledWith(sharedRegistry);
+    // Serve root is prepared (git-bounded) and skills staged there — under the
+    // workdir, NOT the process cwd (which carries the repo's own .claude/skills).
+    expect(prepareServeRoot).toHaveBeenCalledWith(SERVE_ROOT);
+    expect(stageOpencodeSkills).toHaveBeenCalledWith(join(SERVE_ROOT, '.opencode', 'skills'));
     expect(writeBridgePlugin).toHaveBeenCalledWith(
-      join(process.cwd(), '.opencode', 'plugins'),
+      join(SERVE_ROOT, '.opencode', 'plugins'),
       'http://127.0.0.1:9999',
       'tok-xyz',
     );
     expect(resolveOpencodeModel).toHaveBeenCalledWith('default');
-    expect(createOpencode).toHaveBeenCalledWith({
-      port: 0,
+    expect(startEmbeddedServer).toHaveBeenCalledWith({
+      cwd: SERVE_ROOT,
       config: {
         model: 'anthropic/opus',
         permission: { edit: 'allow', bash: 'allow', webfetch: 'allow', external_directory: 'allow' },
@@ -80,29 +94,29 @@ describe('opencode server singleton', () => {
     });
   });
 
-  it('starts the bridge and writes the plugin before booting createOpencode', async () => {
+  it('starts the bridge and writes the plugin before booting the embedded server', async () => {
     const client = { session: {} };
     const callOrder: string[] = [];
     startBridgeServer.mockImplementation(async () => {
       callOrder.push('startBridgeServer');
       return makeBridgeHandle();
     });
-    writeBridgePlugin.mockImplementation(async (...args: unknown[]) => {
+    writeBridgePlugin.mockImplementation(async () => {
       callOrder.push('writeBridgePlugin');
       return '/fake/.opencode/plugins/archie-bridge.ts';
     });
-    createOpencode.mockImplementation(async () => {
-      callOrder.push('createOpencode');
-      return { client, server: {} };
+    startEmbeddedServer.mockImplementation(async () => {
+      callOrder.push('startEmbeddedServer');
+      return { client, close: vi.fn() };
     });
     const { getOpencodeClient } = await import('../server.js');
     const result = await getOpencodeClient();
     expect(result).toBe(client);
-    expect(callOrder).toEqual(['startBridgeServer', 'writeBridgePlugin', 'createOpencode']);
+    expect(callOrder).toEqual(['startBridgeServer', 'writeBridgePlugin', 'startEmbeddedServer']);
   });
 
   it('exports a shared SessionRegistry usable by the runtime', async () => {
-    createOpencode.mockResolvedValue({ client: {}, server: {} });
+    startEmbeddedServer.mockResolvedValue({ client: {}, close: vi.fn() });
     const { sharedRegistry } = await import('../server.js');
     expect(sharedRegistry.get('nope')).toBeUndefined();
     const session = { task: {} as any, agent: {} as any, readOnly: false };
@@ -121,7 +135,7 @@ describe('opencode server singleton', () => {
   it('closeOpencodeBridge closes the started bridge exactly once', async () => {
     const close = vi.fn(async () => {});
     startBridgeServer.mockResolvedValue(makeBridgeHandle({ close }));
-    createOpencode.mockResolvedValue({ client: {}, server: {} });
+    startEmbeddedServer.mockResolvedValue({ client: {}, close: vi.fn() });
     const { getOpencodeClient, closeOpencodeBridge } = await import('../server.js');
     await getOpencodeClient();
 
@@ -133,7 +147,7 @@ describe('opencode server singleton', () => {
 
   it('closeOpencodeBridge closes the embedded serve child exactly once (no orphaned process)', async () => {
     const serverClose = vi.fn();
-    createOpencode.mockResolvedValue({ client: {}, server: { close: serverClose } });
+    startEmbeddedServer.mockResolvedValue({ client: {}, close: serverClose });
     const { getOpencodeClient, closeOpencodeBridge } = await import('../server.js');
     await getOpencodeClient();
 
@@ -144,18 +158,17 @@ describe('opencode server singleton', () => {
   });
 
   it('closes the just-spawned serve child if shutdown runs during the first boot (no orphan)', async () => {
-    // Boot blocks in createOpencode; closeOpencodeBridge runs mid-flight.
+    // Boot blocks in startEmbeddedServer; closeOpencodeBridge runs mid-flight.
     const serverClose = vi.fn();
-    let resolveBoot: (v: { client: unknown; server: { close: () => void } }) => void = () => {};
-    createOpencode.mockReturnValue(new Promise((res) => { resolveBoot = res; }));
+    let resolveBoot: (v: { client: unknown; close: () => void }) => void = () => {};
+    startEmbeddedServer.mockReturnValue(new Promise((res) => { resolveBoot = res; }));
     const { getOpencodeClient, closeOpencodeBridge } = await import('../server.js');
 
     const bootPromise = getOpencodeClient().catch((e) => e);
-    // Let the bridge start + createOpencode be awaited, then tear down.
     await new Promise((r) => setImmediate(r));
     await closeOpencodeBridge();
     // Now the in-flight boot resolves — it must close the child, not keep it.
-    resolveBoot({ client: {}, server: { close: serverClose } });
+    resolveBoot({ client: {}, close: serverClose });
     const result = await bootPromise;
 
     expect(serverClose).toHaveBeenCalledTimes(1);
@@ -163,34 +176,33 @@ describe('opencode server singleton', () => {
   });
 
   it('closeOpencodeBridge clears the cached client so a later call re-boots the server', async () => {
-    createOpencode.mockResolvedValue({ client: { session: {} }, server: { close: vi.fn() } });
+    startEmbeddedServer.mockResolvedValue({ client: { session: {} }, close: vi.fn() });
     const { getOpencodeClient, closeOpencodeBridge } = await import('../server.js');
     await getOpencodeClient();
     await closeOpencodeBridge();
     await getOpencodeClient();
 
-    expect(createOpencode).toHaveBeenCalledTimes(2);
+    expect(startEmbeddedServer).toHaveBeenCalledTimes(2);
   });
 
-  it('closes the bridge and clears the client promise when createOpencode fails, allowing a clean retry', async () => {
+  it('closes the bridge and clears the client promise when the boot fails, allowing a clean retry', async () => {
     const close = vi.fn(async () => {});
     startBridgeServer.mockResolvedValueOnce(makeBridgeHandle({ close }));
-    createOpencode.mockRejectedValueOnce(new Error('spawn opencode ENOENT'));
+    startEmbeddedServer.mockRejectedValueOnce(new Error('opencode serve did not start'));
     const { getOpencodeClient } = await import('../server.js');
 
-    await expect(getOpencodeClient()).rejects.toThrow('spawn opencode ENOENT');
+    await expect(getOpencodeClient()).rejects.toThrow('opencode serve did not start');
     expect(close).toHaveBeenCalledTimes(1);
 
     // Retry: a fresh bridge is started and the server boots successfully.
     const client = { session: {} };
     startBridgeServer.mockResolvedValueOnce(makeBridgeHandle());
-    createOpencode.mockResolvedValueOnce({ client, server: {} });
+    startEmbeddedServer.mockResolvedValueOnce({ client, close: vi.fn() });
     await expect(getOpencodeClient()).resolves.toBe(client);
     expect(startBridgeServer).toHaveBeenCalledTimes(2);
   });
 
   it('concatPromptText joins text parts and returns null when empty', async () => {
-    createOpencode.mockResolvedValue({ client: {}, server: {} });
     const { concatPromptText } = await import('../server.js');
     expect(concatPromptText({ data: { parts: [
       { type: 'text', text: 'he' }, { type: 'tool', text: 'x' }, { type: 'text', text: 'llo' },

@@ -1,14 +1,17 @@
 /**
  * Per-runtime prompt vocabulary (spec §3.3 item 5). Agent prompts reference file
  * tools and skills by name; the Claude SDK exposes `Read`/`Grep`/… and a native
- * `Skill` tool, while opencode exposes `read`/`grep`/… and has no Skill tool
- * (capabilities.skills = false). These vars let one prompt file render correctly
- * on either runtime via the existing {{VAR}} loader. The `claude` values MUST
- * reproduce the prompts' previous hardcoded text byte-for-byte (regression).
+ * `Skill` tool, while opencode exposes `read`/`grep`/… and a lowercase `skill`
+ * tool (capabilities.skills = true; the embedded server stages agent skills at
+ * its working dir — see runtime/opencode/skills.ts). These vars let one prompt
+ * file render correctly on either runtime via the existing {{VAR}} loader. The
+ * `claude` values MUST reproduce the prompts' previous hardcoded text
+ * byte-for-byte (regression).
  *
- * Mostly MECHANICAL: the tool-name and Skill vars make prompts stop *assuming*
- * Claude tooling (they do not add a read_skill tool — later). The completion
- * guidance var (COMPLETION_MESSAGE_GUIDANCE) is the one behavioral entry: it
+ * Mostly MECHANICAL: the tool-name and skill vars map each prompt's tool
+ * references to the active runtime's names (`Skill` → `skill`, `Read` → `read`,
+ * …). The completion guidance var (COMPLETION_MESSAGE_GUIDANCE) is the one
+ * behavioral entry: it
  * rewords the report_completion guidance for opencode to stop a weaker model
  * double-posting (answer via post_to_user + a redundant "task completed"
  * confirmation via report_completion). CLAUDE values stay byte-identical.
@@ -21,36 +24,32 @@ const CLAUDE_SKILL_GUIDANCE =
   'You have domain-specific skills available via the `Skill` tool. Before delegating to any team member, you MUST load the relevant skill first — it contains the workflow, decision framework, and coordination patterns for that domain. Never delegate without first loading and reading the skill. If you\'re unsure which skill applies, list available skills by calling the `Skill` tool.';
 
 const OPENCODE_SKILL_GUIDANCE =
-  'Domain-specific guidance for your team members is provided in your context (AGENTS.md and the task briefing). Consult it before delegating so you apply each domain\'s workflow and coordination patterns. There is no separate skill-loading step.';
+  'You have domain-specific skills available via the `skill` tool. Before delegating to any team member, you MUST load the relevant skill first — it contains the workflow, decision framework, and coordination patterns for that domain. Never delegate without first loading and reading the skill. If you\'re unsure which skill applies, list available skills by calling the `skill` tool.';
 
-// Clause-level Skill-tool neutralization: soften prompts that reference the
-// `Skill` tool. Each var covers one distinct grammatical context
-// where a prompt tells the model to call the native `Skill` tool — which doesn't
-// exist under opencode (capabilities.skills = false). A single paragraph var
-// (SKILL_GUIDANCE) can't fit these mid-sentence/mid-checklist spots, so each gets
-// its own clause. CLAUDE values are the EXACT pre-change text (byte-identical
-// render); OPENCODE values are tool-free and point at the same in-context guidance
-// as OPENCODE_SKILL_GUIDANCE.
+// Clause-level Skill-tool mapping: each var covers one distinct grammatical
+// context where a prompt tells the model to call the skill tool. A single
+// paragraph var (SKILL_GUIDANCE) can't fit these mid-sentence/mid-checklist
+// spots, so each gets its own clause. CLAUDE values are the EXACT pre-change
+// text (byte-identical render, `Skill`); OPENCODE values reference opencode's
+// lowercase `skill` tool.
 
 // prompts/pm-agent.md — Skill Resolution reasoning checklist item.
 const CLAUDE_SKILL_CHECK_ACTION = 'If NO: I must call `Skill` tool to load it before proceeding';
-const OPENCODE_SKILL_CHECK_ACTION =
-  'If NO: consult the domain guidance in my context (AGENTS.md and the task briefing) before proceeding';
+const OPENCODE_SKILL_CHECK_ACTION = 'If NO: I must call the `skill` tool to load it before proceeding';
 
 // prompts/pm-agent.md — Skill Resolution analysis-template "Action" line.
 const CLAUDE_SKILL_RESOLUTION_ACTION =
   'Action: [Load skill via `Skill` tool / Already loaded, using workflow from it]';
 const OPENCODE_SKILL_RESOLUTION_ACTION =
-  'Action: [Consult domain guidance in my context (AGENTS.md and the task briefing) / Already consulted, using its workflow]';
+  'Action: [Load skill via the `skill` tool / Already loaded, using workflow from it]';
 
 // prompts/pm-agent.md — "New task from Slack" decision-framework first step.
 const CLAUDE_SKILL_DELEGATION_STEP = 'Load the relevant domain skill via `Skill` tool (e.g. engineering, marketing)';
-const OPENCODE_SKILL_DELEGATION_STEP =
-  'Consult the relevant domain guidance in your context (AGENTS.md and the task briefing; e.g. engineering, marketing)';
+const OPENCODE_SKILL_DELEGATION_STEP = 'Load the relevant domain skill via the `skill` tool (e.g. engineering, marketing)';
 
 // prompts/plugin-agent.md — Available Tools bullet (text after the "- " marker).
 const CLAUDE_SKILL_TOOL_BULLET = '**Skill** — Load and use domain-specific skills from your skills directory';
-const OPENCODE_SKILL_TOOL_BULLET = 'Domain guidance is available in your context (AGENTS.md and the task briefing)';
+const OPENCODE_SKILL_TOOL_BULLET = '**skill** — Load and use domain-specific skills from your skills directory';
 
 // prompts/pm-agent.md — Task Completion Philosophy, the "when to include/omit a
 // report_completion message" block. CLAUDE keeps the verbatim original. OPENCODE

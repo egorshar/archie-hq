@@ -19,6 +19,7 @@ import type { Task } from '../tasks/task.js';
 import { isRepoAgent, isPmAgent } from '../types/agent.js';
 import { buildCommitAuthorEnv } from './commit-author.js';
 import { resolveAgentModel } from './model-label.js';
+import { linkAgentSkills } from './skill-linking.js';
 import {
   createBaseAgentMcpServer,
   createRepoToolsMcpServer,
@@ -109,46 +110,6 @@ async function generatePluginAgentPrompt(agent: Agent, task: Task): Promise<stri
 }
 
 // ---- Plugin agent workspace setup ----
-
-/**
- * (Re)build an agent's per-task `.claude/skills` dir as symlinks into the skill
- * source dirs, plugin sources first so a plugin skill shadows a core skill of
- * the same name.
- *
- * Rebuilt from scratch each spawn. A prior spawn — or a DIFFERENT process
- * sharing this workdir (e.g. a container whose absolute `/workdir/...` paths
- * don't resolve on the host) — can leave symlinks here. The old guard used
- * `existsSync(target)`, which FOLLOWS the link, so a DANGLING link returned
- * false, slipped the guard, and made `symlink()` throw EEXIST — and that
- * rejection, uncaught in the recovery re-spawn path, crashed the daemon
- * (a cross-instance-workdir incident). Clearing the dir first heals any
- * stale/dangling links; within the fresh build the first source to claim a name
- * wins, which preserves plugin-shadows-core.
- */
-export async function linkAgentSkills(agentSkillsDir: string, skillSources: string[]): Promise<void> {
-  await rm(agentSkillsDir, { recursive: true, force: true });
-  await mkdir(agentSkillsDir, { recursive: true });
-  for (const skillsPath of skillSources) {
-    for (const skillEntry of await readdir(skillsPath, { withFileTypes: true })) {
-      const entryPath = join(skillsPath, skillEntry.name);
-      // Mount real skill dirs AND symlinks that resolve to a dir. A skill can be
-      // vendored as a git submodule and exposed via a symlink (e.g. the
-      // data-analytics data-context); readdir's Dirent.isDirectory() is false
-      // for a symlink, so stat-follow to classify it. A dangling link is skipped.
-      let isDir = skillEntry.isDirectory();
-      if (!isDir && skillEntry.isSymbolicLink()) {
-        isDir = await stat(entryPath).then((s) => s.isDirectory()).catch(() => false);
-      }
-      if (!isDir) continue;
-      const target = join(agentSkillsDir, skillEntry.name);
-      // The dir was just cleared, so any link present here was created earlier
-      // in THIS build — first source to claim a name wins (plugin shadows core).
-      if (!existsSync(target)) {
-        await symlink(entryPath, target);
-      }
-    }
-  }
-}
 
 async function setupAgentWorkspace(taskId: string, agent: Agent): Promise<string> {
   const agentWorkspace = join(getTaskPath(taskId), 'agents', agent.def.key);
