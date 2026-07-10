@@ -53,10 +53,18 @@ export interface AgentServeSpec { clonePath?: string }
 interface PoolEntry {
   promise: Promise<ServeHandle>;
   handle: ServeHandle | null; // set when the boot resolves; null while booting
+  /** The serve cwd this entry is booting/booted with. Tracked so an in-flight
+   * boot (handle still null) is visible to the shared-clone collision guard. */
+  desiredCwd: string;
 }
 
 const pool = new Map<string, PoolEntry>();
-let shuttingDown = false;
+// Per-boot generation token (mirrors llm-one-shot.ts): a closeServePool() that
+// happens WHILE a boot is in flight bumps this, so that boot's post-spawn guard
+// always sees a mismatch and self-aborts — even if a later getAgentServe has
+// since started a fresh boot (whose entry was already cleared from the pool by
+// the teardown, so nothing else could ever close its child → ~300MB orphan).
+let poolGeneration = 0;
 
 const poolKey = (taskId: string, agentId: string): string => `${taskId}:${agentId}`;
 const taskServeRoot = (taskId: string): string => join(WORKDIR, 'opencode-server', taskId);
@@ -100,7 +108,38 @@ export function liveChildCount(): number {
  */
 export async function getAgentServe(agent: Agent, task: Task, spec: AgentServeSpec = {}): Promise<ServeHandle> {
   const key = poolKey(task.taskId, agent.def.id);
-  const desiredCwd = spec.clonePath ?? syntheticRoot(task.taskId, agent.def.id);
+
+  // Effective serve cwd, resolving a shared-clone cwd collision (see below) to
+  // this agent's synthetic root. Computed BEFORE the warm-handle check so the
+  // mode-transition comparison (handle.cwd !== desiredCwd) tests against the
+  // EFFECTIVE cwd — otherwise a sticky fallback would fight the recycle logic.
+  let desiredCwd = spec.clonePath ?? syntheticRoot(task.taskId, agent.def.id);
+  if (spec.clonePath) {
+    // Same-task repo agents can share ONE clone (task-shared clones): two
+    // children in the same cwd clobber each other's `.opencode/skills`
+    // (clear-and-rebuild staging) and load the OTHER's bridge token from the
+    // fixed-name plugin file — the bridge identity cross-check then rejects
+    // every tool call (functional lockout by the security feature). If ANY
+    // other live/in-flight entry already occupies this clone, fall back to a
+    // synthetic root so this agent's skills+plugin live in its own dir.
+    // Degrades to pre-P3a for the second agent (it addresses the clone by
+    // absolute path; SERVE_PERMISSION allows external_directory). Re-checked
+    // on every acquire, so the fallback is sticky only while the occupant
+    // lives — once it's gone, the clone cwd is used again (next turn boundary).
+    const occupant = [...pool.entries()].find(([otherKey, other]) => {
+      if (otherKey === key) return false;
+      const otherCwd = other.handle
+        ? (other.handle.isClosed() ? undefined : other.handle.cwd)
+        : other.desiredCwd; // in-flight boot
+      return otherCwd === spec.clonePath;
+    });
+    if (occupant) {
+      const fallback = syntheticRoot(task.taskId, agent.def.id);
+      logger.warn('opencode', `opencode[${key}]: clone cwd ${spec.clonePath} already in use by opencode[${occupant[0]}] — booting in synthetic root ${fallback} (skills+bridge-plugin isolation; degrades to pre-P3a for this agent)`);
+      desiredCwd = fallback;
+    }
+  }
+  const isClone = spec.clonePath != null && desiredCwd === spec.clonePath;
 
   const existing = pool.get(key);
   if (existing) {
@@ -117,12 +156,8 @@ export async function getAgentServe(agent: Agent, task: Task, spec: AgentServeSp
     }
   }
 
-  // A fresh boot resets the shutdown guard (same semantics as the old
-  // server.ts singleton: "reset on each fresh boot so a later call re-boots
-  // cleanly" after a dev-reload shutdown).
-  shuttingDown = false;
-  const entry: PoolEntry = { promise: undefined as unknown as Promise<ServeHandle>, handle: null };
-  entry.promise = bootChild(agent, task, key, desiredCwd, spec.clonePath != null, entry);
+  const entry: PoolEntry = { promise: undefined as unknown as Promise<ServeHandle>, handle: null, desiredCwd };
+  entry.promise = bootChild(agent, task, key, desiredCwd, isClone, entry);
   pool.set(key, entry);
   try {
     const handle = await entry.promise;
@@ -143,6 +178,7 @@ async function bootChild(
   entry: PoolEntry,
 ): Promise<ServeHandle> {
   const t0 = Date.now();
+  const myGeneration = poolGeneration; // bumped by closeServePool → post-spawn guard self-aborts
   const skillsDir = join(cwd, '.opencode', 'skills');
   const pluginsDir = join(cwd, '.opencode', 'plugins');
 
@@ -197,7 +233,7 @@ async function bootChild(
       cwd,
       config: { model: `${model.providerID}/${model.modelID}`, permission: SERVE_PERMISSION, mcp },
     });
-    if (shuttingDown) {
+    if (poolGeneration !== myGeneration) {
       try { server.close(); } catch { /* best-effort */ }
       liveBridge.revokeChildToken(liveToken);
       throw new Error(`opencode[${key}]: child boot aborted during shutdown`);
@@ -295,11 +331,12 @@ export async function evictTask(taskId: string): Promise<void> {
 
 /** Process shutdown: close every RESOLVED child and clear the pool. Does NOT
  * await in-flight boots (a hung spawn would block shutdown); those are handled
- * by the `shuttingDown` guard in bootChild, which closes a child that finishes
- * booting after teardown began. The guard stays set until the next fresh
- * getAgentServe (dev-reload path) resets it. */
+ * by the generation-token guard in bootChild, which closes a child that
+ * finishes booting after teardown began. Bumping the generation (rather than a
+ * boolean) means a later fresh getAgentServe can boot cleanly on the next
+ * generation while any still-in-flight pre-teardown boot stays doomed. */
 export async function closeServePool(): Promise<void> {
-  shuttingDown = true;
+  poolGeneration++;
   const entries = [...pool.values()];
   pool.clear();
   await Promise.all(entries.map(async (entry) => {

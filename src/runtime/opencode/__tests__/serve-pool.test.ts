@@ -97,6 +97,10 @@ describe('serve pool (P3a §1/§5)', () => {
     await rm(WORKDIR_STUB, { recursive: true, force: true });
     delete process.env.ARCHIE_OPENCODE_MODEL_DEFAULT;
     delete process.env.ARCHIE_OPENCODE_MODEL_OPUS;
+    // Clear the child-tuning knobs a test may have set (the census test sets
+    // SOFT_CAP='1') so they don't leak into later test files in the same worker.
+    delete process.env.OPENCODE_CHILD_IDLE_TTL;
+    delete process.env.OPENCODE_CHILD_SOFT_CAP;
     vi.useRealTimers();
   });
 
@@ -248,6 +252,55 @@ describe('serve pool (P3a §1/§5)', () => {
     resolveBoot(late.server);
     await inFlight.catch(() => {}); // boot-after-teardown rejects or resolves-closed; either way the child is killed
     expect(late.closed).toHaveBeenCalled();
+  });
+
+  it('generation guard: a boot still in flight during closeServePool is closed even after a later boot restarts the pool', async () => {
+    // Boot A parks on a deferred startEmbeddedServer.
+    let resolveA!: (v: any) => void;
+    const lateA = fakeEmbedded('http://127.0.0.1:7001');
+    mocks.startEmbeddedServer.mockImplementationOnce(() => new Promise((r) => { resolveA = r; }));
+    const bootA = getAgentServe(agentOf('backend'), taskOf('t1'));
+
+    // Shutdown while A is still booting (does NOT await A → bumps the generation).
+    await closeServePool();
+
+    // A fresh boot B resolves normally AFTER shutdown. Under the old boolean
+    // guard this reset shuttingDown=false and A's post-spawn guard then kept
+    // A's child alive with no pool entry to ever close it (orphan). The
+    // generation token keeps A doomed while letting B live.
+    const liveB = fakeEmbedded('http://127.0.0.1:7002');
+    mocks.startEmbeddedServer.mockImplementationOnce(async () => liveB.server);
+    const hB = await getAgentServe(agentOf('mobile'), taskOf('t1'));
+    expect(hB.isClosed()).toBe(false);
+
+    // A's deferred server resolves last: its generation is stale → child closed, acquire rejects.
+    resolveA(lateA.server);
+    await expect(bootA).rejects.toThrow(/aborted during shutdown/);
+    expect(lateA.closed).toHaveBeenCalled();
+
+    // B is untouched.
+    expect(hB.isClosed()).toBe(false);
+    expect(liveChildCount()).toBe(1);
+  });
+
+  it('shared clone (P3a): a second same-task agent falls back to its synthetic root; both live; no recycle thrash', async () => {
+    const clone = join(WORKDIR_STUB, 'clones', 'shared');
+    const hA = await getAgentServe(agentOf('backend'), taskOf('t1'), { clonePath: clone });
+    const hB = await getAgentServe(agentOf('mobile'), taskOf('t1'), { clonePath: clone });
+
+    expect(hA.cwd).toBe(clone); // first agent keeps the clone
+    expect(hB.cwd).toBe(join(WORKDIR_STUB, 'opencode-server', 't1', 'mobile')); // second falls back
+    expect(mocks.loggerWarn).toHaveBeenCalledWith('opencode', expect.stringContaining(clone));
+    expect(hA.isClosed()).toBe(false);
+    expect(hB.isClosed()).toBe(false);
+    expect(liveChildCount()).toBe(2);
+
+    // Re-acquire B while A is live → still synthetic (handle.cwd matches the
+    // effective desired cwd), so the warm handle is reused, not recycled.
+    const calls = mocks.startEmbeddedServer.mock.calls.length;
+    const hB2 = await getAgentServe(agentOf('mobile'), taskOf('t1'), { clonePath: clone });
+    expect(hB2).toBe(hB);
+    expect(mocks.startEmbeddedServer.mock.calls.length).toBe(calls);
   });
 
   it('census: exceeding OPENCODE_CHILD_SOFT_CAP warn-logs but never blocks', async () => {

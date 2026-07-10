@@ -158,3 +158,4 @@ The opencode agent commits via its built-in `bash`. `configureGitIdentity` is fo
 - **No OS sandbox** — RO is guard-enforced; bash/egress unsandboxed (P3b, per-child bubblewrap + egress proxy, is planned follow-up work).
 - **`backgroundTasks` unwired** — opencode subtasks aren't tracked into busy/idle accounting.
 - **PM orchestration needs a capable model** — weaker models mis-drive multi-step flows (glm-5.2 works well).
+- **Same-task agents sharing one clone** — when two agents share a single clone cwd, the second agent's serve child runs in its own synthetic root instead of the clone (so its skills + bridge plugin stay isolated); candidate for a real per-child config dir in P3b.
