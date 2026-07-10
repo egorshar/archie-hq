@@ -179,15 +179,44 @@ function visibleTargetsForSender(
 }
 
 // ---- Base tools (all agents) ----
+//
+// Extracted spec pattern (mirrors repo/comms/scheduling): each tool's static
+// description + zod schema + handler live as named values, shared between the
+// Claude SDK path (createBaseAgentMcpServer) and the opencode bridge
+// (createAgentToolHandlers) so behavior can't drift. AGENT_TOOL_SPECS (below) is
+// the single source of truth. `send_message_to_agent` is the one exception: its
+// Claude tool embeds a LIVE peer list in its description/target-field (computed
+// at creation time), which a static spec can't reproduce — both build on the
+// same sendMessageHandler, and the peer set is validated at call time regardless.
+
+const sendMessageDescription =
+  'Send a message to another agent and wait for their response. Use this to coordinate with peer agents.';
+const sendMessageArgsSchema = {
+  target: z.string().describe(
+    'The agent id to send the message to. Validated at call time against the live task team; PM-spawned dynamic agents are valid targets.',
+  ),
+  message: z.string().describe('The message content to send'),
+};
+async function sendMessageHandler(agent: Agent, task: Task, args: { target: string; message: string }): Promise<ToolResult> {
+  const allowed = new Set(visibleTargetsForSender(agent.def, task));
+  if (!allowed.has(args.target)) {
+    return err(
+      `"${args.target}" is not a visible peer. Allowed: ${Array.from(allowed).join(', ')}.`,
+    );
+  }
+  const response = await task.toolSendMessage(agent.def.id as AgentName, args.target as AgentName, args.message);
+  return { content: [{ type: 'text' as const, text: response }] };
+}
 
 function createSendMessageTool(agent: Agent, task: Task) {
   return tool(
     'send_message_to_agent',
-    'Send a message to another agent and wait for their response. Use this to coordinate with peer agents.',
+    sendMessageDescription,
     {
       // Free-form string (validated at runtime against the live task team) so a
       // dynamic agent spawned mid-session is immediately addressable — a static
-      // enum would freeze the peer set at MCP-server creation time.
+      // enum would freeze the peer set at MCP-server creation time. This live
+      // peer list is why send_message keeps a bespoke tool (see AGENT_TOOL_SPECS).
       target: z.string().describe(
         'The agent id to send the message to. Visible peers right now: ' +
         visibleTargetsForSender(agent.def, task).join(', ') +
@@ -195,74 +224,89 @@ function createSendMessageTool(agent: Agent, task: Task) {
       ),
       message: z.string().describe('The message content to send'),
     },
-    async (args) => {
-      const allowed = new Set(visibleTargetsForSender(agent.def, task));
-      if (!allowed.has(args.target)) {
-        return err(
-          `"${args.target}" is not a visible peer. Allowed: ${Array.from(allowed).join(', ')}.`,
-        );
-      }
-      const response = await task.toolSendMessage(agent.def.id as AgentName, args.target as AgentName, args.message);
-      return { content: [{ type: 'text' as const, text: response }] };
-    },
+    async (args) => sendMessageHandler(agent, task, args),
   );
 }
 
-function createLogFindingTool(agent: Agent, task: Task) {
-  return tool(
-    'log_finding',
-    'Write an entry to the shared knowledge log. Use for discoveries, decisions, completions, or blockers.',
-    {
-      entry: z.string().describe('The finding or decision to log'),
-      type: z.enum(['discovery', 'decision', 'completion', 'blocker']).describe('The type of entry'),
-    },
-    async (args) => {
-      const agentName = agent.def.id as AgentName;
-      const findingType = args.type as FindingType;
-      if (findingType === 'decision') {
-        logger.agentFinding(agentName, findingType, args.entry);
-      } else {
-        logger.agentFinding(agentName, findingType, args.entry, { truncate: 100 });
-      }
-      task.touch();
-      await appendAgentFinding(task.taskId, agentName, args.entry, findingType);
-      return { content: [{ type: 'text' as const, text: `Logged ${args.type}: ${args.entry}` }] };
-    },
-  );
+const logFindingDescription =
+  'Write an entry to the shared knowledge log. Use for discoveries, decisions, completions, or blockers.';
+const logFindingArgsSchema = {
+  entry: z.string().describe('The finding or decision to log'),
+  type: z.enum(['discovery', 'decision', 'completion', 'blocker']).describe('The type of entry'),
+};
+async function logFindingHandler(agent: Agent, task: Task, args: { entry: string; type: string }): Promise<ToolResult> {
+  const agentName = agent.def.id as AgentName;
+  const findingType = args.type as FindingType;
+  if (findingType === 'decision') {
+    logger.agentFinding(agentName, findingType, args.entry);
+  } else {
+    logger.agentFinding(agentName, findingType, args.entry, { truncate: 100 });
+  }
+  task.touch();
+  await appendAgentFinding(task.taskId, agentName, args.entry, findingType);
+  return { content: [{ type: 'text' as const, text: `Logged ${args.type}: ${args.entry}` }] };
 }
 
-function createShareArtifactTool(agent: Agent, task: Task) {
-  return tool(
-    'share_artifact',
-    'Share a document (plan, report, diff, or any longer output) with OTHER AGENTS by publishing an immutable snapshot to the task\'s shared artifacts folder. ' +
-    'This is for inter-agent sharing only — to deliver a file to the user, use `post_files_to_user`. ' +
-    'The tool COPIES the file — your local file is left in place, and the published copy is read-only and never updated. ' +
-    'Pass an absolute path to a file inside your readable sandbox; the tool returns the absolute path of the immutable copy under shared/artifacts/, which you should send in `send_message_to_agent` instead of pasting the document body. ' +
-    'Identical content is deduped by hash — re-sharing the same bytes returns the existing snapshot path. To publish revisions, edit your local file and call share_artifact again — each call creates a new versioned snapshot, preserving history.',
-    {
-      path: z.string().describe('Absolute path to the file you want to share'),
-      description: z.string().describe('Short description of what the artifact contains; logged for other agents'),
-    },
-    async (args) => {
-      const agentName = agent.def.id as AgentName;
-      let resolvedSource: string;
-      try {
-        resolvedSource = await assertReadable(args.path, requireSandbox(agent));
-      } catch (e) {
-        return err(e instanceof Error ? e.message : String(e));
-      }
-      let copyResult;
-      try {
-        copyResult = await copyArtifactToShared(task.taskId, resolvedSource);
-      } catch (e) {
-        return err(e instanceof Error ? e.message : String(e));
-      }
-      task.touch();
-      await appendArtifactShared(task.taskId, agentName, copyResult.artifactPath, args.description);
-      const verb = copyResult.reused ? 'Already shared' : 'Shared immutable snapshot';
-      return ok(`${verb} at ${copyResult.artifactPath}. This is a read-only copy — other agents can Read it but it will never be updated. To publish revisions, edit your local file and call share_artifact again. Logged to knowledge log.`);
-    },
-  );
+const shareArtifactDescription =
+  'Share a document (plan, report, diff, or any longer output) with OTHER AGENTS by publishing an immutable snapshot to the task\'s shared artifacts folder. ' +
+  'This is for inter-agent sharing only — to deliver a file to the user, use `post_files_to_user`. ' +
+  'The tool COPIES the file — your local file is left in place, and the published copy is read-only and never updated. ' +
+  'Pass an absolute path to a file inside your readable sandbox; the tool returns the absolute path of the immutable copy under shared/artifacts/, which you should send in `send_message_to_agent` instead of pasting the document body. ' +
+  'Identical content is deduped by hash — re-sharing the same bytes returns the existing snapshot path. To publish revisions, edit your local file and call share_artifact again — each call creates a new versioned snapshot, preserving history.';
+const shareArtifactArgsSchema = {
+  path: z.string().describe('Absolute path to the file you want to share'),
+  description: z.string().describe('Short description of what the artifact contains; logged for other agents'),
+};
+async function shareArtifactHandler(agent: Agent, task: Task, args: { path: string; description: string }): Promise<ToolResult> {
+  const agentName = agent.def.id as AgentName;
+  let resolvedSource: string;
+  try {
+    resolvedSource = await assertReadable(args.path, requireSandbox(agent));
+  } catch (e) {
+    return err(e instanceof Error ? e.message : String(e));
+  }
+  let copyResult;
+  try {
+    copyResult = await copyArtifactToShared(task.taskId, resolvedSource);
+  } catch (e) {
+    return err(e instanceof Error ? e.message : String(e));
+  }
+  task.touch();
+  await appendArtifactShared(task.taskId, agentName, copyResult.artifactPath, args.description);
+  const verb = copyResult.reused ? 'Already shared' : 'Shared immutable snapshot';
+  return ok(`${verb} at ${copyResult.artifactPath}. This is a read-only copy — other agents can Read it but it will never be updated. To publish revisions, edit your local file and call share_artifact again. Logged to knowledge log.`);
+}
+
+/**
+ * One spec per base agent tool (every agent gets these). Single source of truth
+ * shared between the Claude SDK server (createBaseAgentMcpServer) and the
+ * opencode bridge (createAgentToolHandlers). `send_message_to_agent`'s Claude
+ * tool is still built via createSendMessageTool (live peer-list description);
+ * both call the same sendMessageHandler, so behavior is identical.
+ */
+export interface AgentToolSpec {
+  name: string;
+  description: string;
+  schema: Record<string, z.ZodTypeAny>;
+  handler: (agent: Agent, task: Task, args: any) => Promise<ToolResult>;
+}
+export const AGENT_TOOL_SPECS: readonly AgentToolSpec[] = [
+  { name: 'send_message_to_agent', description: sendMessageDescription, schema: sendMessageArgsSchema, handler: sendMessageHandler },
+  { name: 'log_finding', description: logFindingDescription, schema: logFindingArgsSchema, handler: logFindingHandler },
+  { name: 'share_artifact', description: shareArtifactDescription, schema: shareArtifactArgsSchema, handler: shareArtifactHandler },
+];
+
+/**
+ * Build the base agent-tool handler map keyed by tool name — for the opencode
+ * bridge, registered for ALL agents (these are the base inter-agent tools every
+ * agent gets in the Claude path via createBaseAgentMcpServer).
+ */
+export function createAgentToolHandlers(agent: Agent, task: Task): Record<string, (args: unknown) => Promise<ToolResult>> {
+  const handlers: Record<string, (args: unknown) => Promise<ToolResult>> = {};
+  for (const spec of AGENT_TOOL_SPECS) {
+    handlers[spec.name] = (args: unknown) => spec.handler(agent, task, args);
+  }
+  return handlers;
 }
 
 // ---- PM-only tools ----
@@ -2250,9 +2294,13 @@ export function createBaseAgentMcpServer(agent: Agent, task: Task) {
     name: 'agent-tools',
     version: '1.0.0',
     tools: [
+      // send_message_to_agent keeps its bespoke tool (live peer-list description);
+      // log_finding + share_artifact come from the shared specs. Same handlers as
+      // the opencode bridge's createAgentToolHandlers — no drift.
       createSendMessageTool(agent, task),
-      createLogFindingTool(agent, task),
-      createShareArtifactTool(agent, task),
+      ...AGENT_TOOL_SPECS.filter((spec) => spec.name !== 'send_message_to_agent').map((spec) =>
+        tool(spec.name, spec.description, spec.schema, (args: any) => spec.handler(agent, task, args)),
+      ),
     ],
   });
 }

@@ -16,6 +16,7 @@ import {
   createCommsHandlers,
   createOrchestrationHandlers,
   createSchedulingHandlers,
+  createAgentToolHandlers,
 } from '../tools.js';
 import type { Agent } from '../agent.js';
 import type { Task } from '../../tasks/task.js';
@@ -238,8 +239,19 @@ const BRIDGED_ORCHESTRATION_TOOLS = PM_ORCHESTRATION_TOOLS
 const BRIDGED_SCHEDULING_TOOLS = PM_SCHEDULING_TOOLS
   .map((n) => n.replace('mcp__scheduling-tools__', ''));
 
+// Base agent-tools have no control tools among them, so the bridged set is all 3.
+const BRIDGED_AGENT_TOOLS = AGENT_TOOLS.map((n) => n.replace('mcp__agent-tools__', ''));
+
 describe('opencode bridge handler factories', () => {
   const pmAgent = () => makeAgent({ isPm: true, repo: undefined, id: 'pm-agent' });
+
+  it('createAgentToolHandlers matches the base agent-tools (available to every agent, incl. send_message_to_agent)', () => {
+    // Not PM-gated: a non-PM agent gets these too (the bridge registers them for
+    // all sessions). Without send_message_to_agent the PM couldn't delegate.
+    const handlers = createAgentToolHandlers(makeAgent({ isPm: false, id: 'backend-agent' }), makeTask());
+    expect(Object.keys(handlers).sort()).toEqual(BRIDGED_AGENT_TOOLS.sort());
+    expect(Object.keys(handlers)).toContain('send_message_to_agent');
+  });
 
   it('createCommsHandlers matches comms-tools minus already-bridged control tools', () => {
     const handlers = createCommsHandlers(pmAgent(), makeTask());

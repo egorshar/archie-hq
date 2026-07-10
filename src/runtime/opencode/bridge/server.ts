@@ -46,9 +46,11 @@ import {
   createCommsHandlers,
   createOrchestrationHandlers,
   createSchedulingHandlers,
+  createAgentToolHandlers,
   COMMS_TOOL_SPECS,
   ORCHESTRATION_TOOL_SPECS,
   SCHEDULING_TOOL_SPECS,
+  AGENT_TOOL_SPECS,
   type PostToUserArgs,
   type ReportCompletionArgs,
   type RequestEditModeArgs,
@@ -236,6 +238,15 @@ function getCommsToolDescriptors(): ToolDescriptor[] {
   return commsToolDescriptorsCache;
 }
 
+// Base agent-tools (send_message_to_agent / log_finding / share_artifact) —
+// bridged for EVERY agent (createBaseAgentMcpServer gives them to all agents on
+// the Claude path), unlike the PM-only comms/orch/scheduling sets.
+let agentToolDescriptorsCache: ToolDescriptor[] | null = null;
+function getAgentToolDescriptors(): ToolDescriptor[] {
+  if (!agentToolDescriptorsCache) agentToolDescriptorsCache = specsToDescriptors(AGENT_TOOL_SPECS);
+  return agentToolDescriptorsCache;
+}
+
 let orchestrationToolDescriptorsCache: ToolDescriptor[] | null = null;
 function getOrchestrationToolDescriptors(): ToolDescriptor[] {
   if (!orchestrationToolDescriptorsCache) orchestrationToolDescriptorsCache = specsToDescriptors(ORCHESTRATION_TOOL_SPECS);
@@ -350,6 +361,11 @@ function buildSessionHandlers(session: BridgeSession): Map<string, BoundHandler>
   // Claude-path budget/persistence/defense-tag logic into the handler itself
   // (see createResearchToolHandler's doc comment).
   handlers.set('web_research', createResearchToolHandler(session.agent, session.task));
+  // Base inter-agent tools (send_message_to_agent / log_finding / share_artifact)
+  // — every agent gets these (parity with createBaseAgentMcpServer). Without
+  // send_message_to_agent the PM cannot delegate to a spawned repo agent.
+  const agentToolHandlers = createAgentToolHandlers(session.agent, session.task);
+  for (const name of Object.keys(agentToolHandlers)) handlers.set(name, agentToolHandlers[name]!);
   const repoHandlers = createRepoToolHandlers(session.agent, session.task);
   for (const name of Object.keys(repoHandlers)) {
     handlers.set(name, repoHandlers[name]!);
@@ -439,6 +455,7 @@ function handleToolsList(res: ServerResponse): void {
   // restriction is actually enforced.
   sendJson(res, 200, [
     ...TOOL_DESCRIPTORS,
+    ...getAgentToolDescriptors(),
     ...getRepoToolDescriptors(),
     ...getCommsToolDescriptors(),
     ...getOrchestrationToolDescriptors(),
