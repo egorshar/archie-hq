@@ -236,7 +236,25 @@ let restageQueued = false;
 export async function restageOpencodeSkills(): Promise<void> {
   // Synchronous singleton read — `null` means "never started". Do NOT touch
   // getOpencodeClient() here (that would boot the server).
-  if (clientPromise === null) return;
+  const booting = clientPromise;
+  if (booting === null) return;
+
+  // Boot/re-stage race guard. The boot path stages skills OUTSIDE this
+  // serializer (getOpencodeClient → stageServeRootSkills('boot')), yet
+  // `clientPromise` is ALREADY non-null while that boot staging is still
+  // running. Without waiting here, a plugins refresh landing mid-boot would run
+  // a SECOND concurrent rm+rebuild over the same skills dir — the two passes can
+  // interleave so one deletes the other's just-created symlinks, leaving a
+  // silently PARTIAL set with both passes finishing without error. Awaiting the
+  // (known non-null) boot promise makes every re-stage start only after boot
+  // staging has finished; this never boots anything (the promise already
+  // exists). A failed boot is swallowed — there's no live server left to
+  // re-stage, and this call must stay best-effort/never-throw.
+  try {
+    await booting;
+  } catch {
+    return;
+  }
 
   if (restageInFlight) {
     // A re-stage is already running; schedule exactly one trailing run so the
