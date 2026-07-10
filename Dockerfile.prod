@@ -15,11 +15,6 @@ RUN apt-get update && \
     git lfs install && \
     rm -rf /var/lib/apt/lists/*
 
-# opencode CLI (required when AGENT_RUNTIME=opencode): the @opencode-ai/sdk
-# embedded server spawns `opencode serve`, so the CLI must be on PATH. Pinned to
-# match the SDK version in package.json. No-op cost for the default claude runtime.
-RUN npm i -g opencode-ai@1.17.16
-
 # Set SHELL environment variable (required by Claude CLI)
 ENV SHELL=/bin/bash
 
@@ -31,6 +26,13 @@ COPY package.json package-lock.json* ./
 
 # Install ALL dependencies (for build)
 RUN npm ci
+
+# opencode CLI (required when AGENT_RUNTIME=opencode): the @opencode-ai/sdk
+# embedded server spawns `opencode serve`, so the CLI must be on PATH. The CLI
+# version is read from package.json's @opencode-ai/sdk pin, so it stays in sync
+# automatically and never needs a hardcoded bump. No-op cost for the default
+# claude runtime.
+RUN npm i -g opencode-ai@"$(node -p "require('./package.json').dependencies['@opencode-ai/sdk']")"
 
 # Copy source code
 COPY tsconfig.json tsconfig.scripts.json ./
