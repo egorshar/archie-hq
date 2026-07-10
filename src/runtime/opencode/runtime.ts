@@ -295,7 +295,17 @@ export class OpencodeRuntime implements AgentRuntime {
           }
         }
       } catch (err) {
-        if (!agent.queue.isStopped()) logger.error(def.id, 'opencode turn failed', err as Error);
+        if (!agent.queue.isStopped()) {
+          logger.error(def.id, 'opencode turn failed', err as Error);
+          // Route the error into the task-level recovery loop (parity with the
+          // Claude runtime — spawn.ts "marking inactive so recovery can run").
+          // Without this the agent's session stays active, `scheduleIdleCheck`
+          // never fires, and the task hangs in_progress. Marking inactive
+          // triggers the idle-check → recover (re-engage/retry, bounded to 3
+          // attempts then nuclear) or complete. Guarded by !isStopped so a
+          // stopped/completed task isn't re-woken.
+          task.updateAgentState(def.id, false);
+        }
       } finally {
         // Evict the bridge registration + resolve any lingering turn waiter on
         // every exit path (normal, aborted, or errored) so a stale sessionId

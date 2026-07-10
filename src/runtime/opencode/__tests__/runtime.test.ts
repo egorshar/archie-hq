@@ -98,6 +98,23 @@ describe('OpencodeRuntime.spawn', () => {
     expect(task.updateAgentState).toHaveBeenCalledWith('pm', false);
   });
 
+  it('marks the agent inactive on a transient (non-not-found) prompt error so recovery/idle-check runs (not stuck in_progress)', async () => {
+    const agent = makeAgent();
+    const task = makeTask();
+    // A non-not-found error result → runPromptTurn throws → the turn-loop catch.
+    // Without marking the agent inactive, session.active stays true, the
+    // idle-check never fires, and the task hangs in_progress (parity gap vs the
+    // Claude runtime, which marks inactive "so recovery can run").
+    promptAsync.mockResolvedValue({ error: { name: 'ProviderError', data: { message: 'upstream 503' } } });
+    await new OpencodeRuntime().spawn(agent as any, task as any);
+
+    agent.queue.addMessage('do something', 'alice');
+    await tick();
+    await tick();
+
+    expect(task.updateAgentState).toHaveBeenCalledWith('pm', false);
+  });
+
   it('registers the created session in the bridge registry as {task, agent}', async () => {
     const agent = makeAgent();
     const task = makeTask();
