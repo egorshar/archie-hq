@@ -18,7 +18,7 @@ import { query, tool, createSdkMcpServer } from '../runtime/claude/sdk.js';
 import type { HookCallbackMatcher, HookJSONOutput } from '../runtime/claude/sdk.js';
 import { z, toJSONSchema } from 'zod';
 import { logger } from '../system/logger.js';
-import { appendAgentFinding, getTaskPath } from '../tasks/persistence.js';
+import { appendAgentFinding, getTaskPath, getSharedPath } from '../tasks/persistence.js';
 import type { Task } from '../tasks/task.js';
 import type { Agent } from '../agents/agent.js';
 
@@ -505,7 +505,7 @@ export function createResearchMcpServer(callbacks: ResearchToolCallbacks) {
  * `<researchesDir>/research-<id>.md` and appends a knowledge.log finding.
  * No-ops silently otherwise.
  */
-async function persistResearchIfPresent(
+export async function persistResearchIfPresent(
   text: string,
   topic: string,
   callbacks: Pick<ResearchToolCallbacks, 'getResearchesDir' | 'getTaskId' | 'getCallerAgentId'>,
@@ -536,11 +536,9 @@ async function persistResearchIfPresent(
     'discovery'
   );
 
-  // Log text is retained verbatim (hardcoded "shared/researches") to keep the
-  // Claude-path hook's console output byte-identical to before the
-  // extraction; the bridge path's actual `researchesDir` differs (see
-  // `createResearchToolHandler`) but this line is a human-readable console
-  // log only, not a persisted artifact or an asserted behavior.
+  // Both callers (the Claude PostToolUse hook and the opencode bridge handler)
+  // write this mirror under shared/researches, so the "shared/researches"
+  // wording is accurate on both paths.
   logger.agent(callbacks.getCallerAgentId(), `Research report saved to shared/researches/${filename}`);
 }
 
@@ -653,10 +651,19 @@ export function createResearchDefenseTagHook(): HookCallbackMatcher {
  * Bridge-callable web_research handler for the opencode runtime. Runs the same
  * research logic the SDK tool runs (`runWebResearch`), then folds in what the
  * Claude-path PostToolUse hooks did (this handler owns the returned result, so
- * no opencode `tool.execute.after` hook is needed): persists the report to
- * `<task>/researches/` + logs a knowledge.log finding
- * (`persistResearchIfPresent`), and wraps the result in the external-content
- * defense tags (mirrors `createResearchDefenseTagHook`) before returning.
+ * no opencode `tool.execute.after` hook is needed): persists the report + logs
+ * a knowledge.log finding (`persistResearchIfPresent`), and wraps the result in
+ * the external-content defense tags (mirrors `createResearchDefenseTagHook`)
+ * before returning.
+ *
+ * Two DISTINCT researches dirs, exactly mirroring the Claude path:
+ * - `runWebResearch`'s `getResearchesDir` → `<task>/researches` (the per-run
+ *   artifact dir: `<uuid>/request.json` + `<uuid>/report.md`, matching
+ *   `spawn.ts`'s research-server callbacks).
+ * - the persistence mirror → `<task>/shared/researches` (the cross-agent-visible
+ *   `research-<shortId>.md` copy, matching the Claude PostToolUse hook, which
+ *   uses `getSharedPath(taskId)` then joins `researches`). Reusing one dir for
+ *   both would drop the shared mirror any cross-agent feature browses.
  */
 export function createResearchToolHandler(agent: Agent, task: Task): (args: unknown) => Promise<ToolResult> {
   const callbacks: ResearchToolCallbacks = {
@@ -673,9 +680,16 @@ export function createResearchToolHandler(agent: Agent, task: Task): (args: unkn
     const result = await runWebResearch(webArgs, callbacks);
     const text = extractResultText(result);
 
-    // Persistence (mirrors createResearchPostToolHook): if the result carries
-    // a research_id, save the markdown + log the finding.
-    await persistResearchIfPresent(text, webArgs.topic, callbacks);
+    // Persistence (mirrors createResearchPostToolHook): if the result carries a
+    // research_id, save the cross-agent-visible mirror + log the finding. The
+    // mirror lands under shared/researches (NOT the per-run task-root researches
+    // dir runWebResearch just wrote to) — same shared-visibility convention the
+    // Claude PostToolUse hook uses.
+    await persistResearchIfPresent(text, webArgs.topic, {
+      getResearchesDir: () => join(getSharedPath(task.taskId), 'researches'),
+      getTaskId: () => task.taskId,
+      getCallerAgentId: () => agent.def.id,
+    });
 
     // Defense wrapping (mirrors createResearchDefenseTagHook): mark as untrusted.
     const wrapped =
