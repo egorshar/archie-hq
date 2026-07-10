@@ -19,6 +19,7 @@ import { logger } from '../../system/logger.js';
 import { getOpencodeClient, sharedRegistry, type OpencodeClient } from './server.js';
 import { buildToolAllowlist } from './tool-allowlist.js';
 import { turnCompletion } from './turn-completion.js';
+import { resolveAgentOpencodeModel } from './model.js';
 
 const SESSION_NOT_FOUND_RE = /session.*not.*found|not.*found.*session/i;
 
@@ -91,7 +92,7 @@ export async function runPromptTurn(args: {
   task: Task;
   sessionId: string;
   readOnly: boolean;
-  body: { parts: { type: 'text'; text: string }[]; system: string; tools?: Record<string, boolean> };
+  body: { parts: { type: 'text'; text: string }[]; system: string; tools?: Record<string, boolean>; model?: { providerID: string; modelID: string } };
   onSession?: (sessionId: string) => void;
 }): Promise<{ reply: string; sessionId: string }> {
   const { client, agent, task, readOnly, body, onSession } = args;
@@ -206,10 +207,9 @@ export class OpencodeRuntime implements AgentRuntime {
         // (server can't spawn) fails only this agent — logged here, marked
         // inactive by the finally + Agent.spawn's crash wiring — instead of
         // rejecting spawn() and surfacing as an unhandled rejection that
-        // crashes the process when recovery re-spawns. Model routing is
-        // server-global (`config.model`, set once in server.ts — spike.md §5)
-        // rather than per-prompt, so there's no per-agent model to resolve here;
-        // see server.ts's SERVER_MODEL_LOGICAL note for the shared-server caveat.
+        // crashes the process when recovery re-spawns. config.model
+        // (server.ts) remains the server-global fallback route; per-turn
+        // per-agent routing is resolved below (agentModel).
         const client = await getOpencodeClient();
         clientRef = client;
 
@@ -232,6 +232,17 @@ export class OpencodeRuntime implements AgentRuntime {
         // read path and the bridge's write-tool rejection enforce RO from it.
         sharedRegistry.set(sessionId, { task, agent, readOnly });
 
+        // Per-role routing: resolve the agent's own opencode route once for this
+        // spawn. Falls back to the server-global config.model (omit body.model)
+        // if resolution ever throws — never fail a turn over model routing.
+        let agentModel: { providerID: string; modelID: string } | undefined;
+        try {
+          agentModel = resolveAgentOpencodeModel(def);
+        } catch (err) {
+          logger.warn(def.id, `opencode model route unresolved — using server default: ${err instanceof Error ? err.message : String(err)}`);
+          agentModel = undefined;
+        }
+
         while (!agent.queue.isStopped()) {
           let msg;
           try {
@@ -245,13 +256,14 @@ export class OpencodeRuntime implements AgentRuntime {
           // message only when a post_to_user already fired in THIS turn.
           agent.postedToUserThisTurn = false;
 
-          // No `body.model` here — opencode ignores it (spike.md §5); the model
-          // is set once, server-wide, via `config.model` in server.ts. `tools`
-          // is the per-agent external-MCP denylist (see tool-allowlist.ts).
+          // Model is routed PER TURN from the agent's tier (agentModel, resolved
+          // above); config.model (server.ts) is only the fallback when omitted.
+          // `tools` is the per-agent external-MCP denylist (tool-allowlist.ts).
           const toolAllow = buildToolAllowlist(agent);
           const body = {
             parts: [{ type: 'text' as const, text }],
             system: systemPrompt,
+            ...(agentModel ? { model: agentModel } : {}),
             ...(Object.keys(toolAllow).length > 0 ? { tools: toolAllow } : {}),
           };
           // Fire via promptAsync + await completion off the SSE session.idle

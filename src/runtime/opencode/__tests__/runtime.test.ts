@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // vi.mock factories are hoisted above these imports; a plain top-level
 // `vi.fn()` referenced inside one throws "Cannot access before initialization"
@@ -18,9 +18,10 @@ vi.mock('../server.js', () => ({
   },
   sharedRegistry: { set: registrySet, delete: registryDelete },
 }));
-vi.mock('../model.js', () => ({
-  resolveOpencodeModel: (m: string) => ({ providerID: 'anthropic', modelID: m }),
-}));
+// '../model.js' is NOT mocked here — this test drives the real
+// resolveAgentOpencodeModel/resolveOpencodeModel resolution (via
+// ARCHIE_OPENCODE_MODEL_OPUS, set in beforeEach below) so body.model reflects
+// actual per-agent routing rather than a stand-in.
 const { prepareAgentContext } = vi.hoisted(() => ({ prepareAgentContext: vi.fn() }));
 vi.mock('../../../agents/spawn.js', () => ({ prepareAgentContext }));
 
@@ -51,6 +52,9 @@ describe('OpencodeRuntime.spawn', () => {
   let promptAsync: ReturnType<typeof vi.fn>;
   let create: ReturnType<typeof vi.fn>;
   let abort: ReturnType<typeof vi.fn>;
+  const SAVED_OPUS = { v: undefined as string | undefined };
+  beforeEach(() => { SAVED_OPUS.v = process.env.ARCHIE_OPENCODE_MODEL_OPUS; process.env.ARCHIE_OPENCODE_MODEL_OPUS = 'openrouter/z-ai/glm-5.2'; });
+  afterEach(() => { if (SAVED_OPUS.v === undefined) delete process.env.ARCHIE_OPENCODE_MODEL_OPUS; else process.env.ARCHIE_OPENCODE_MODEL_OPUS = SAVED_OPUS.v; });
   beforeEach(() => {
     create = vi.fn(async () => ({ data: { id: 'sess-1' } }));
     // promptAsync returns 204 immediately; the real server then emits
@@ -71,7 +75,7 @@ describe('OpencodeRuntime.spawn', () => {
     });
   });
 
-  it('fires promptAsync with NO body.model + the system prompt, completes on idle, sets a live handle', async () => {
+  it('fires promptAsync WITH the agent-routed body.model + the system prompt, completes on idle, sets a live handle', async () => {
     const agent = makeAgent();
     const task = makeTask();
     await new OpencodeRuntime().spawn(agent as any, task as any);
@@ -86,12 +90,10 @@ describe('OpencodeRuntime.spawn', () => {
     expect(create).toHaveBeenCalledTimes(1);
     expect(promptAsync).toHaveBeenCalledTimes(1);
     const body = promptAsync.mock.calls[0][0].body;
-    // Model routing is server-global (config.model, set in server.ts) — opencode
-    // ignores body.model, so it must not be sent (spike.md §5).
-    expect(body).not.toHaveProperty('model');
+    // Model is routed PER TURN from the agent's tier (def.model 'opus' → OPUS route).
+    expect(body.model).toEqual({ providerID: 'openrouter', modelID: 'z-ai/glm-5.2' });
     expect(body.system).toBe('SYS');
     expect(body.parts[0].text).toContain('investigate the login bug');
-    // first response marks active with the session id, then idle marks inactive
     expect(task.updateAgentState).toHaveBeenCalledWith('pm', true, 'sess-1');
     expect(task.updateAgentState).toHaveBeenCalledWith('pm', false);
   });
