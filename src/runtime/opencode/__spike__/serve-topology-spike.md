@@ -28,3 +28,15 @@ Production-parity: real `startEmbeddedServer` (manual spawn, controlled cwd), re
 4. **New follow-up (global session store).** Sessions accumulate in a process-global DB and are visible across children — a cleanup and isolation concern. In the container `HOME` is per-container so growth is bounded per container lifetime; on long-lived hosts it grows unboundedly. For P3b, pinning a **per-child data dir** (e.g. per-child `XDG_DATA_HOME`) both isolates one agent's session store from another's and scopes cleanup. Tracked for P3b; not P3a.
 
 This is version-sensitive — re-verify on CLI bumps.
+
+## Addendum (2026-07-11) — S2 skill-LOAD re-check, P3a Task 10 Step 1
+
+**CLI/SDK.** `opencode` 1.17.16 (already pinned in node_modules, matched `@opencode-ai/sdk@1.17.16`); model route `openrouter/z-ai/glm-4.7` (`ARCHIE_OPENCODE_MODEL_DEFAULT`). Throwaway script: `skill-load-recheck-spike.ts` (same dir), not part of the resolved record above.
+
+**What was probed.** Same topology as S2 (cwd = a `git init`-bounded clone, a probe skill staged into `<clone>/.opencode/skills` via `linkAgentSkills`), but this time the probe skill's body carries a unique `PROBE-BODY-TOKEN: XYZZY-42` line, and load was checked TWO independent ways instead of relying on model echo alone.
+
+**Check (1) — API.** The running serve child exposes skill BODY content directly over HTTP, confirmed on both route generations: `GET /skill?directory=<clone>` (legacy) and `GET /api/skill?directory=<clone>` (v2) each returned a `probe-clone-body` entry whose `content` field contained the exact `PROBE-BODY-TOKEN: XYZZY-42` line (content length 138 both times). Result: **PASS**. Aside: the generated SDK client's own `v2.skill.list()` binding came back empty against this CLI/SDK version — a client-binding quirk (the nested `client.v2.skill` getter didn't thread the `location` query param correctly), not a server gap; hitting the routes with plain `fetch` (which the SDK itself wraps) sidesteps it and is what this check uses.
+
+**Check (2) — prompt.** Asked the session to use the `skill` tool to load `probe-clone-body` and echo its token line verbatim; the model replied `"PROBE-BODY-TOKEN: XYZZY-42"` — an exact match. Result: **PASS**. (This resolves the original spike's caveat: the earlier empty-echo was indeed a one-off model-behavior artifact, not a load failure — glm-4.7 echoed cleanly on this re-run.)
+
+**Conclusion.** Skill body content IS demonstrably retrievable from a clone cwd by both an API check and a prompt check — S2's A3 Option 1 (cwd = clone, skills staged in `<clone>/.opencode/skills`) is confirmed end-to-end for load, not just discovery; no P3a design change needed. Cleanup verified: no `opencode serve` process left running after either run.
