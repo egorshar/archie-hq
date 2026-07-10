@@ -68,6 +68,7 @@ describe('opencode server singleton', () => {
       config: {
         model: 'anthropic/opus',
         permission: { edit: 'allow', bash: 'allow', webfetch: 'allow', external_directory: 'allow' },
+        mcp: {},
       },
     });
   });

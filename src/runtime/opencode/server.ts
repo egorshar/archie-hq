@@ -19,6 +19,7 @@ import { startBridgeServer, type BridgeHandle } from './bridge/server.js';
 import { SessionRegistry } from './bridge/registry.js';
 import { resolveOpencodeModel } from './model.js';
 import { startEventConsumer, type EventConsumerHandle } from './events.js';
+import { buildOpencodeMcpConfig } from './mcp-config.js';
 
 export type OpencodeClient = Awaited<ReturnType<typeof createOpencode>>['client'];
 
@@ -81,6 +82,7 @@ export function getOpencodeClient(): Promise<OpencodeClient> {
         await writeBridgePlugin(pluginsDir, bridge.url, bridge.token);
 
         const model = resolveOpencodeModel(SERVER_MODEL_LOGICAL);
+        const mcp = await buildOpencodeMcpConfig();
         // port 0 → an ephemeral free port (the SDK parses the actual URL the
         // server prints). Avoids colliding with the default 4096 when a prior
         // embedded server lingers or multiple instances run.
@@ -89,6 +91,7 @@ export function getOpencodeClient(): Promise<OpencodeClient> {
           config: {
             model: `${model.providerID}/${model.modelID}`,
             permission: READ_ONLY_PERMISSION,
+            mcp,
           },
         });
         eventConsumer = startEventConsumer(r.client, sharedRegistry);
