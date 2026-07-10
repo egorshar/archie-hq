@@ -1,3 +1,6 @@
+import type { AgentDef } from '../../types/agent.js';
+import { resolveAgentModel } from '../../agents/model-label.js';
+
 /**
  * Resolve a logical model name (as the LlmOneShot callers pass — 'haiku',
  * 'sonnet', …) to an opencode { providerID, modelID }.
@@ -32,6 +35,21 @@ export function resolveOpencodeModel(model: string): OpencodeModelRef {
     `Cannot resolve opencode model for "${model}". Set ARCHIE_OPENCODE_MODEL_${model.toUpperCase()} ` +
       `or ARCHIE_OPENCODE_MODEL_DEFAULT to a "provider/model" id (e.g. anthropic/claude-haiku-4-5).`,
   );
+}
+
+/**
+ * Resolve the opencode route for a specific agent — the per-role routing seam.
+ * Reuses the Claude runtime's per-agent alias (`resolveAgentModel`: PM → 'opus',
+ * others → 'sonnet[1m]', or the agent's declared `def.model`), strips the
+ * Claude-only `[1m]` 1M-context marker (opencode routes have no such concept),
+ * and maps the alias to a `{ providerID, modelID }` via `resolveOpencodeModel`
+ * (which falls back to ARCHIE_OPENCODE_MODEL_DEFAULT). Throws only if neither the
+ * tier nor DEFAULT is set — which cannot happen in a booted server, since
+ * server.ts resolves the 'default' route for config.model at boot.
+ */
+export function resolveAgentOpencodeModel(def: AgentDef): OpencodeModelRef {
+  const alias = resolveAgentModel(def).replace(/\[1m\]$/i, '');
+  return resolveOpencodeModel(alias);
 }
 
 /**

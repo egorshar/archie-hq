@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { resolveOpencodeModel, opencodeFooterModel } from '../model.js';
+import { resolveOpencodeModel, opencodeFooterModel, resolveAgentOpencodeModel } from '../model.js';
 import { modelDisplayLabel } from '../../../agents/model-label.js';
+import type { AgentDef } from '../../../types/agent.js';
 
-const ENV_KEYS = ['ARCHIE_OPENCODE_MODEL_HAIKU', 'ARCHIE_OPENCODE_MODEL_SONNET', 'ARCHIE_OPENCODE_MODEL_DEFAULT'];
+const ENV_KEYS = ['ARCHIE_OPENCODE_MODEL_HAIKU', 'ARCHIE_OPENCODE_MODEL_SONNET', 'ARCHIE_OPENCODE_MODEL_DEFAULT', 'ARCHIE_OPENCODE_MODEL_OPUS'];
 const saved: Record<string, string | undefined> = {};
 
 beforeEach(() => {
@@ -85,5 +86,31 @@ describe('opencodeFooterModel', () => {
   it('passes through a non-claude multi-segment route unchanged', () => {
     process.env.ARCHIE_OPENCODE_MODEL_DEFAULT = 'openrouter/openai/gpt-4o';
     expect(opencodeFooterModel()).toBe('openrouter/openai/gpt-4o');
+  });
+});
+
+function def(overrides: Partial<AgentDef> = {}): AgentDef {
+  return { id: 'a', key: 'k', role: 'R', expertise: 'E', pluginName: 'p', visibility: 'global', ...overrides } as AgentDef;
+}
+
+describe('resolveAgentOpencodeModel', () => {
+  it('routes a PM (no def.model) via the OPUS tier', () => {
+    process.env.ARCHIE_OPENCODE_MODEL_OPUS = 'openrouter/z-ai/glm-5.2';
+    expect(resolveAgentOpencodeModel(def({ isPm: true }))).toEqual({ providerID: 'openrouter', modelID: 'z-ai/glm-5.2' });
+  });
+
+  it('routes a specialist (no def.model) via the SONNET tier, stripping the [1m] suffix', () => {
+    process.env.ARCHIE_OPENCODE_MODEL_SONNET = 'openrouter/x/sonnet-route';
+    expect(resolveAgentOpencodeModel(def({ isPm: false }))).toEqual({ providerID: 'openrouter', modelID: 'x/sonnet-route' });
+  });
+
+  it('routes an explicit def.model alias via its tier', () => {
+    process.env.ARCHIE_OPENCODE_MODEL_HAIKU = 'anthropic/claude-haiku-4-5';
+    expect(resolveAgentOpencodeModel(def({ model: 'haiku' as any }))).toEqual({ providerID: 'anthropic', modelID: 'claude-haiku-4-5' });
+  });
+
+  it('falls back to the DEFAULT tier when the agent tier is unset', () => {
+    process.env.ARCHIE_OPENCODE_MODEL_DEFAULT = 'openrouter/z-ai/glm-5.2';
+    expect(resolveAgentOpencodeModel(def({ isPm: false }))).toEqual({ providerID: 'openrouter', modelID: 'z-ai/glm-5.2' });
   });
 });
