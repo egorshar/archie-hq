@@ -4,14 +4,16 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 // `vi.fn()` referenced inside one throws "Cannot access before initialization"
 // under this vitest version, so the mock fns are created inside vi.hoisted
 // (same pattern as llm-one-shot.test.ts).
-const { getOpencodeClient, registrySet, registryDelete, registryGet } = vi.hoisted(() => ({
+const { getOpencodeClient, closeOpencodeBridge, registrySet, registryDelete, registryGet } = vi.hoisted(() => ({
   getOpencodeClient: vi.fn(),
+  closeOpencodeBridge: vi.fn(async () => {}),
   registrySet: vi.fn(),
   registryDelete: vi.fn(),
   registryGet: vi.fn(),
 }));
 vi.mock('../server.js', () => ({
   getOpencodeClient,
+  closeOpencodeBridge,
   concatPromptText: (res: any) => {
     const parts = res?.data?.parts ?? [];
     const t = parts.filter((p: any) => p?.type === 'text').map((p: any) => p.text).join('');
@@ -114,6 +116,12 @@ describe('OpencodeRuntime.spawn', () => {
     await tick();
 
     expect(task.updateAgentState).toHaveBeenCalledWith('pm', false);
+  });
+
+  it('shutdown() tears down the embedded server + bridge via closeOpencodeBridge', async () => {
+    closeOpencodeBridge.mockClear();
+    await new OpencodeRuntime().shutdown();
+    expect(closeOpencodeBridge).toHaveBeenCalledTimes(1);
   });
 
   it('registers the created session in the bridge registry as {task, agent}', async () => {

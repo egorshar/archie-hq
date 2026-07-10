@@ -43,8 +43,7 @@ import { recoverActiveTasks } from './tasks/recovery.js';
 import { initEventPersistence } from './tasks/persistence.js';
 import { initReminderScheduler } from './system/reminder-scheduler.js';
 import { initMemory } from './memory/index.js';
-import { assertBackendConfig, getBackendMatrix, resolveRepoHostKind, getGitLabHost } from './system/backends.js';
-import { closeOpencodeBridge } from './runtime/opencode/server.js';
+import { assertBackendConfig, getBackendMatrix, resolveRepoHostKind, getGitLabHost, getAgentRuntime } from './system/backends.js';
 
 /**
  * Application configuration
@@ -299,13 +298,14 @@ async function main(): Promise<void> {
         }
       }
       server.close();
-      // Terminate the embedded opencode serve child + bridge (no-op under the
-      // Claude runtime / if it never booted). Without this the serve child is
-      // orphaned on every restart, leaking one process per dev reload.
+      // Release runtime-held resources via the AgentRuntime seam, so index.ts
+      // stays runtime-agnostic. The opencode runtime tears down its embedded
+      // serve child + bridge (no-op if never booted); the Claude runtime has no
+      // shutdown hook (optional method → undefined).
       try {
-        await closeOpencodeBridge();
+        await getAgentRuntime().shutdown?.();
       } catch (err) {
-        logger.error('index', 'Error closing opencode bridge', err);
+        logger.error('index', 'Error during runtime shutdown', err);
       }
       logger.plain('Server closed');
       process.exit(0);

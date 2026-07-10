@@ -18,4 +18,11 @@ export interface AgentRuntime {
    * runtime-specific process launch.
    */
   spawn(agent: Agent, task: Task): Promise<void>;
+  /**
+   * Release any process-global resources the runtime holds (e.g. an embedded
+   * server child + bridge). Called once from the process shutdown path
+   * (SIGINT/SIGTERM). Optional: a runtime with nothing to release (the Claude
+   * SDK) omits it, so callers invoke it as `getAgentRuntime().shutdown?.()`.
+   */
+  shutdown?(): Promise<void>;
 }

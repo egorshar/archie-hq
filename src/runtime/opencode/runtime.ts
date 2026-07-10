@@ -15,7 +15,7 @@ import type { Agent } from '../../agents/agent.js';
 import type { Task } from '../../tasks/task.js';
 import { prepareAgentContext } from '../../agents/spawn.js';
 import { logger } from '../../system/logger.js';
-import { getOpencodeClient, sharedRegistry, type OpencodeClient } from './server.js';
+import { getOpencodeClient, closeOpencodeBridge, sharedRegistry, type OpencodeClient } from './server.js';
 import { buildToolAllowlist } from './tool-allowlist.js';
 import { turnCompletion } from './turn-completion.js';
 import { resolveAgentOpencodeModel } from './model.js';
@@ -147,6 +147,11 @@ export class OpencodeRuntime implements AgentRuntime {
 
   capabilities(): RuntimeCapabilities {
     return OPENCODE_RUNTIME_CAPABILITIES;
+  }
+
+  /** Tear down the embedded server + bridge on process shutdown (no-op if never booted). */
+  async shutdown(): Promise<void> {
+    await closeOpencodeBridge();
   }
 
   async spawn(agent: Agent, task: Task): Promise<void> {
