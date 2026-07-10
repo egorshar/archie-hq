@@ -58,6 +58,15 @@ let clientPromise: Promise<OpencodeClient> | null = null;
 let bridgeHandle: BridgeHandle | null = null;
 let eventConsumer: EventConsumerHandle | null = null;
 /**
+ * Set while `closeOpencodeBridge` is tearing down. Guards the shutdown-during-
+ * first-boot race: if SIGTERM lands while the initial `createOpencode` is still
+ * in flight, teardown finds `serverHandle`/`eventConsumer` still null and can't
+ * stop them — so when the boot resolves it must NOT re-establish them (that
+ * would re-orphan the very serve child this module closes). Reset on each fresh
+ * boot so a later `getOpencodeClient` re-boots cleanly.
+ */
+let shuttingDown = false;
+/**
  * Handle for the embedded `opencode serve` child process. `createOpencode`
  * returns `{ client, server: { url, close() } }`; keeping `server` is what lets
  * `closeOpencodeBridge` actually terminate the child on shutdown. Without it the
@@ -82,6 +91,7 @@ let serverHandle: { close(): void } | null = null;
  */
 export function getOpencodeClient(): Promise<OpencodeClient> {
   if (!clientPromise) {
+    shuttingDown = false;
     clientPromise = (async () => {
       const bridge = await startBridgeServer(sharedRegistry);
       bridgeHandle = bridge;
@@ -102,6 +112,16 @@ export function getOpencodeClient(): Promise<OpencodeClient> {
             mcp,
           },
         });
+        if (shuttingDown) {
+          // Teardown ran while this boot was in flight — close the just-spawned
+          // child instead of re-establishing it (else it outlives shutdown).
+          try {
+            r.server.close();
+          } catch {
+            // best-effort
+          }
+          throw new Error('opencode server boot aborted during shutdown');
+        }
         serverHandle = r.server;
         eventConsumer = startEventConsumer(r.client, sharedRegistry);
         return r.client;
@@ -126,6 +146,7 @@ export function getOpencodeClient(): Promise<OpencodeClient> {
  * cached client promise so a later `getOpencodeClient` re-boots cleanly.
  */
 export async function closeOpencodeBridge(): Promise<void> {
+  shuttingDown = true;
   if (eventConsumer) {
     eventConsumer.stop();
     eventConsumer = null;

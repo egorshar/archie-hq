@@ -143,6 +143,25 @@ describe('opencode server singleton', () => {
     expect(serverClose).toHaveBeenCalledTimes(1);
   });
 
+  it('closes the just-spawned serve child if shutdown runs during the first boot (no orphan)', async () => {
+    // Boot blocks in createOpencode; closeOpencodeBridge runs mid-flight.
+    const serverClose = vi.fn();
+    let resolveBoot: (v: { client: unknown; server: { close: () => void } }) => void = () => {};
+    createOpencode.mockReturnValue(new Promise((res) => { resolveBoot = res; }));
+    const { getOpencodeClient, closeOpencodeBridge } = await import('../server.js');
+
+    const bootPromise = getOpencodeClient().catch((e) => e);
+    // Let the bridge start + createOpencode be awaited, then tear down.
+    await new Promise((r) => setImmediate(r));
+    await closeOpencodeBridge();
+    // Now the in-flight boot resolves — it must close the child, not keep it.
+    resolveBoot({ client: {}, server: { close: serverClose } });
+    const result = await bootPromise;
+
+    expect(serverClose).toHaveBeenCalledTimes(1);
+    expect(result).toBeInstanceOf(Error);
+  });
+
   it('closeOpencodeBridge clears the cached client so a later call re-boots the server', async () => {
     createOpencode.mockResolvedValue({ client: { session: {} }, server: { close: vi.fn() } });
     const { getOpencodeClient, closeOpencodeBridge } = await import('../server.js');
