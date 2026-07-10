@@ -109,12 +109,22 @@ export function idleDecision(
 
 export function scheduleIdleCheck(task: Task): void {
   setTimeout(async () => {
-    if (getIsShuttingDown()) return;
-    const action = idleDecision(task);
-    if (action === 'complete') {
-      await task.complete();
-    } else if (action === 'recover') {
-      await triggerRecovery(task);
+    // Guard the whole callback: this runs detached from any request, so an
+    // unhandled rejection here (e.g. a spawn failure during triggerRecovery)
+    // becomes an unhandledRejection that crashes the daemon. A failed
+    // idle-check for one task must never take down the process — log and move
+    // on; the next event or idle tick re-arms recovery. (2026-07-10: a dangling
+    // skill symlink made a recovery re-spawn throw EEXIST uncaught here.)
+    try {
+      if (getIsShuttingDown()) return;
+      const action = idleDecision(task);
+      if (action === 'complete') {
+        await task.complete();
+      } else if (action === 'recover') {
+        await triggerRecovery(task);
+      }
+    } catch (err) {
+      logger.error('recovery', `idle-check failed for task ${task.taskId}`, err as Error);
     }
   }, 3000);
 }
