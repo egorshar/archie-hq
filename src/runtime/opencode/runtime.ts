@@ -198,6 +198,10 @@ export class OpencodeRuntime implements AgentRuntime {
           }
           const text = msg.from ? `[From ${msg.from}]: ${msg.content}` : msg.content;
 
+          // Fresh per-turn state: report_completion drops a redundant trailing
+          // message only when a post_to_user already fired in THIS turn.
+          agent.postedToUserThisTurn = false;
+
           // client.session.prompt is single-argument: Options<SessionPromptData>
           // extends Omit<RequestInit, 'body'|'headers'|'method'> & SessionPromptData,
           // so `signal` merges into the same object as `path`/`body` (the

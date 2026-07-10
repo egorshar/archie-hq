@@ -17,7 +17,7 @@ import type { AgentName, FindingType, AttachedRepo } from '../types/task.js';
 import type { Task } from '../tasks/task.js';
 import type { Agent } from './agent.js';
 import { getVisiblePeerIdsForSender, findAgentDefsContainingRepo, synthesizeDynamicAgentDef, isAutoMergeRepo } from './registry.js';
-import { getRepoHost } from '../system/backends.js';
+import { getRepoHost, getAgentRuntime } from '../system/backends.js';
 import { parseCheckRef } from '../connectors/github/client.js';
 import { parseGitLabCheckRef } from '../connectors/gitlab/status-map.js';
 import { gitExec } from '../connectors/github/repo-clone.js';
@@ -293,6 +293,9 @@ export async function postToUserHandler(agent: Agent, task: Task, args: PostToUs
   } catch (e) {
     return ok(formatSlackSendError(e));
   }
+  // Record that a user-facing message went out this turn, so report_completion
+  // (opencode only) can drop a redundant trailing confirmation.
+  agent.postedToUserThisTurn = true;
   if (newChannelKey) {
     return ok(`Message posted. New channel linked: ${newChannelKey} (saved in task metadata for future use)`);
   }
@@ -543,7 +546,18 @@ export async function reportCompletionHandler(agent: Agent, task: Task, args: Re
   if (task.completionIntent) {
     return ok('Completion already recorded. End your turn.');
   }
-  if (args.message) {
+  // opencode-only backstop for the double-post symptom: a weaker model sometimes
+  // posts its answer via post_to_user and THEN passes a redundant "task
+  // completed" summary here (observed live in the P2-C smoke; the opencode
+  // prompt guidance reduces but doesn't fully eliminate it). When a user-facing
+  // message already went out this turn, drop this one and finish silently.
+  // Claude never exhibits this and keeps its exact behavior (gate is false).
+  const dropRedundantMessage =
+    !!args.message && agent.postedToUserThisTurn && getAgentRuntime().kind === 'opencode';
+  if (dropRedundantMessage) {
+    logger.agentAction(agentName, 'Skipping redundant completion message (already posted this turn)', '');
+  }
+  if (args.message && !dropRedundantMessage) {
     if (Object.keys(task.metadata.channels).length === 0) {
       return ok(
         'Cannot post a completion message — no channel linked. ' +
@@ -578,7 +592,7 @@ export async function reportCompletionHandler(agent: Agent, task: Task, args: Re
   // its turn now: that's what lets the system reach quiescence and park.
   task.setCompletionIntent();
   return ok(
-    args.message
+    args.message && !dropRedundantMessage
       ? 'Message posted. Nothing left to do — end your turn.'
       : 'Completion recorded. Nothing left to do — end your turn.'
   );
