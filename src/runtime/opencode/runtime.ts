@@ -14,6 +14,7 @@ import type { Task } from '../../tasks/task.js';
 import { prepareAgentContext } from '../../agents/spawn.js';
 import { logger } from '../../system/logger.js';
 import { getOpencodeClient, concatPromptText, sharedRegistry, type OpencodeClient } from './server.js';
+import { buildToolAllowlist } from './tool-allowlist.js';
 
 const SESSION_NOT_FOUND_RE = /session.*not.*found|not.*found.*session/i;
 
@@ -76,7 +77,7 @@ export async function promptWithRecovery(args: {
   task: Task;
   sessionId: string;
   readOnly: boolean;
-  body: { parts: { type: 'text'; text: string }[]; system: string };
+  body: { parts: { type: 'text'; text: string }[]; system: string; tools?: Record<string, boolean> };
   signal: AbortSignal;
 }): Promise<{ res: unknown; sessionId: string }> {
   const { client, agent, task, readOnly, body, signal } = args;
@@ -208,10 +209,14 @@ export class OpencodeRuntime implements AgentRuntime {
           // `@hey-api` fetch-client convention) rather than a second argument.
           // No `body.model` here — opencode ignores it (spike.md §5); the model
           // is set once, server-wide, via `config.model` in server.ts.
+          const toolAllow = buildToolAllowlist(agent);
+          const body = {
+            parts: [{ type: 'text' as const, text }],
+            system: systemPrompt,
+            ...(Object.keys(toolAllow).length > 0 ? { tools: toolAllow } : {}),
+          };
           const { res, sessionId: activeId } = await promptWithRecovery({
-            client, agent, task, sessionId, readOnly,
-            body: { parts: [{ type: 'text', text }], system: systemPrompt },
-            signal: abortController.signal,
+            client, agent, task, sessionId, readOnly, body, signal: abortController.signal,
           });
           sessionId = activeId;
 
