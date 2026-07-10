@@ -63,9 +63,22 @@ import { isPmAgent, isRepoAgent } from '../../../types/agent.js';
 import type { SessionRegistry, BridgeSession } from './registry.js';
 import { logger } from '../../../system/logger.js';
 
+/** Verified identity a per-child bearer token asserts: which agent's serve
+ * child is calling. Minted per `opencode serve` child by the pool (P3a §2/A4);
+ * revoked on child close. Rationale: tool calls gain a verified caller
+ * identity for logs/knowledge attribution, and a compromised child cannot
+ * invoke bridge tools AS ANOTHER AGENT — a prerequisite for the per-child OS
+ * sandbox (P3b). */
+export interface ChildIdentity { taskId: string; agentId: string; }
+
 export interface BridgeHandle {
   url: string;
+  /** Process-internal token. Full access, no child identity — used by tests and
+   * Archie-internal callers only; after P3a it is never written to any child's
+   * disk (each child's plugin embeds its own minted token instead). */
   token: string;
+  mintChildToken(identity: ChildIdentity): string;
+  revokeChildToken(token: string): void;
   close(): Promise<void>;
 }
 
@@ -302,15 +315,25 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(payload);
 }
 
-/** Constant-time bearer-token check. Never logs the token or the header value. */
-function isAuthorized(req: IncomingMessage, token: string): boolean {
+type AuthResult = { kind: 'process' } | { kind: 'child'; identity: ChildIdentity } | null;
+
+/** Constant-time bearer-token check across the process token and every live
+ * child token. Returns the caller's identity kind, or null when unauthorized.
+ * Iterates child tokens with timingSafeEqual (small N — one per live child);
+ * never logs the token or the header value. */
+function authorize(req: IncomingMessage, processToken: string, childTokens: Map<string, ChildIdentity>): AuthResult {
   const header = req.headers['authorization'];
-  if (typeof header !== 'string' || !header.startsWith('Bearer ')) return false;
-  const presented = header.slice('Bearer '.length);
-  const presentedBuf = Buffer.from(presented, 'utf8');
-  const tokenBuf = Buffer.from(token, 'utf8');
-  if (presentedBuf.length !== tokenBuf.length) return false;
-  return timingSafeEqual(presentedBuf, tokenBuf);
+  if (typeof header !== 'string' || !header.startsWith('Bearer ')) return null;
+  const presented = Buffer.from(header.slice('Bearer '.length), 'utf8');
+  const matches = (candidate: string): boolean => {
+    const buf = Buffer.from(candidate, 'utf8');
+    return buf.length === presented.length && timingSafeEqual(buf, presented);
+  };
+  if (matches(processToken)) return { kind: 'process' };
+  for (const [candidate, identity] of childTokens) {
+    if (matches(candidate)) return { kind: 'child', identity };
+  }
+  return null;
 }
 
 /**
@@ -426,6 +449,7 @@ async function handleToolRequest(
   req: IncomingMessage,
   res: ServerResponse,
   registry: SessionRegistry,
+  auth: { kind: 'process' } | { kind: 'child'; identity: ChildIdentity },
 ): Promise<void> {
   let parsed: unknown;
   try {
@@ -456,6 +480,22 @@ async function handleToolRequest(
   const session = registry.get(sessionId);
   if (!session) {
     sendJson(res, 200, { ok: false, error: `unknown session: ${sessionId}` });
+    return;
+  }
+
+  // Per-child token cross-check (A4): /tool dispatch still resolves the
+  // session's {task, agent}; the token verifies the caller IS that agent's
+  // child. A mismatched token means a child is trying to act as another agent
+  // — reject and warn (never log the token itself).
+  if (
+    auth.kind === 'child' &&
+    (auth.identity.taskId !== session.task.taskId || auth.identity.agentId !== session.agent.def.id)
+  ) {
+    logger.warn(
+      'opencode',
+      `bridge: child token for ${auth.identity.taskId}:${auth.identity.agentId} used on a session belonging to ${session.task.taskId}:${session.agent.def.id} — rejected`,
+    );
+    sendJson(res, 200, { ok: false, error: 'forbidden: token does not identify this session\'s agent' });
     return;
   }
 
@@ -539,34 +579,27 @@ function handlePolicyRequest(req: IncomingMessage, res: ServerResponse, registry
  */
 export function startBridgeServer(registry: SessionRegistry): Promise<BridgeHandle> {
   const token = randomBytes(32).toString('hex');
+  const childTokens = new Map<string, ChildIdentity>();
 
   return new Promise((resolve, reject) => {
     const server = createServer((req, res) => {
       void (async () => {
         try {
           const pathname = req.url ? new URL(req.url, 'http://127.0.0.1').pathname : '';
+          const auth = authorize(req, token, childTokens);
           if (req.method === 'GET' && pathname === '/tools') {
-            if (!isAuthorized(req, token)) {
-              sendJson(res, 401, { ok: false, error: 'unauthorized' });
-              return;
-            }
+            if (!auth) { sendJson(res, 401, { ok: false, error: 'unauthorized' }); return; }
             handleToolsList(res);
             return;
           }
           if (req.method === 'GET' && pathname === '/policy') {
-            if (!isAuthorized(req, token)) {
-              sendJson(res, 401, { ok: false, error: 'unauthorized' });
-              return;
-            }
+            if (!auth) { sendJson(res, 401, { ok: false, error: 'unauthorized' }); return; }
             handlePolicyRequest(req, res, registry);
             return;
           }
           if (req.method === 'POST' && pathname === '/tool') {
-            if (!isAuthorized(req, token)) {
-              sendJson(res, 401, { ok: false, error: 'unauthorized' });
-              return;
-            }
-            await handleToolRequest(req, res, registry);
+            if (!auth) { sendJson(res, 401, { ok: false, error: 'unauthorized' }); return; }
+            await handleToolRequest(req, res, registry, auth);
             return;
           }
           sendJson(res, 404, { ok: false, error: 'not found' });
@@ -588,7 +621,17 @@ export function startBridgeServer(registry: SessionRegistry): Promise<BridgeHand
         new Promise<void>((res, rej) => {
           server.close((err) => (err ? rej(err) : res()));
         });
-      resolve({ url, token, close });
+      resolve({
+        url,
+        token,
+        mintChildToken: (identity) => {
+          const t = randomBytes(32).toString('hex');
+          childTokens.set(t, identity);
+          return t;
+        },
+        revokeChildToken: (t) => { childTokens.delete(t); },
+        close,
+      });
     });
   });
 }
