@@ -10,13 +10,25 @@ import type { RuntimeCapabilities } from '../../ports/capabilities.js';
 import { CLAUDE_RUNTIME_CAPABILITIES } from '../../ports/capabilities.js';
 import type { Agent } from '../../agents/agent.js';
 import type { Task } from '../../tasks/task.js';
+import type { AgentDef } from '../../types/agent.js';
 import { spawnAgent } from '../../agents/spawn.js';
+import { resolveAgentModel } from '../../agents/model-label.js';
 
 export class ClaudeSdkRuntime implements AgentRuntime {
   readonly kind = 'claude' as const;
 
   capabilities(): RuntimeCapabilities {
     return CLAUDE_RUNTIME_CAPABILITIES;
+  }
+
+  /** The resolved alias (`opus` / `sonnet[1m]` / `def.model`) — never null. */
+  footerModelToken(def: AgentDef): string | null {
+    return resolveAgentModel(def);
+  }
+
+  /** Mirrors spawn's PM default when no agent has resolved a token yet. */
+  footerModelDefaultToken(): string | null {
+    return 'opus';
   }
 
   async spawn(agent: Agent, task: Task): Promise<void> {

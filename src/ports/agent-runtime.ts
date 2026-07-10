@@ -8,10 +8,26 @@
 import type { RuntimeCapabilities } from './capabilities.js';
 import type { Agent } from '../agents/agent.js';
 import type { Task } from '../tasks/task.js';
+import type { AgentDef } from '../types/agent.js';
 
 export interface AgentRuntime {
   readonly kind: 'claude' | 'opencode';
   capabilities(): RuntimeCapabilities;
+  /**
+   * Pre-beautify footer label token for a single agent — the message footer
+   * runs each token through `modelDisplayLabel`. Claude returns the resolved
+   * alias (`opus` / `sonnet[1m]`); opencode returns the agent's route trimmed to
+   * a beautify-ready id, or null when unresolved. Keeps the footer's runtime
+   * branch out of the Task class (the model label is the runtime's concern, so
+   * `task.ts` never imports a runtime module). Best-effort — must not throw.
+   */
+  footerModelToken(def: AgentDef): string | null;
+  /**
+   * Fallback footer token when no agent resolved one (e.g. before any agent
+   * spawns). Claude → `'opus'`; opencode → the server-default route, or null.
+   * Best-effort — must not throw.
+   */
+  footerModelDefaultToken(): string | null;
   /**
    * Spawn `agent` for `task`. Mutates `agent` (sets agent.sandbox, agent.handle).
    * Idempotency and crash-detection wiring remain in Agent.spawn(); this is the

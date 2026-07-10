@@ -10,9 +10,8 @@ import type { AgentName, SlackAuthor, SlackChannel, SlackThread, SlackReaction, 
 import { CLI_CHANNEL_KEY } from '../types/task.js';
 import type { AgentDef } from '../types/agent.js';
 import { isPmAgent, isRepoAgent } from '../types/agent.js';
-import { modelDisplayLabel, resolveAgentModel } from '../agents/model-label.js';
+import { modelDisplayLabel } from '../agents/model-label.js';
 import { getAgentRuntime } from '../system/backends.js';
-import { opencodeFooterModel, opencodeAgentRoute } from '../runtime/opencode/model.js';
 import { prCardFingerprint, prCardTitlePlain } from '../system/pr-card-format.js';
 import { getGitHubClient } from '../connectors/github/client.js';
 import { createKeyedLock } from '../system/keyed-lock.js';
@@ -675,34 +674,22 @@ export class Task {
    * As specialists join, the footer grows (e.g. `Opus 4.8 + Sonnet 4.6 (1M)`).
    */
   private collectModelsUsed(): string[] {
-    if (getAgentRuntime().kind === 'opencode') {
-      // Per-role parity: same agent set as the Claude branch (PM first, then each
-      // spawned agent), each mapped to its OWN opencode route, deduped in order.
-      const raw: string[] = [];
-      const pmDef = this.team.find((d) => isPmAgent(d));
-      if (pmDef) { const r = opencodeAgentRoute(pmDef); if (r) raw.push(r); }
-      for (const a of this.agentProcesses.values()) { const r = opencodeAgentRoute(a.def); if (r) raw.push(r); }
-      const seen = new Set<string>();
-      const out: string[] = [];
-      for (const m of raw) { if (seen.has(m)) continue; seen.add(m); out.push(m); }
-      if (out.length > 0) return out;
-      // Nothing resolved (e.g. no agent context yet) → the server default route.
-      const route = opencodeFooterModel();
-      return route ? [route] : [];
-    }
+    // Runtime-agnostic: PM first, then each spawned agent, mapping each def to
+    // the active runtime's pre-beautify footer token (skipping unresolved ones)
+    // and deduping in order. The runtime owns HOW a model is labelled (Claude
+    // alias vs opencode route) — this method never imports a runtime module.
+    const runtime = getAgentRuntime();
     const raw: string[] = [];
     const pmDef = this.team.find((d) => isPmAgent(d));
-    if (pmDef) raw.push(resolveAgentModel(pmDef));
-    for (const a of this.agentProcesses.values()) raw.push(resolveAgentModel(a.def));
-    if (raw.length === 0) raw.push('opus');
+    if (pmDef) { const t = runtime.footerModelToken(pmDef); if (t) raw.push(t); }
+    for (const a of this.agentProcesses.values()) { const t = runtime.footerModelToken(a.def); if (t) raw.push(t); }
     const seen = new Set<string>();
     const out: string[] = [];
-    for (const m of raw) {
-      if (seen.has(m)) continue;
-      seen.add(m);
-      out.push(m);
-    }
-    return out;
+    for (const m of raw) { if (seen.has(m)) continue; seen.add(m); out.push(m); }
+    if (out.length > 0) return out;
+    // Nothing resolved (e.g. before any agent spawns) → the runtime's default.
+    const fallback = runtime.footerModelDefaultToken();
+    return fallback ? [fallback] : [];
   }
 
   // ---- PR cards ----------------------------------------------------------

@@ -18,7 +18,8 @@ import { logger } from '../../system/logger.js';
 import { getOpencodeClient, closeOpencodeBridge, restageOpencodeSkills, sharedRegistry, type OpencodeClient } from './server.js';
 import { buildToolAllowlist } from './tool-allowlist.js';
 import { turnCompletion } from './turn-completion.js';
-import { resolveAgentOpencodeModel } from './model.js';
+import { resolveAgentOpencodeModel, opencodeAgentRoute, opencodeFooterModel } from './model.js';
+import type { AgentDef } from '../../types/agent.js';
 
 const SESSION_NOT_FOUND_RE = /session.*not.*found|not.*found.*session/i;
 
@@ -147,6 +148,16 @@ export class OpencodeRuntime implements AgentRuntime {
 
   capabilities(): RuntimeCapabilities {
     return OPENCODE_RUNTIME_CAPABILITIES;
+  }
+
+  /** The agent's opencode route as a beautify-ready id, or null when unresolved. */
+  footerModelToken(def: AgentDef): string | null {
+    return opencodeAgentRoute(def);
+  }
+
+  /** The server-global default route, or null when unresolved. */
+  footerModelDefaultToken(): string | null {
+    return opencodeFooterModel();
   }
 
   /** Tear down the embedded server + bridge on process shutdown (no-op if never booted). */
