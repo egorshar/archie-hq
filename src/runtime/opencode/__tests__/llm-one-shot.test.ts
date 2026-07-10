@@ -116,6 +116,40 @@ describe('OpencodeLlmOneShot.text', () => {
     await oneShot.text({ model: 'haiku', prompt: 'b' });
     expect(startEmbeddedServerMock).toHaveBeenCalledTimes(2);
   });
+
+  it('aborts an in-flight boot if close() lands mid-boot, even after a newer boot has since started (generation token)', async () => {
+    sessionPrompt.mockResolvedValue({ data: { info: {}, parts: [{ type: 'text', text: 'ok' }] } });
+    const oneShot = new OpencodeLlmOneShot();
+
+    let resolveBootA!: (server: typeof fakeServer) => void;
+    const bootADeferred = new Promise<typeof fakeServer>((resolve) => { resolveBootA = resolve; });
+    const serverA = { ...fakeServer, close: vi.fn() };
+    const serverB = { ...fakeServer, close: vi.fn() };
+    startEmbeddedServerMock.mockImplementationOnce(async () => bootADeferred);
+    startEmbeddedServerMock.mockImplementationOnce(async () => serverB);
+
+    // Boot A starts and blocks inside startEmbeddedServer (deferred, not yet resolved).
+    const bootAPromise = oneShot.text({ model: 'haiku', prompt: 'a' });
+
+    // Reviewer's interleaving: close() runs (and bumps the generation token) while
+    // boot A is still awaiting startEmbeddedServer — do NOT await close() yet.
+    const closePromise = closeOneShotServe();
+
+    // A newer caller (boot B) starts after close() has nulled servePromise; its
+    // startEmbeddedServer resolves immediately, so boot B completes in full.
+    await oneShot.text({ model: 'haiku', prompt: 'b' });
+    expect(startEmbeddedServerMock).toHaveBeenCalledTimes(2);
+
+    // Now let boot A's startEmbeddedServer resolve — it must self-abort instead of
+    // handing its (now-stale) server to caller A, because the generation moved on
+    // under it while it was still spawning.
+    resolveBootA(serverA);
+    await expect(bootAPromise).resolves.toBeNull();
+    await closePromise;
+
+    expect(serverA.close).toHaveBeenCalledTimes(1); // boot A closed its own stale server
+    expect(serverB.close).not.toHaveBeenCalled(); // boot B's server is untouched
+  });
 });
 
 describe('OpencodeLlmOneShot.json', () => {

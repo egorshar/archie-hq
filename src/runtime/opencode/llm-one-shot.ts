@@ -28,11 +28,14 @@ import { startEmbeddedServer, prepareServeRoot, SERVE_PERMISSION, type OpencodeC
  * the DEFAULT fallback); callers still pass body.model per request.
  */
 let servePromise: Promise<EmbeddedServer> | null = null;
-let shuttingDown = false;
+// Per-boot generation token: a close() that happens WHILE a boot is in flight
+// bumps this, so that boot's post-spawn guard always sees a mismatch and
+// self-aborts — even if a later boot has since started and reset servePromise.
+let bootGeneration = 0;
 
 function getOneShotClient(): Promise<OpencodeClient> {
   if (!servePromise) {
-    shuttingDown = false;
+    const myGeneration = bootGeneration;
     servePromise = (async () => {
       const root = join(WORKDIR, 'opencode-server', 'one-shot');
       await prepareServeRoot(root);
@@ -41,7 +44,7 @@ function getOneShotClient(): Promise<OpencodeClient> {
         cwd: root,
         config: { model: `${model.providerID}/${model.modelID}`, permission: SERVE_PERMISSION },
       });
-      if (shuttingDown) {
+      if (bootGeneration !== myGeneration) {
         try { server.close(); } catch { /* best-effort */ }
         throw new Error('one-shot serve boot aborted during shutdown');
       }
@@ -56,7 +59,7 @@ function getOneShotClient(): Promise<OpencodeClient> {
 
 /** Tear down the utility serve (idempotent; no-op if never booted). */
 export async function closeOneShotServe(): Promise<void> {
-  shuttingDown = true;
+  bootGeneration++;
   if (!servePromise) return;
   const p = servePromise;
   servePromise = null;
