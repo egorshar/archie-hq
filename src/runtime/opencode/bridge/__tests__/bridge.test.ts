@@ -4,6 +4,14 @@ import { SessionRegistry } from '../registry.js';
 import { startBridgeServer, RO_BUILTIN_BLOCK, type BridgeHandle } from '../server.js';
 import { getSharedPath, getTaskPath } from '../../../../tasks/persistence.js';
 
+// find_slack_user (a PM-only comms tool exercised below) calls the real Slack
+// API via findSlackUsers unless stubbed — there's no bot token in test env, so
+// stub just that lookup and keep every other export of the module real.
+vi.mock('../../../../connectors/slack/client.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../../connectors/slack/client.js')>();
+  return { ...actual, findSlackUsers: vi.fn().mockResolvedValue([]) };
+});
+
 function fakeSession() {
   const posted: any[] = [];
   const task: any = { taskId: 't1' };
@@ -243,6 +251,66 @@ describe('bridge server', () => {
       expect(body.some((t: any) => t.name === 'push_branch')).toBe(true);
       expect(body.some((t: any) => t.name === 'list_branches')).toBe(true);
       expect(body.some((t: any) => t.name === 'get_pr_status')).toBe(true);
+    });
+  });
+
+  describe('comms/orchestration/scheduling — PM-only scoping', () => {
+    // A minimal non-PM (repo agent) session: `def.isPm` unset/false.
+    function fakeNonPmSession() {
+      const task: any = { taskId: 't1', metadata: { repositories: {} } };
+      const agent: any = { def: { id: 'repo-agent', repo: { primary: 'org/repo', repos: [{ github: 'org/repo' }] } } };
+      return { task, agent };
+    }
+
+    // A minimal PM session: `def.isPm: true`.
+    function fakePmSession() {
+      const task: any = {
+        taskId: 't1',
+        metadata: { channels: {}, reminder: undefined },
+        getAgentStatus: () => [],
+      };
+      const agent: any = { def: { id: 'pm-agent', isPm: true } };
+      return { task, agent };
+    }
+
+    it.each(['launch_task', 'set_reminder', 'find_slack_user'])(
+      'rejects %s for a non-PM session (unknown tool, not permitted)',
+      async (toolName) => {
+        const { task, agent } = fakeNonPmSession();
+        registry.set('non-pm', { task, agent, readOnly: false });
+        const res = await fetch(`${handle.url}/tool`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', authorization: `Bearer ${handle.token}` },
+          body: JSON.stringify({ sessionId: 'non-pm', tool: toolName, args: {} }),
+        });
+        const body: any = await res.json();
+        expect(body.ok).toBe(false);
+        expect(body.error).toMatch(/unknown tool|not permitted/i);
+      },
+    );
+
+    it.each(['launch_task', 'set_reminder', 'find_slack_user'])(
+      'dispatches %s for a PM session (reaches the real handler)',
+      async (toolName) => {
+        const { task, agent } = fakePmSession();
+        registry.set('pm', { task, agent, readOnly: false });
+        const res = await fetch(`${handle.url}/tool`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', authorization: `Bearer ${handle.token}` },
+          body: JSON.stringify({ sessionId: 'pm', tool: toolName, args: toolName === 'set_reminder' ? { datetime: '2099-01-01T00:00:00Z', reason: 'x' } : { query: 'x' } }),
+        });
+        const body: any = await res.json();
+        // Reached the real handler (not pre-dispatch rejected as unknown).
+        expect(body.ok).toBe(true);
+      },
+    );
+
+    it('includes PM-only tool names in the /tools manifest even though it is not session-scoped', async () => {
+      const res = await fetch(`${handle.url}/tools`, { headers: { authorization: `Bearer ${handle.token}` } });
+      const body: any = await res.json();
+      expect(body.some((t: any) => t.name === 'launch_task')).toBe(true);
+      expect(body.some((t: any) => t.name === 'set_reminder')).toBe(true);
+      expect(body.some((t: any) => t.name === 'find_slack_user')).toBe(true);
     });
   });
 

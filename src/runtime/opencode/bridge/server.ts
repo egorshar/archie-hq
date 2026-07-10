@@ -43,6 +43,12 @@ import {
   createRepoToolHandlers,
   WRITE_REPO_TOOLS,
   REPO_TOOL_SPECS,
+  createCommsHandlers,
+  createOrchestrationHandlers,
+  createSchedulingHandlers,
+  COMMS_TOOL_SPECS,
+  ORCHESTRATION_TOOL_SPECS,
+  SCHEDULING_TOOL_SPECS,
   type PostToUserArgs,
   type ReportCompletionArgs,
   type RequestEditModeArgs,
@@ -51,6 +57,7 @@ import {
 import { createResearchToolHandler } from '../../../mcp/research-tools.js';
 import type { Agent } from '../../../agents/agent.js';
 import type { Task } from '../../../tasks/task.js';
+import { isPmAgent } from '../../../types/agent.js';
 import type { SessionRegistry, BridgeSession } from './registry.js';
 import { logger } from '../../../system/logger.js';
 
@@ -147,6 +154,24 @@ function zodFieldToArgSpec(field: z.ZodTypeAny): ArgSpec {
   return optional ? { type, optional: true } : { type };
 }
 
+/** Common shape of the `*_TOOL_SPECS` arrays exported from `tools.ts` (repo, comms, orchestration, scheduling). */
+interface NamedToolSpec {
+  name: string;
+  description: string;
+  schema: Record<string, z.ZodTypeAny>;
+}
+
+/** Derive `ToolDescriptor`s from a `*_TOOL_SPECS` array — shared by every lazy cache below. */
+function specsToDescriptors(specs: readonly NamedToolSpec[]): ToolDescriptor[] {
+  return specs.map((spec) => ({
+    name: spec.name,
+    description: spec.description,
+    argsSchema: Object.fromEntries(
+      Object.entries(spec.schema).map(([key, zodType]) => [key, zodFieldToArgSpec(zodType)]),
+    ),
+  }));
+}
+
 // Repo-tool descriptors, derived from the same `REPO_TOOL_SPECS` the Claude
 // SDK MCP server and the opencode bridge dispatch both use — single source of
 // truth, no hand-maintained second copy that can drift. The `/tools` manifest
@@ -160,19 +185,38 @@ function zodFieldToArgSpec(field: z.ZodTypeAny): ArgSpec {
 // is not guaranteed to be populated yet at the moment this module first
 // evaluates. Deferring to first call (and caching) sidesteps the ordering
 // hazard entirely — by the time any HTTP request is handled, both modules
-// have fully loaded.
+// have fully loaded. The comms/orchestration/scheduling caches below apply the
+// same lazy-and-cache treatment for the same reason.
 let repoToolDescriptorsCache: ToolDescriptor[] | null = null;
 function getRepoToolDescriptors(): ToolDescriptor[] {
-  if (!repoToolDescriptorsCache) {
-    repoToolDescriptorsCache = REPO_TOOL_SPECS.map((spec) => ({
-      name: spec.name,
-      description: spec.description,
-      argsSchema: Object.fromEntries(
-        Object.entries(spec.schema).map(([key, zodType]) => [key, zodFieldToArgSpec(zodType)]),
-      ),
-    }));
-  }
+  if (!repoToolDescriptorsCache) repoToolDescriptorsCache = specsToDescriptors(REPO_TOOL_SPECS);
   return repoToolDescriptorsCache;
+}
+
+// PM-only tool descriptors (comms/orchestration/scheduling), derived from the
+// same `*_TOOL_SPECS` the Claude SDK MCP servers use. NOTE: `/tools` is NOT
+// session-scoped (see file header) — it always advertises these to every
+// session, PM or not. Enforcement that only the PM can actually invoke them
+// lives entirely in `buildSessionHandlers` below (dispatch), which only
+// registers them when `isPmAgent(session.agent.def)` — a non-PM session
+// calling one gets "unknown tool (not permitted)" from `handleToolRequest`,
+// the same enforcement model as the RO write-rejection above.
+let commsToolDescriptorsCache: ToolDescriptor[] | null = null;
+function getCommsToolDescriptors(): ToolDescriptor[] {
+  if (!commsToolDescriptorsCache) commsToolDescriptorsCache = specsToDescriptors(COMMS_TOOL_SPECS);
+  return commsToolDescriptorsCache;
+}
+
+let orchestrationToolDescriptorsCache: ToolDescriptor[] | null = null;
+function getOrchestrationToolDescriptors(): ToolDescriptor[] {
+  if (!orchestrationToolDescriptorsCache) orchestrationToolDescriptorsCache = specsToDescriptors(ORCHESTRATION_TOOL_SPECS);
+  return orchestrationToolDescriptorsCache;
+}
+
+let schedulingToolDescriptorsCache: ToolDescriptor[] | null = null;
+function getSchedulingToolDescriptors(): ToolDescriptor[] {
+  if (!schedulingToolDescriptorsCache) schedulingToolDescriptorsCache = specsToDescriptors(SCHEDULING_TOOL_SPECS);
+  return schedulingToolDescriptorsCache;
 }
 
 /**
@@ -255,7 +299,11 @@ type BoundHandler = (args: unknown) => Promise<ToolResult>;
  * control-tool handlers plus `web_research` (all bound to this session's
  * `agent`/`task`), plus the session's repo-tool handlers
  * (`createRepoToolHandlers`, already bound to `agent`/`task` — same handler
- * bodies the Claude-path SDK MCP server uses).
+ * bodies the Claude-path SDK MCP server uses), plus — ONLY for a PM session —
+ * the comms/orchestration/scheduling handlers (`createCommsHandlers` /
+ * `createOrchestrationHandlers` / `createSchedulingHandlers`, same PM-only
+ * scoping `spawn.ts` applies to the Claude-path SDK servers via
+ * `isPmAgent(def)`).
  * A `Map`, never a plain object, for the same prototype-fallthrough reason as
  * `TOOL_WHITELIST` above: `Object.keys(repoHandlers)` only ever yields the
  * fixed, own, enumerable tool names `createRepoToolHandlers` assigned, so
@@ -276,6 +324,20 @@ function buildSessionHandlers(session: BridgeSession): Map<string, BoundHandler>
   const repoHandlers = createRepoToolHandlers(session.agent, session.task);
   for (const name of Object.keys(repoHandlers)) {
     handlers.set(name, repoHandlers[name]!);
+  }
+  // PM-only tools. The `/tools` manifest (below) is NOT session-scoped, so it
+  // advertises these to every session regardless of role — this dispatch map
+  // is what actually enforces the PM-only restriction: a non-PM session's map
+  // never gets these keys, so a non-PM calling e.g. `launch_task` falls
+  // through to the "unknown tool (not permitted)" rejection in
+  // `handleToolRequest`, exactly like the RO write-rejection above.
+  if (isPmAgent(session.agent.def)) {
+    const commsHandlers = createCommsHandlers(session.agent, session.task);
+    for (const name of Object.keys(commsHandlers)) handlers.set(name, commsHandlers[name]!);
+    const orchestrationHandlers = createOrchestrationHandlers(session.agent, session.task);
+    for (const name of Object.keys(orchestrationHandlers)) handlers.set(name, orchestrationHandlers[name]!);
+    const schedulingHandlers = createSchedulingHandlers(session.agent, session.task);
+    for (const name of Object.keys(schedulingHandlers)) handlers.set(name, schedulingHandlers[name]!);
   }
   return handlers;
 }
@@ -341,7 +403,18 @@ async function handleToolRequest(
 }
 
 function handleToolsList(res: ServerResponse): void {
-  sendJson(res, 200, [...TOOL_DESCRIPTORS, ...getRepoToolDescriptors()]);
+  // Not session-scoped (see file header + buildSessionHandlers comment above)
+  // — this always lists the PM-only comms/orchestration/scheduling tools
+  // alongside everything else, even for a request on behalf of a non-PM
+  // session. Dispatch (`buildSessionHandlers`) is where the PM-only
+  // restriction is actually enforced.
+  sendJson(res, 200, [
+    ...TOOL_DESCRIPTORS,
+    ...getRepoToolDescriptors(),
+    ...getCommsToolDescriptors(),
+    ...getOrchestrationToolDescriptors(),
+    ...getSchedulingToolDescriptors(),
+  ]);
 }
 
 /**

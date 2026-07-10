@@ -318,87 +318,123 @@ function createPostToUserTool(agent: Agent, task: Task) {
   );
 }
 
-function createPostFilesToUserTool(agent: Agent, task: Task) {
-  return tool(
-    'post_files_to_user',
-    'Upload one or more files as Slack file attachments to the user. Files must point to absolute paths inside your readable sandbox (e.g. shared/artifacts/...). ' +
-    'Without `channel`, attaches to the default channel. With `channel`, attaches to an already-linked thread. ' +
-    'This tool only attaches files to existing threads — it does not create new threads or DMs. To open a destination, call `post_to_user` first with `target.new_dm` or `target.new_thread`, then pass the returned channel key here. ' +
-    'Files are sent without accompanying text — call `post_to_user` separately for any message you want next to the files.',
-    {
-      paths: z.array(z.string()).min(1).describe('Absolute file paths to upload as Slack attachments'),
-      channel: z.string().optional().describe('Channel key of an existing linked thread (e.g., "slack:C123:456.789"). Omit to post to the default channel.'),
-    },
-    async (args) => {
-      const agentName = agent.def.id as AgentName;
-      if (!args.channel && Object.keys(task.metadata.channels).length === 0) {
-        return ok(
-          'No channel linked to this task. Open one first with post_to_user(target.new_dm or target.new_thread), then call post_files_to_user with the returned channel key.'
-        );
-      }
-      let validatedPaths: string[];
-      try {
-        const sandbox = requireSandbox(agent);
-        validatedPaths = await Promise.all(args.paths.map((p) => assertReadable(p, sandbox)));
-      } catch (e) {
-        return err(e instanceof Error ? e.message : String(e));
-      }
-      task.touch();
-      try {
-        await task.postFilesToUser(validatedPaths, agentName, args.channel);
-      } catch (e) {
-        return ok(formatSlackSendError(e));
-      }
-      return ok(`${validatedPaths.length} file(s) uploaded.`);
-    },
-  );
+const postFilesToUserArgsSchema = {
+  paths: z.array(z.string()).min(1).describe('Absolute file paths to upload as Slack attachments'),
+  channel: z.string().optional().describe('Channel key of an existing linked thread (e.g., "slack:C123:456.789"). Omit to post to the default channel.'),
+};
+
+async function postFilesToUserHandler(agent: Agent, task: Task, args: z.infer<z.ZodObject<typeof postFilesToUserArgsSchema>>): Promise<ToolResult> {
+  const agentName = agent.def.id as AgentName;
+  if (!args.channel && Object.keys(task.metadata.channels).length === 0) {
+    return ok(
+      'No channel linked to this task. Open one first with post_to_user(target.new_dm or target.new_thread), then call post_files_to_user with the returned channel key.'
+    );
+  }
+  let validatedPaths: string[];
+  try {
+    const sandbox = requireSandbox(agent);
+    validatedPaths = await Promise.all(args.paths.map((p) => assertReadable(p, sandbox)));
+  } catch (e) {
+    return err(e instanceof Error ? e.message : String(e));
+  }
+  task.touch();
+  try {
+    await task.postFilesToUser(validatedPaths, agentName, args.channel);
+  } catch (e) {
+    return ok(formatSlackSendError(e));
+  }
+  return ok(`${validatedPaths.length} file(s) uploaded.`);
 }
 
-function createFindSlackUserTool(_agent: Agent, _task: Task) {
-  return tool(
-    'find_slack_user',
-    'Find a Slack user by name or ID. Returns matching users with their details. Use this to find user IDs before sending DMs.',
-    {
-      query: z.string().describe('User ID (e.g., "U1234567") or name/part of name to search for'),
-    },
-    async (args) => {
-      const matches = await findSlackUsers(args.query);
-      if (matches.length === 0) return ok('No users found matching that query.');
-      const list = matches.slice(0, 10).map(u => {
-        const parts = [`${u.realName} (@${u.name}) — ID: ${u.id}`];
-        if (u.title) parts.push(`  Title: ${u.title}`);
-        if (u.tz) parts.push(`  Timezone (IANA): ${u.tz}`);
-        if (u.timezone) parts.push(`  Timezone (label): ${u.timezone}`);
-        if (u.displayName && u.displayName !== u.realName) parts.push(`  Display name: ${u.displayName}`);
-        return `- ${parts.join('\n')}`;
-      }).join('\n');
-      return ok(`Found ${matches.length} user(s):\n${list}`);
-    },
-  );
+const postFilesToUserDescription =
+  'Upload one or more files as Slack file attachments to the user. Files must point to absolute paths inside your readable sandbox (e.g. shared/artifacts/...). ' +
+  'Without `channel`, attaches to the default channel. With `channel`, attaches to an already-linked thread. ' +
+  'This tool only attaches files to existing threads — it does not create new threads or DMs. To open a destination, call `post_to_user` first with `target.new_dm` or `target.new_thread`, then pass the returned channel key here. ' +
+  'Files are sent without accompanying text — call `post_to_user` separately for any message you want next to the files.';
+
+const findSlackUserArgsSchema = {
+  query: z.string().describe('User ID (e.g., "U1234567") or name/part of name to search for'),
+};
+
+async function findSlackUserHandler(_agent: Agent, _task: Task, args: z.infer<z.ZodObject<typeof findSlackUserArgsSchema>>): Promise<ToolResult> {
+  const matches = await findSlackUsers(args.query);
+  if (matches.length === 0) return ok('No users found matching that query.');
+  const list = matches.slice(0, 10).map(u => {
+    const parts = [`${u.realName} (@${u.name}) — ID: ${u.id}`];
+    if (u.title) parts.push(`  Title: ${u.title}`);
+    if (u.tz) parts.push(`  Timezone (IANA): ${u.tz}`);
+    if (u.timezone) parts.push(`  Timezone (label): ${u.timezone}`);
+    if (u.displayName && u.displayName !== u.realName) parts.push(`  Display name: ${u.displayName}`);
+    return `- ${parts.join('\n')}`;
+  }).join('\n');
+  return ok(`Found ${matches.length} user(s):\n${list}`);
 }
 
-function createFindSlackChannelTool(_agent: Agent, _task: Task) {
-  return tool(
-    'find_slack_channel',
-    'Find a Slack channel by name or ID. Returns matching channels with their details. Use this to find channel IDs before posting to new threads.',
-    {
-      query: z.string().describe('Channel ID (e.g., "C1234567"), or channel name/part of name to search for (with or without #)'),
-    },
-    async (args) => {
-      const matches = await findSlackChannels(args.query);
-      if (matches.length === 0) return ok('No channels found matching that query.');
-      const list = matches.slice(0, 10).map(ch => {
-        const parts = [`#${ch.name} — ID: ${ch.id} (${ch.memberCount} members)`];
-        if (ch.topic) parts.push(`  Topic: ${ch.topic}`);
-        if (ch.purpose) parts.push(`  Purpose: ${ch.purpose}`);
-        if (ch.isPrivate) parts.push(`  Private channel`);
-        return `- ${parts.join('\n')}`;
-      }).join('\n');
-      return ok(`Found ${matches.length} channel(s):\n${list}`);
-    },
-  );
+const findSlackUserDescription = 'Find a Slack user by name or ID. Returns matching users with their details. Use this to find user IDs before sending DMs.';
+
+const findSlackChannelArgsSchema = {
+  query: z.string().describe('Channel ID (e.g., "C1234567"), or channel name/part of name to search for (with or without #)'),
+};
+
+async function findSlackChannelHandler(_agent: Agent, _task: Task, args: z.infer<z.ZodObject<typeof findSlackChannelArgsSchema>>): Promise<ToolResult> {
+  const matches = await findSlackChannels(args.query);
+  if (matches.length === 0) return ok('No channels found matching that query.');
+  const list = matches.slice(0, 10).map(ch => {
+    const parts = [`#${ch.name} — ID: ${ch.id} (${ch.memberCount} members)`];
+    if (ch.topic) parts.push(`  Topic: ${ch.topic}`);
+    if (ch.purpose) parts.push(`  Purpose: ${ch.purpose}`);
+    if (ch.isPrivate) parts.push(`  Private channel`);
+    return `- ${parts.join('\n')}`;
+  }).join('\n');
+  return ok(`Found ${matches.length} channel(s):\n${list}`);
 }
 
+const findSlackChannelDescription = 'Find a Slack channel by name or ID. Returns matching channels with their details. Use this to find channel IDs before posting to new threads.';
+
+const assignTaskOwnerArgsSchema = {
+  // Free-form string (validated at runtime against the live task team) so a
+  // PM-spawned dynamic agent can be made owner in the same session — a
+  // static enum would freeze the set at MCP-server creation time.
+  agent: z.string().describe(
+    'The agent id to assign as task owner. Visible candidates are listed in the tool description at spawn time. ' +
+    'PM-spawned dynamic agents added during this session are also valid.',
+  ),
+};
+
+async function assignTaskOwnerHandler(agent: Agent, task: Task, args: z.infer<z.ZodObject<typeof assignTaskOwnerArgsSchema>>): Promise<ToolResult> {
+  const agentName = agent.def.id as AgentName;
+  const allowed = new Set(getVisiblePeerIdsForSender(agent.def, task.team));
+  if (allowed.size > 0 && !allowed.has(args.agent)) {
+    return err(
+      `"${args.agent}" is not a visible candidate. Allowed: ${Array.from(allowed).join(', ')}.`,
+    );
+  }
+  const targetAgent = args.agent as AgentName;
+  logger.agentAction(agentName, 'Assigning task owner', targetAgent);
+  task.touch();
+
+  task.metadata.task_owner = targetAgent;
+  if (!task.metadata.participants.includes(targetAgent)) {
+    task.metadata.participants.push(targetAgent);
+  }
+  task.debouncedSave();
+
+  await appendAgentFinding(task.taskId, agentName, `Assigned ${targetAgent} as task owner`, 'decision');
+  logger.system(`Task ${task.taskId} owner set to ${targetAgent}`);
+  return { content: [{ type: 'text' as const, text: `Assigned ${targetAgent} as task owner.` }] };
+}
+
+/**
+ * `assign_task_owner`'s Claude-path tool description embeds a live snapshot of
+ * currently-visible candidates (computed at MCP-server-creation time from
+ * `agent`/`task`). The spec-driven description below (used by
+ * `ORCHESTRATION_TOOL_SPECS`/the opencode bridge manifest) is the static
+ * portion only — the bridge's `/tools` manifest isn't per-agent/session, so it
+ * can't embed a live candidate list anyway (see file header of
+ * `bridge/server.ts`). Both share the exact same `assignTaskOwnerHandler`
+ * body and runtime validation against the live team, so behavior (including
+ * the live candidate check) is identical either way.
+ */
 function createAssignTaskOwnerTool(agent: Agent, task: Task) {
   return tool(
     'assign_task_owner',
@@ -413,28 +449,7 @@ function createAssignTaskOwnerTool(agent: Agent, task: Task) {
         '. PM-spawned dynamic agents added during this session are also valid.',
       ),
     },
-    async (args) => {
-      const agentName = agent.def.id as AgentName;
-      const allowed = new Set(getVisiblePeerIdsForSender(agent.def, task.team));
-      if (allowed.size > 0 && !allowed.has(args.agent)) {
-        return err(
-          `"${args.agent}" is not a visible candidate. Allowed: ${Array.from(allowed).join(', ')}.`,
-        );
-      }
-      const targetAgent = args.agent as AgentName;
-      logger.agentAction(agentName, 'Assigning task owner', targetAgent);
-      task.touch();
-
-      task.metadata.task_owner = targetAgent;
-      if (!task.metadata.participants.includes(targetAgent)) {
-        task.metadata.participants.push(targetAgent);
-      }
-      task.debouncedSave();
-
-      await appendAgentFinding(task.taskId, agentName, `Assigned ${targetAgent} as task owner`, 'decision');
-      logger.system(`Task ${task.taskId} owner set to ${targetAgent}`);
-      return { content: [{ type: 'text' as const, text: `Assigned ${targetAgent} as task owner.` }] };
-    },
+    async (args) => assignTaskOwnerHandler(agent, task, args),
   );
 }
 
@@ -607,183 +622,170 @@ function createReportCompletionTool(agent: Agent, task: Task) {
   );
 }
 
-function createMuteChannelTool(agent: Agent, task: Task) {
-  return tool(
-    'mute_channel',
-    'Unsubscribe from a Slack channel/thread. Once muted, messages in it are ignored until someone @mentions the bot there again. Posts a notification to the thread it muted. ' +
-    'Pass `channel` (a channel key like "slack:C123:456.789") to mute that specific thread. ' +
-    'Omit `channel` to mute the task\'s default channel only (never all linked channels). ' +
-    'DM channels cannot be muted — DMs have no @mention to unmute by, so muting one would lock the user out permanently.',
-    {
-      channel: z.string().optional().describe('Channel key of the thread to mute (e.g., "slack:C123:456.789"). Omit to mute the task\'s default channel.'),
-    },
-    async (args) => {
-      const agentName = agent.def.id as AgentName;
-      const channelKey = args.channel ?? task.metadata.default_channel;
+const muteChannelArgsSchema = {
+  channel: z.string().optional().describe('Channel key of the thread to mute (e.g., "slack:C123:456.789"). Omit to mute the task\'s default channel.'),
+};
 
-      if (!channelKey) {
-        return ok('No channel specified and task has no default channel — nothing to mute.');
-      }
+async function muteChannelHandler(agent: Agent, task: Task, args: z.infer<z.ZodObject<typeof muteChannelArgsSchema>>): Promise<ToolResult> {
+  const agentName = agent.def.id as AgentName;
+  const channelKey = args.channel ?? task.metadata.default_channel;
 
-      const ch = task.metadata.channels[channelKey];
-      if (!ch) {
-        return ok(`Channel ${channelKey} is not linked to this task.`);
-      }
-      if (ch.type !== 'slack') {
-        return ok(`Channel ${channelKey} is not a Slack channel (type: ${ch.type}).`);
-      }
-      if (ch.channel_id.startsWith('D')) {
-        return ok(
-          `Cannot mute DM channel ${channelKey} — DMs have no @mention to unmute by, so muting would lock the user out permanently. ` +
-          `Every DM is implicitly addressed to the bot, so just stop responding to disengage.`
-        );
-      }
-      if (ch.muted) {
-        return ok(`Channel ${channelKey} is already muted.`);
-      }
+  if (!channelKey) {
+    return ok('No channel specified and task has no default channel — nothing to mute.');
+  }
 
-      logger.agentAction(agentName, 'Muting channel', channelKey);
-      task.touch();
+  const ch = task.metadata.channels[channelKey];
+  if (!ch) {
+    return ok(`Channel ${channelKey} is not linked to this task.`);
+  }
+  if (ch.type !== 'slack') {
+    return ok(`Channel ${channelKey} is not a Slack channel (type: ${ch.type}).`);
+  }
+  if (ch.channel_id.startsWith('D')) {
+    return ok(
+      `Cannot mute DM channel ${channelKey} — DMs have no @mention to unmute by, so muting would lock the user out permanently. ` +
+      `Every DM is implicitly addressed to the bot, so just stop responding to disengage.`
+    );
+  }
+  if (ch.muted) {
+    return ok(`Channel ${channelKey} is already muted.`);
+  }
 
-      ch.muted = true;
-      task.debouncedSave();
-      await appendAgentFinding(task.taskId, agentName, `Muted Slack channel ${channelKey} — will not process messages until next @mention`, 'decision');
+  logger.agentAction(agentName, 'Muting channel', channelKey);
+  task.touch();
 
-      // Notify only the channel we muted
-      await task.postToUser("I'll step back from this thread. Mention me again when you need me.", agentName, { channel: channelKey });
+  ch.muted = true;
+  task.debouncedSave();
+  await appendAgentFinding(task.taskId, agentName, `Muted Slack channel ${channelKey} — will not process messages until next @mention`, 'decision');
 
-      return ok(`Muted ${channelKey}. Will resume on next @mention.`);
-    },
-  );
+  // Notify only the channel we muted
+  await task.postToUser("I'll step back from this thread. Mention me again when you need me.", agentName, { channel: channelKey });
+
+  return ok(`Muted ${channelKey}. Will resume on next @mention.`);
 }
 
-function createReactToMessageTool(agent: Agent, task: Task) {
-  return tool(
-    'react_to_message',
-    'Add an emoji reaction to a message in a Slack thread. Use to acknowledge, ' +
-    'express sentiment, or signal status without sending a text message. ' +
-    'Reacts to ANY message in a linked thread — pass `message_id`, the `msg:<ts>` ' +
-    'value shown next to each message in the knowledge log (e.g. "1716998400.123456"). ' +
-    'Omit `channel` to target the task\'s default channel. ' +
-    'The emoji is a Slack shortcode WITHOUT colons (e.g. "thumbsup", "eyes", "tada", "white_check_mark").',
-    {
-      message_id: z.string().describe('The target message timestamp — the `msg:<ts>` id from the knowledge log (e.g. "1716998400.123456")'),
-      emoji: z.string().describe('Slack emoji shortcode without colons (e.g. "thumbsup", "heart", "eyes")'),
-      channel: z.string().optional().describe('Channel key of the linked thread (e.g. "slack:C123:456.789"). Omit for the default channel.'),
-    },
-    async (args) => {
-      const agentName = agent.def.id as AgentName;
-      const emoji = args.emoji.replace(/:/g, '').trim();
-      const dispatched = await task.reactToMessage(args.message_id, emoji, args.channel);
-      if (!dispatched) {
-        return ok(`Could not react: ${args.channel ? `channel ${args.channel} is not a linked Slack thread` : 'task has no default Slack channel'}.`);
-      }
-      logger.agentAction(agentName, `Reacted :${emoji}:`, args.message_id);
-      return ok(`Added :${emoji}: to message ${args.message_id}.`);
-    },
-  );
+const muteChannelDescription =
+  'Unsubscribe from a Slack channel/thread. Once muted, messages in it are ignored until someone @mentions the bot there again. Posts a notification to the thread it muted. ' +
+  'Pass `channel` (a channel key like "slack:C123:456.789") to mute that specific thread. ' +
+  'Omit `channel` to mute the task\'s default channel only (never all linked channels). ' +
+  'DM channels cannot be muted — DMs have no @mention to unmute by, so muting one would lock the user out permanently.';
+
+const reactToMessageArgsSchema = {
+  message_id: z.string().describe('The target message timestamp — the `msg:<ts>` id from the knowledge log (e.g. "1716998400.123456")'),
+  emoji: z.string().describe('Slack emoji shortcode without colons (e.g. "thumbsup", "heart", "eyes")'),
+  channel: z.string().optional().describe('Channel key of the linked thread (e.g. "slack:C123:456.789"). Omit for the default channel.'),
+};
+
+async function reactToMessageHandler(agent: Agent, task: Task, args: z.infer<z.ZodObject<typeof reactToMessageArgsSchema>>): Promise<ToolResult> {
+  const agentName = agent.def.id as AgentName;
+  const emoji = args.emoji.replace(/:/g, '').trim();
+  const dispatched = await task.reactToMessage(args.message_id, emoji, args.channel);
+  if (!dispatched) {
+    return ok(`Could not react: ${args.channel ? `channel ${args.channel} is not a linked Slack thread` : 'task has no default Slack channel'}.`);
+  }
+  logger.agentAction(agentName, `Reacted :${emoji}:`, args.message_id);
+  return ok(`Added :${emoji}: to message ${args.message_id}.`);
 }
 
-function createUnreactFromMessageTool(agent: Agent, task: Task) {
-  return tool(
-    'unreact_from_message',
-    'Remove an emoji reaction Archie previously added to a Slack message. ' +
-    'Mirrors `react_to_message`: pass the `message_id` (`msg:<ts>` id) and the emoji shortcode. ' +
-    'Only removes Archie\'s own reaction; other users\' reactions are unaffected.',
-    {
-      message_id: z.string().describe('The target message timestamp — the `msg:<ts>` id from the knowledge log'),
-      emoji: z.string().describe('Slack emoji shortcode without colons (e.g. "eyes")'),
-      channel: z.string().optional().describe('Channel key of the linked thread. Omit for the default channel.'),
-    },
-    async (args) => {
-      const agentName = agent.def.id as AgentName;
-      const emoji = args.emoji.replace(/:/g, '').trim();
-      const dispatched = await task.unreactFromMessage(args.message_id, emoji, args.channel);
-      if (!dispatched) {
-        return ok(`Could not remove reaction: ${args.channel ? `channel ${args.channel} is not a linked Slack thread` : 'task has no default Slack channel'}.`);
-      }
-      logger.agentAction(agentName, `Removed :${emoji}:`, args.message_id);
-      return ok(`Removed :${emoji}: from message ${args.message_id}.`);
-    },
-  );
+const reactToMessageDescription =
+  'Add an emoji reaction to a message in a Slack thread. Use to acknowledge, ' +
+  'express sentiment, or signal status without sending a text message. ' +
+  'Reacts to ANY message in a linked thread — pass `message_id`, the `msg:<ts>` ' +
+  'value shown next to each message in the knowledge log (e.g. "1716998400.123456"). ' +
+  'Omit `channel` to target the task\'s default channel. ' +
+  'The emoji is a Slack shortcode WITHOUT colons (e.g. "thumbsup", "eyes", "tada", "white_check_mark").';
+
+const unreactFromMessageArgsSchema = {
+  message_id: z.string().describe('The target message timestamp — the `msg:<ts>` id from the knowledge log'),
+  emoji: z.string().describe('Slack emoji shortcode without colons (e.g. "eyes")'),
+  channel: z.string().optional().describe('Channel key of the linked thread. Omit for the default channel.'),
+};
+
+async function unreactFromMessageHandler(agent: Agent, task: Task, args: z.infer<z.ZodObject<typeof unreactFromMessageArgsSchema>>): Promise<ToolResult> {
+  const agentName = agent.def.id as AgentName;
+  const emoji = args.emoji.replace(/:/g, '').trim();
+  const dispatched = await task.unreactFromMessage(args.message_id, emoji, args.channel);
+  if (!dispatched) {
+    return ok(`Could not remove reaction: ${args.channel ? `channel ${args.channel} is not a linked Slack thread` : 'task has no default Slack channel'}.`);
+  }
+  logger.agentAction(agentName, `Removed :${emoji}:`, args.message_id);
+  return ok(`Removed :${emoji}: from message ${args.message_id}.`);
 }
 
-function createGetMessageReactionsTool(_agent: Agent, task: Task) {
-  return tool(
-    'get_message_reactions',
-    'Read the CURRENT emoji reactions on a Slack message (live state, fresher than ' +
-    'the snapshot in the knowledge log). Pass the `message_id` (`msg:<ts>` id). ' +
-    'Returns each reaction\'s emoji shortcode, how many users reacted, and who they were.',
-    {
-      message_id: z.string().describe('The target message timestamp — the `msg:<ts>` id from the knowledge log'),
-      channel: z.string().optional().describe('Channel key of the linked thread. Omit for the default channel.'),
-    },
-    async (args) => {
-      const reactions = await task.readMessageReactions(args.message_id, args.channel);
-      if (reactions === null) {
-        return ok(`Could not read reactions: ${args.channel ? `channel ${args.channel} is not a linked Slack thread` : 'task has no default Slack channel'}.`);
-      }
-      if (reactions.length === 0) {
-        return ok(`Message ${args.message_id} has no reactions.`);
-      }
-      const summary = reactions
-        .map((r) => {
-          const who = r.users && r.users.length > 0 ? ` — ${r.users.join(', ')}` : '';
-          return `:${r.name}: (${r.count})${who}`;
-        })
-        .join('\n');
-      return ok(`Reactions on ${args.message_id}:\n${summary}`);
-    },
-  );
+const unreactFromMessageDescription =
+  'Remove an emoji reaction Archie previously added to a Slack message. ' +
+  'Mirrors `react_to_message`: pass the `message_id` (`msg:<ts>` id) and the emoji shortcode. ' +
+  'Only removes Archie\'s own reaction; other users\' reactions are unaffected.';
+
+const getMessageReactionsArgsSchema = {
+  message_id: z.string().describe('The target message timestamp — the `msg:<ts>` id from the knowledge log'),
+  channel: z.string().optional().describe('Channel key of the linked thread. Omit for the default channel.'),
+};
+
+async function getMessageReactionsHandler(_agent: Agent, task: Task, args: z.infer<z.ZodObject<typeof getMessageReactionsArgsSchema>>): Promise<ToolResult> {
+  const reactions = await task.readMessageReactions(args.message_id, args.channel);
+  if (reactions === null) {
+    return ok(`Could not read reactions: ${args.channel ? `channel ${args.channel} is not a linked Slack thread` : 'task has no default Slack channel'}.`);
+  }
+  if (reactions.length === 0) {
+    return ok(`Message ${args.message_id} has no reactions.`);
+  }
+  const summary = reactions
+    .map((r) => {
+      const who = r.users && r.users.length > 0 ? ` — ${r.users.join(', ')}` : '';
+      return `:${r.name}: (${r.count})${who}`;
+    })
+    .join('\n');
+  return ok(`Reactions on ${args.message_id}:\n${summary}`);
 }
 
-function createLaunchTaskTool(_agent: Agent, task: Task) {
-  return tool(
-    'launch_task',
-    'Launch a SEPARATE, independent background task with NO link back to this one — its origin is invisible to whoever picks it up. ' +
-    'Keep follow-up work inside the current task by delegating to an agent here, so everything stays on one traceable thread. ' +
-    'Use this ONLY when the user explicitly asks for separate/background work, or a loaded skill/workflow requires it. ' +
-    'The launched task starts with no channel — its own PM decides whether to reach someone or complete silently. ' +
-    'Cannot be called from a task that has no channel of its own.',
-    {
-      prompt: z.string().describe('The task prompt for the launched PM agent'),
-      reason: z.string().describe('Why this task is being launched (shown to the new PM and in the notification)'),
-    },
-    async (args) => {
-      try {
-        const { newTaskId, notifiedInChannel } = await launchTask(task, args.prompt, args.reason);
-        return ok(
-          notifiedInChannel
-            ? `Task ${newTaskId} launched. User was already notified in the current channel — do not repost.`
-            : `Task ${newTaskId} launched. No channel notified.`
-        );
-      } catch (error) {
-        const msg = error instanceof Error ? error.message : String(error);
-        return ok(`Failed to launch task: ${msg}`);
-      }
-    },
-  );
+const getMessageReactionsDescription =
+  'Read the CURRENT emoji reactions on a Slack message (live state, fresher than ' +
+  'the snapshot in the knowledge log). Pass the `message_id` (`msg:<ts>` id). ' +
+  'Returns each reaction\'s emoji shortcode, how many users reacted, and who they were.';
+
+const launchTaskArgsSchema = {
+  prompt: z.string().describe('The task prompt for the launched PM agent'),
+  reason: z.string().describe('Why this task is being launched (shown to the new PM and in the notification)'),
+};
+
+async function launchTaskHandler(_agent: Agent, task: Task, args: z.infer<z.ZodObject<typeof launchTaskArgsSchema>>): Promise<ToolResult> {
+  try {
+    const { newTaskId, notifiedInChannel } = await launchTask(task, args.prompt, args.reason);
+    return ok(
+      notifiedInChannel
+        ? `Task ${newTaskId} launched. User was already notified in the current channel — do not repost.`
+        : `Task ${newTaskId} launched. No channel notified.`
+    );
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    return ok(`Failed to launch task: ${msg}`);
+  }
 }
 
-function createGetAgentsStatusTool(agent: Agent, task: Task) {
-  return tool(
-    'get_agents_status',
-    'Get the status of all agents for the current task.',
-    {},
-    async () => {
-      const statuses = task.getAgentStatus();
-      if (statuses.length === 0) {
-        return { content: [{ type: 'text' as const, text: 'No agents spawned yet.' }] };
-      }
-      const lines = statuses.map((s) => {
-        const state = s.active ? 'active' : 'idle';
-        const activity = s.last_activity ? ` (last activity: ${s.last_activity})` : '';
-        return `- ${s.agent}: ${state}${activity}`;
-      });
-      return { content: [{ type: 'text' as const, text: `Agent statuses:\n${lines.join('\n')}` }] };
-    },
-  );
+const launchTaskDescription =
+  'Launch a SEPARATE, independent background task with NO link back to this one — its origin is invisible to whoever picks it up. ' +
+  'Keep follow-up work inside the current task by delegating to an agent here, so everything stays on one traceable thread. ' +
+  'Use this ONLY when the user explicitly asks for separate/background work, or a loaded skill/workflow requires it. ' +
+  'The launched task starts with no channel — its own PM decides whether to reach someone or complete silently. ' +
+  'Cannot be called from a task that has no channel of its own.';
+
+const getAgentsStatusArgsSchema = {};
+
+async function getAgentsStatusHandler(_agent: Agent, task: Task, _args: z.infer<z.ZodObject<typeof getAgentsStatusArgsSchema>>): Promise<ToolResult> {
+  const statuses = task.getAgentStatus();
+  if (statuses.length === 0) {
+    return { content: [{ type: 'text' as const, text: 'No agents spawned yet.' }] };
+  }
+  const lines = statuses.map((s) => {
+    const state = s.active ? 'active' : 'idle';
+    const activity = s.last_activity ? ` (last activity: ${s.last_activity})` : '';
+    return `- ${s.agent}: ${state}${activity}`;
+  });
+  return { content: [{ type: 'text' as const, text: `Agent statuses:\n${lines.join('\n')}` }] };
 }
+
+const getAgentsStatusDescription = 'Get the status of all agents for the current task.';
 
 // ---- GitHub tools (repo agents in edit mode) ----
 
@@ -1586,77 +1588,68 @@ async function listBranchesHandler(agent: Agent, task: Task, args: z.infer<z.Zod
 
 // ---- Reminder tools ----
 
-function createParseDatetimeTool(agent: Agent, task: Task) {
-  return tool(
-    'parse_datetime',
-    'Parse a natural language date/time expression into an ISO 8601 timestamp. Call this before set_reminder to get the correct datetime value. You must provide the timezone of the person the reminder relates to.',
-    {
-      expression: z.string().describe('Natural language date/time, e.g. "in 2 hours", "tomorrow at 10am", "next Monday at 9am"'),
-      timezone: z.string().describe('IANA timezone, e.g. "Europe/Moscow", "America/New_York", "UTC"'),
-    },
-    async (args) => {
-      const tz = args.timezone;
-      const refDate = new Date();
-      const results = chrono.parse(args.expression, { instant: refDate, timezone: tz });
-      if (results.length === 0) {
-        return { content: [{ type: 'text' as const, text: `Could not parse "${args.expression}". Try a different format like "in 2 hours", "tomorrow at 10am", or "next Monday at 9am".` }] };
-      }
-      const parsed = results[0].start.date();
-      return { content: [{ type: 'text' as const, text: parsed.toISOString() }] };
-    },
-  );
+const parseDatetimeArgsSchema = {
+  expression: z.string().describe('Natural language date/time, e.g. "in 2 hours", "tomorrow at 10am", "next Monday at 9am"'),
+  timezone: z.string().describe('IANA timezone, e.g. "Europe/Moscow", "America/New_York", "UTC"'),
+};
+
+async function parseDatetimeHandler(_agent: Agent, _task: Task, args: z.infer<z.ZodObject<typeof parseDatetimeArgsSchema>>): Promise<ToolResult> {
+  const tz = args.timezone;
+  const refDate = new Date();
+  const results = chrono.parse(args.expression, { instant: refDate, timezone: tz });
+  if (results.length === 0) {
+    return { content: [{ type: 'text' as const, text: `Could not parse "${args.expression}". Try a different format like "in 2 hours", "tomorrow at 10am", or "next Monday at 9am".` }] };
+  }
+  const parsed = results[0].start.date();
+  return { content: [{ type: 'text' as const, text: parsed.toISOString() }] };
 }
 
-function createSetReminderTool(agent: Agent, task: Task) {
-  return tool(
-    'set_reminder',
-    'Set a reminder to be woken up at a future time (within 30 days). The task is reactivated and you receive a prompt with the reason. This is the durable way to schedule a follow-up, monitor, or "check back later" — it survives restarts. For recurring monitoring, re-arm on each wake by calling set_reminder again (a self-rescheduling one-shot); native recurring/cron-style triggers are planned but not available yet. Only one reminder can be pending — calling this replaces any existing one. Use parse_datetime first to get the correct ISO 8601 value.',
-    {
-      datetime: z.string().describe('ISO 8601 datetime, e.g. "2026-04-15T10:00:00Z"'),
-      reason: z.string().describe('What to do when woken — this will be shown to you'),
-    },
-    async (args) => {
-      const triggerAt = new Date(args.datetime);
-      if (isNaN(triggerAt.getTime())) {
-        return { content: [{ type: 'text' as const, text: 'Invalid datetime. Use parse_datetime to get a valid ISO 8601 value.' }] };
-      }
-      if (triggerAt <= new Date()) {
-        return { content: [{ type: 'text' as const, text: 'Datetime must be in the future.' }] };
-      }
-      const maxFuture = new Date(Date.now() + 30 * 24 * 60 * 60_000);
-      if (triggerAt > maxFuture) {
-        return { content: [{ type: 'text' as const, text: 'Datetime must be within 30 days.' }] };
-      }
+const parseDatetimeDescription = 'Parse a natural language date/time expression into an ISO 8601 timestamp. Call this before set_reminder to get the correct datetime value. You must provide the timezone of the person the reminder relates to.';
 
-      const agentName = agent.def.id as AgentName;
-      scheduleReminder(task, triggerAt, args.reason);
-      logger.agentAction(agentName, 'Setting reminder', `${triggerAt.toISOString()}: ${args.reason}`);
+const setReminderArgsSchema = {
+  datetime: z.string().describe('ISO 8601 datetime, e.g. "2026-04-15T10:00:00Z"'),
+  reason: z.string().describe('What to do when woken — this will be shown to you'),
+};
 
-      return { content: [{ type: 'text' as const, text: `Reminder set for ${args.datetime}. Reason: ${args.reason}` }] };
-    },
-  );
+async function setReminderHandler(agent: Agent, task: Task, args: z.infer<z.ZodObject<typeof setReminderArgsSchema>>): Promise<ToolResult> {
+  const triggerAt = new Date(args.datetime);
+  if (isNaN(triggerAt.getTime())) {
+    return { content: [{ type: 'text' as const, text: 'Invalid datetime. Use parse_datetime to get a valid ISO 8601 value.' }] };
+  }
+  if (triggerAt <= new Date()) {
+    return { content: [{ type: 'text' as const, text: 'Datetime must be in the future.' }] };
+  }
+  const maxFuture = new Date(Date.now() + 30 * 24 * 60 * 60_000);
+  if (triggerAt > maxFuture) {
+    return { content: [{ type: 'text' as const, text: 'Datetime must be within 30 days.' }] };
+  }
+
+  const agentName = agent.def.id as AgentName;
+  scheduleReminder(task, triggerAt, args.reason);
+  logger.agentAction(agentName, 'Setting reminder', `${triggerAt.toISOString()}: ${args.reason}`);
+
+  return { content: [{ type: 'text' as const, text: `Reminder set for ${args.datetime}. Reason: ${args.reason}` }] };
 }
 
-function createCancelReminderTool(agent: Agent, task: Task) {
-  return tool(
-    'cancel_reminder',
-    'Cancel the pending reminder for this task. Use when the reason for the reminder is no longer relevant.',
-    {},
-    async () => {
-      if (!task.metadata.reminder) {
-        return { content: [{ type: 'text' as const, text: 'No pending reminder to cancel.' }] };
-      }
+const setReminderDescription = 'Set a reminder to be woken up at a future time (within 30 days). The task is reactivated and you receive a prompt with the reason. This is the durable way to schedule a follow-up, monitor, or "check back later" — it survives restarts. For recurring monitoring, re-arm on each wake by calling set_reminder again (a self-rescheduling one-shot); native recurring/cron-style triggers are planned but not available yet. Only one reminder can be pending — calling this replaces any existing one. Use parse_datetime first to get the correct ISO 8601 value.';
 
-      const agentName = agent.def.id as AgentName;
-      cancelReminder(task);
+const cancelReminderArgsSchema = {};
 
-      await appendAgentFinding(task.taskId, agentName, 'Cancelled scheduled reminder', 'decision');
-      logger.agentAction(agentName, 'Cancelled reminder', '');
+async function cancelReminderHandler(agent: Agent, task: Task, _args: z.infer<z.ZodObject<typeof cancelReminderArgsSchema>>): Promise<ToolResult> {
+  if (!task.metadata.reminder) {
+    return { content: [{ type: 'text' as const, text: 'No pending reminder to cancel.' }] };
+  }
 
-      return { content: [{ type: 'text' as const, text: 'Reminder cancelled.' }] };
-    },
-  );
+  const agentName = agent.def.id as AgentName;
+  cancelReminder(task);
+
+  await appendAgentFinding(task.taskId, agentName, 'Cancelled scheduled reminder', 'decision');
+  logger.agentAction(agentName, 'Cancelled reminder', '');
+
+  return { content: [{ type: 'text' as const, text: 'Reminder cancelled.' }] };
 }
+
+const cancelReminderDescription = 'Cancel the pending reminder for this task. Use when the reason for the reminder is no longer relevant.';
 
 /** Pull a Slack file id (F…) out of a file permalink or a bare id. */
 function extractSlackFileId(ref: string): string | null {
@@ -1681,22 +1674,17 @@ function safeReferenceFileName(name: string, forceExt?: string): string {
  * markdown; anything else → native bytes). The file lands in the PM's own
  * workspace, not shared — the PM decides what to do with it next.
  */
-function createFetchSlackReferenceTool(agent: Agent, task: Task) {
-  return tool(
-    'fetch_slack_reference',
-    'Fetch a file referenced in the channel\'s project-context canvas and save it into your workspace so you can read it. ' +
-    'Pass the reference exactly as it appears in the canvas — a Slack file link or a file id. ' +
-    'Documents and images are saved in their original form; a referenced canvas is saved as readable markdown.',
-    {
-      reference: z.string().describe(
-        'A Slack file link (e.g. https://….slack.com/files/…/F…/name) or a bare file id (F…) taken from the channel canvas.',
-      ),
-    },
-    async (args) => {
-      const fileId = extractSlackFileId(args.reference);
-      if (!fileId) {
-        return err(`No Slack file id found in "${args.reference}". Pass a Slack file link or an F… id.`);
-      }
+const fetchSlackReferenceArgsSchema = {
+  reference: z.string().describe(
+    'A Slack file link (e.g. https://….slack.com/files/…/F…/name) or a bare file id (F…) taken from the channel canvas.',
+  ),
+};
+
+async function fetchSlackReferenceHandler(agent: Agent, task: Task, args: z.infer<z.ZodObject<typeof fetchSlackReferenceArgsSchema>>): Promise<ToolResult> {
+  const fileId = extractSlackFileId(args.reference);
+  if (!fileId) {
+    return err(`No Slack file id found in "${args.reference}". Pass a Slack file link or an F… id.`);
+  }
       // Scope to canvas-referenced files only: the bot token can read far more
       // of the workspace than this task should reach, so an unscoped id would
       // let prompt-influenced input exfiltrate arbitrary accessible files.
@@ -1706,32 +1694,35 @@ function createFetchSlackReferenceTool(agent: Agent, task: Task) {
           `File ${fileId} is not referenced by an adopted channel canvas for this task — only the canvas itself or files it references can be fetched.`,
         );
       }
-      const cwd = requireSandbox(agent).cwd;
-      try {
-        const info = await getSlackFileInfo(fileId);
-        if (!info) return err(`Could not load file ${fileId} — it may be inaccessible.`);
+  const cwd = requireSandbox(agent).cwd;
+  try {
+    const info = await getSlackFileInfo(fileId);
+    if (!info) return err(`Could not load file ${fileId} — it may be inaccessible.`);
 
-        if (info.filetype === 'quip') {
-          const read = await readCanvas(fileId, info);
-          if (!read) return err(`Could not read canvas ${fileId}.`);
-          const dest = join(cwd, safeReferenceFileName(read.title || fileId, '.md'));
-          await writeFile(dest, read.markdown);
-          task.touch();
-          return ok(`Saved to ${dest}.`);
-        }
+    if (info.filetype === 'quip') {
+      const read = await readCanvas(fileId, info);
+      if (!read) return err(`Could not read canvas ${fileId}.`);
+      const dest = join(cwd, safeReferenceFileName(read.title || fileId, '.md'));
+      await writeFile(dest, read.markdown);
+      task.touch();
+      return ok(`Saved to ${dest}.`);
+    }
 
-        const url = info.url_private_download || info.url_private;
-        if (!url) return err(`File ${fileId} has no downloadable URL.`);
-        const dest = join(cwd, safeReferenceFileName(info.name || info.title || fileId));
-        await downloadSlackFile(url, dest);
-        task.touch();
-        return ok(`Saved to ${dest}.`);
-      } catch (e) {
-        return err(e instanceof Error ? e.message : String(e));
-      }
-    },
-  );
+    const url = info.url_private_download || info.url_private;
+    if (!url) return err(`File ${fileId} has no downloadable URL.`);
+    const dest = join(cwd, safeReferenceFileName(info.name || info.title || fileId));
+    await downloadSlackFile(url, dest);
+    task.touch();
+    return ok(`Saved to ${dest}.`);
+  } catch (e) {
+    return err(e instanceof Error ? e.message : String(e));
+  }
 }
+
+const fetchSlackReferenceDescription =
+  'Fetch a file referenced in the channel\'s project-context canvas and save it into your workspace so you can read it. ' +
+  'Pass the reference exactly as it appears in the canvas — a Slack file link or a file id. ' +
+  'Documents and images are saved in their original form; a referenced canvas is saved as readable markdown.';
 
 // ---- MCP Server creation ----
 
@@ -1741,6 +1732,40 @@ function createFetchSlackReferenceTool(agent: Agent, task: Task) {
  * so those are not repeated here.
  */
 
+/**
+ * One spec per not-yet-bridged comms tool: name + description + zod arg shape
+ * + handler body. Mirrors `RepoToolSpec`/`REPO_TOOL_SPECS` below — the single
+ * source of truth for `createCommsMcpServer` (Claude SDK path) and
+ * `createCommsHandlers` (opencode bridge path), so both share identical
+ * handler bodies (zero behavior drift between them).
+ *
+ * `post_to_user` is deliberately EXCLUDED: it's one of the 3 control tools
+ * already bridged directly via a fixed whitelist in `bridge/server.ts`
+ * (`postToUserHandler` + `TOOL_WHITELIST`) — including it here would
+ * double-register it in the bridge's dispatch map. The Claude SDK path still
+ * gets it via `createPostToUserTool`, alongside the spec-driven tools below.
+ */
+export interface CommsToolSpec {
+  name: string;
+  description: string;
+  schema: Record<string, z.ZodTypeAny>;
+  // Handlers are typed per-tool above; erased to `any` here since the spec
+  // list is heterogeneous — each entry is still called with exactly the args
+  // shape its own `schema` describes.
+  handler: (agent: Agent, task: Task, args: any) => Promise<ToolResult>;
+}
+
+export const COMMS_TOOL_SPECS: readonly CommsToolSpec[] = [
+  { name: 'post_files_to_user', description: postFilesToUserDescription, schema: postFilesToUserArgsSchema, handler: postFilesToUserHandler },
+  { name: 'find_slack_user', description: findSlackUserDescription, schema: findSlackUserArgsSchema, handler: findSlackUserHandler },
+  { name: 'find_slack_channel', description: findSlackChannelDescription, schema: findSlackChannelArgsSchema, handler: findSlackChannelHandler },
+  { name: 'mute_channel', description: muteChannelDescription, schema: muteChannelArgsSchema, handler: muteChannelHandler },
+  { name: 'react_to_message', description: reactToMessageDescription, schema: reactToMessageArgsSchema, handler: reactToMessageHandler },
+  { name: 'unreact_from_message', description: unreactFromMessageDescription, schema: unreactFromMessageArgsSchema, handler: unreactFromMessageHandler },
+  { name: 'get_message_reactions', description: getMessageReactionsDescription, schema: getMessageReactionsArgsSchema, handler: getMessageReactionsHandler },
+  { name: 'fetch_slack_reference', description: fetchSlackReferenceDescription, schema: fetchSlackReferenceArgsSchema, handler: fetchSlackReferenceHandler },
+];
+
 /** User-facing communication (Slack messaging, lookups, channel control, reactions). */
 export function createCommsMcpServer(agent: Agent, task: Task) {
   return createSdkMcpServer({
@@ -1748,16 +1773,25 @@ export function createCommsMcpServer(agent: Agent, task: Task) {
     version: '1.0.0',
     tools: [
       createPostToUserTool(agent, task),
-      createPostFilesToUserTool(agent, task),
-      createFindSlackUserTool(agent, task),
-      createFindSlackChannelTool(agent, task),
-      createMuteChannelTool(agent, task),
-      createReactToMessageTool(agent, task),
-      createUnreactFromMessageTool(agent, task),
-      createGetMessageReactionsTool(agent, task),
-      createFetchSlackReferenceTool(agent, task),
+      ...COMMS_TOOL_SPECS.map((spec) =>
+        tool(spec.name, spec.description, spec.schema, (args: any) => spec.handler(agent, task, args)),
+      ),
     ],
   });
+}
+
+/**
+ * Build the comms-tool handler map keyed by tool name — for the opencode
+ * bridge (registered PM-only; see `buildSessionHandlers` in
+ * `bridge/server.ts`). Excludes `post_to_user` (see `COMMS_TOOL_SPECS` doc
+ * comment above) — already bridged as a control tool.
+ */
+export function createCommsHandlers(agent: Agent, task: Task): Record<string, (args: unknown) => Promise<ToolResult>> {
+  const handlers: Record<string, (args: unknown) => Promise<ToolResult>> = {};
+  for (const spec of COMMS_TOOL_SPECS) {
+    handlers[spec.name] = (args: unknown) => spec.handler(agent, task, args);
+  }
+  return handlers;
 }
 
 /**
@@ -1765,43 +1799,41 @@ export function createCommsMcpServer(agent: Agent, task: Task) {
  * Tags repos already covered by a plugin specialist so PM prefers the
  * specialist over spawning a generic agent. Cached on the task for the turn.
  */
-function createListAvailableReposTool(_agent: Agent, task: Task) {
-  return tool(
-    'list_available_repos',
-    'List every GitHub repository this installation can reach. Use this before ' +
-    '`spawn_repo_agent` to see what is available. Repos already covered by a ' +
-    'plugin specialist are marked — prefer messaging that specialist over ' +
-    'spawning a generic agent.',
-    {},
-    async () => {
-      const client = getRepoHost();
-      if (!client) return err('GitHub client not configured');
+const listAvailableReposArgsSchema = {};
 
-      // Cache on the Task instance to avoid re-listing within a task.
-      type Cached = Array<{ github: string; default_branch: string; description?: string }>;
-      const t = task as Task & { _availableRepos?: Cached };
-      let repos = t._availableRepos;
-      if (!repos) {
-        repos = await client.listAccessibleRepos();
-        t._availableRepos = repos;
-      }
-      if (repos.length === 0) {
-        return ok('No repositories accessible to this installation.');
-      }
-      const lines = repos.map((r) => {
-        const owners = findAgentDefsContainingRepo(r.github);
-        const primaryOf = owners.find((d) => d.repo!.primary === r.github);
-        const tags: string[] = [];
-        if (primaryOf) tags.push(`primary of ${primaryOf.id}`);
-        else if (owners.length > 0) tags.push(`declared by ${owners.map((d) => d.id).join(', ')}`);
-        const desc = r.description ? ` — ${r.description}` : '';
-        const tagStr = tags.length > 0 ? ` [${tags.join('; ')}]` : '';
-        return `- ${r.github} (default: ${r.default_branch})${tagStr}${desc}`;
-      });
-      return ok(`Repos accessible to this installation:\n${lines.join('\n')}`);
-    },
-  );
+async function listAvailableReposHandler(_agent: Agent, task: Task, _args: z.infer<z.ZodObject<typeof listAvailableReposArgsSchema>>): Promise<ToolResult> {
+  const client = getRepoHost();
+  if (!client) return err('GitHub client not configured');
+
+  // Cache on the Task instance to avoid re-listing within a task.
+  type Cached = Array<{ github: string; default_branch: string; description?: string }>;
+  const t = task as Task & { _availableRepos?: Cached };
+  let repos = t._availableRepos;
+  if (!repos) {
+    repos = await client.listAccessibleRepos();
+    t._availableRepos = repos;
+  }
+  if (repos.length === 0) {
+    return ok('No repositories accessible to this installation.');
+  }
+  const lines = repos.map((r) => {
+    const owners = findAgentDefsContainingRepo(r.github);
+    const primaryOf = owners.find((d) => d.repo!.primary === r.github);
+    const tags: string[] = [];
+    if (primaryOf) tags.push(`primary of ${primaryOf.id}`);
+    else if (owners.length > 0) tags.push(`declared by ${owners.map((d) => d.id).join(', ')}`);
+    const desc = r.description ? ` — ${r.description}` : '';
+    const tagStr = tags.length > 0 ? ` [${tags.join('; ')}]` : '';
+    return `- ${r.github} (default: ${r.default_branch})${tagStr}${desc}`;
+  });
+  return ok(`Repos accessible to this installation:\n${lines.join('\n')}`);
 }
+
+const listAvailableReposDescription =
+  'List every GitHub repository this installation can reach. Use this before ' +
+  '`spawn_repo_agent` to see what is available. Repos already covered by a ' +
+  'plugin specialist are marked — prefer messaging that specialist over ' +
+  'spawning a generic agent.';
 
 /**
  * `spawn_repo_agent` — PM creates an on-demand repo agent bound to a chosen
@@ -1812,93 +1844,129 @@ function createListAvailableReposTool(_agent: Agent, task: Task) {
  * Anti-duplication: rejects a repo already covered as a plugin specialist's
  * primary — PM should message that specialist instead.
  */
-function createSpawnRepoAgentTool(agent: Agent, task: Task) {
-  return tool(
-    'spawn_repo_agent',
-    [
-      'Spawn an on-demand repo agent for one or more GitHub repos, chosen from',
-      '`list_available_repos`. Use when no plugin specialist covers the repo(s)',
-      'you need. All listed repos are mounted at spawn; the first is the primary',
-      '(the default target for the agent\'s repo-tools).',
-      '',
-      'Prefer an existing plugin specialist when one exists — it has a curated',
-      'prompt and skills. After spawning, `send_message_to_agent` to the returned',
-      'id to give it work.',
-    ].join('\n'),
-    {
-      shortname: z.string().regex(/^[a-z][a-z0-9-]*$/).describe(
-        'Short identifier matching /^[a-z][a-z0-9-]*$/. The agent id becomes `<shortname>-<4hex>-agent`.',
-      ),
-      repos: z.array(z.object({
-        github: z.string().describe('Github identifier, e.g. "org/repo"'),
-        baseBranch: z.string().optional().describe('Base branch (default: the repo\'s default branch)'),
-      })).min(1).describe('Repos this agent will work with. First entry is the primary.'),
-      role: z.string().optional().describe('Short role description (default: "Generic engineer for <primary>")'),
-      expertise: z.string().optional().describe('Detailed expertise string used in the agent\'s prompt'),
-    },
-    async (args) => {
-      const agentName = agent.def.id as AgentName;
-      const primary = args.repos[0].github;
+const spawnRepoAgentArgsSchema = {
+  shortname: z.string().regex(/^[a-z][a-z0-9-]*$/).describe(
+    'Short identifier matching /^[a-z][a-z0-9-]*$/. The agent id becomes `<shortname>-<4hex>-agent`.',
+  ),
+  repos: z.array(z.object({
+    github: z.string().describe('Github identifier, e.g. "org/repo"'),
+    baseBranch: z.string().optional().describe('Base branch (default: the repo\'s default branch)'),
+  })).min(1).describe('Repos this agent will work with. First entry is the primary.'),
+  role: z.string().optional().describe('Short role description (default: "Generic engineer for <primary>")'),
+  expertise: z.string().optional().describe('Detailed expertise string used in the agent\'s prompt'),
+};
 
-      // Anti-duplication: a repo that's already a plugin specialist's primary
-      // should be reached via that specialist, not a generic clone.
-      for (const r of args.repos) {
-        const conflict = findAgentDefsContainingRepo(r.github)
-          .find((d) => d.pluginName !== '<dynamic>' && d.repo!.primary === r.github);
-        if (conflict) {
-          return err(
-            `Repo "${r.github}" is already the primary of ${conflict.id}. ` +
-            `Use send_message_to_agent with target=${conflict.id} instead of spawning a new agent.`,
-          );
-        }
-      }
+async function spawnRepoAgentHandler(agent: Agent, task: Task, args: z.infer<z.ZodObject<typeof spawnRepoAgentArgsSchema>>): Promise<ToolResult> {
+  const agentName = agent.def.id as AgentName;
+  const primary = args.repos[0].github;
 
-      // Validate every requested repo is reachable; fill in default branches.
-      const client = getRepoHost();
-      if (!client) return err('GitHub client not configured');
-      const resolvedRepos: Array<{ github: string; baseBranch: string }> = [];
-      for (const r of args.repos) {
-        const reachable = await client.resolveRepo(r.github);
-        if (!reachable) {
-          return err(
-            `GitHub App cannot reach "${r.github}". Check it appears in ` +
-            `list_available_repos (the App must be installed on it), then retry.`,
-          );
-        }
-        resolvedRepos.push({ github: r.github, baseBranch: r.baseBranch || reachable.default_branch });
-      }
-
-      // Stable id; 4-hex suffix makes same-task shortname collisions negligible.
-      const suffix = Math.floor(Math.random() * 0xffff).toString(16).padStart(4, '0');
-      const id = `${args.shortname}-${suffix}-agent`;
-
-      const spec = {
-        id,
-        shortname: args.shortname,
-        repos: resolvedRepos,
-        role: args.role || `Generic engineer for ${primary}`,
-        expertise: args.expertise || `Investigation and work in ${resolvedRepos.map((r) => r.github).join(', ')}.`,
-      };
-
-      task.metadata.dynamic_agents ??= [];
-      task.metadata.dynamic_agents.push(spec);
-      task.team.push(synthesizeDynamicAgentDef(spec));
-      task.debouncedSave();
-
-      await appendAgentFinding(
-        task.taskId,
-        agentName,
-        `Spawned repo agent ${id} for ${resolvedRepos.map((r) => r.github).join(', ')}`,
-        'decision',
+  // Anti-duplication: a repo that's already a plugin specialist's primary
+  // should be reached via that specialist, not a generic clone.
+  for (const r of args.repos) {
+    const conflict = findAgentDefsContainingRepo(r.github)
+      .find((d) => d.pluginName !== '<dynamic>' && d.repo!.primary === r.github);
+    if (conflict) {
+      return err(
+        `Repo "${r.github}" is already the primary of ${conflict.id}. ` +
+        `Use send_message_to_agent with target=${conflict.id} instead of spawning a new agent.`,
       );
+    }
+  }
 
-      return ok(
-        `Spawned repo agent ${id} (primary: ${primary}). ` +
-        `Use send_message_to_agent with target=${id} to give it work.`,
+  // Validate every requested repo is reachable; fill in default branches.
+  const client = getRepoHost();
+  if (!client) return err('GitHub client not configured');
+  const resolvedRepos: Array<{ github: string; baseBranch: string }> = [];
+  for (const r of args.repos) {
+    const reachable = await client.resolveRepo(r.github);
+    if (!reachable) {
+      return err(
+        `GitHub App cannot reach "${r.github}". Check it appears in ` +
+        `list_available_repos (the App must be installed on it), then retry.`,
       );
-    },
+    }
+    resolvedRepos.push({ github: r.github, baseBranch: r.baseBranch || reachable.default_branch });
+  }
+
+  // Stable id; 4-hex suffix makes same-task shortname collisions negligible.
+  const suffix = Math.floor(Math.random() * 0xffff).toString(16).padStart(4, '0');
+  const id = `${args.shortname}-${suffix}-agent`;
+
+  const spec = {
+    id,
+    shortname: args.shortname,
+    repos: resolvedRepos,
+    role: args.role || `Generic engineer for ${primary}`,
+    expertise: args.expertise || `Investigation and work in ${resolvedRepos.map((r) => r.github).join(', ')}.`,
+  };
+
+  task.metadata.dynamic_agents ??= [];
+  task.metadata.dynamic_agents.push(spec);
+  task.team.push(synthesizeDynamicAgentDef(spec));
+  task.debouncedSave();
+
+  await appendAgentFinding(
+    task.taskId,
+    agentName,
+    `Spawned repo agent ${id} for ${resolvedRepos.map((r) => r.github).join(', ')}`,
+    'decision',
+  );
+
+  return ok(
+    `Spawned repo agent ${id} (primary: ${primary}). ` +
+    `Use send_message_to_agent with target=${id} to give it work.`,
   );
 }
+
+const spawnRepoAgentDescription = [
+  'Spawn an on-demand repo agent for one or more GitHub repos, chosen from',
+  '`list_available_repos`. Use when no plugin specialist covers the repo(s)',
+  'you need. All listed repos are mounted at spawn; the first is the primary',
+  '(the default target for the agent\'s repo-tools).',
+  '',
+  'Prefer an existing plugin specialist when one exists — it has a curated',
+  'prompt and skills. After spawning, `send_message_to_agent` to the returned',
+  'id to give it work.',
+].join('\n');
+
+/**
+ * One spec per not-yet-bridged orchestration tool. Mirrors `CommsToolSpec`
+ * above — single source of truth for `createOrchestrationMcpServer` (Claude
+ * SDK path) and `createOrchestrationHandlers` (opencode bridge path).
+ *
+ * `report_completion` and `request_edit_mode` are deliberately EXCLUDED: both
+ * are control tools already bridged directly via the fixed whitelist in
+ * `bridge/server.ts` (`reportCompletionHandler`/`requestEditModeHandler` +
+ * `TOOL_WHITELIST`) — including them here would double-register them.
+ *
+ * `assign_task_owner` IS included (it is not a control tool), but its Claude
+ * SDK tool is still built separately via `createAssignTaskOwnerTool` (not
+ * from this spec) because that tool's description embeds a LIVE snapshot of
+ * currently-visible candidates computed at MCP-server-creation time — a
+ * static spec description can't reproduce that. Both call the exact same
+ * `assignTaskOwnerHandler`, so behavior (including the live candidate
+ * validation, which happens at call time against the live team either way)
+ * is identical.
+ */
+export interface OrchestrationToolSpec {
+  name: string;
+  description: string;
+  schema: Record<string, z.ZodTypeAny>;
+  handler: (agent: Agent, task: Task, args: any) => Promise<ToolResult>;
+}
+
+export const ORCHESTRATION_TOOL_SPECS: readonly OrchestrationToolSpec[] = [
+  {
+    name: 'assign_task_owner',
+    description: 'Assign a task owner who will lead the investigation. Call this before sending the initial assignment message.',
+    schema: assignTaskOwnerArgsSchema,
+    handler: assignTaskOwnerHandler,
+  },
+  { name: 'get_agents_status', description: getAgentsStatusDescription, schema: getAgentsStatusArgsSchema, handler: getAgentsStatusHandler },
+  { name: 'launch_task', description: launchTaskDescription, schema: launchTaskArgsSchema, handler: launchTaskHandler },
+  { name: 'list_available_repos', description: listAvailableReposDescription, schema: listAvailableReposArgsSchema, handler: listAvailableReposHandler },
+  { name: 'spawn_repo_agent', description: spawnRepoAgentDescription, schema: spawnRepoAgentArgsSchema, handler: spawnRepoAgentHandler },
+];
 
 /** Task orchestration (ownership, completion, edit mode, team status, repo-agent spawning). */
 export function createOrchestrationMcpServer(agent: Agent, task: Task) {
@@ -1909,25 +1977,70 @@ export function createOrchestrationMcpServer(agent: Agent, task: Task) {
       createAssignTaskOwnerTool(agent, task),
       createReportCompletionTool(agent, task),
       createRequestEditModeTool(agent, task),
-      createGetAgentsStatusTool(agent, task),
-      createLaunchTaskTool(agent, task),
-      createListAvailableReposTool(agent, task),
-      createSpawnRepoAgentTool(agent, task),
+      // assign_task_owner already has a bespoke Claude-path tool above (live
+      // candidate list in its description) — skip it here to avoid
+      // registering it twice.
+      ...ORCHESTRATION_TOOL_SPECS.filter((spec) => spec.name !== 'assign_task_owner').map((spec) =>
+        tool(spec.name, spec.description, spec.schema, (args: any) => spec.handler(agent, task, args)),
+      ),
     ],
   });
 }
+
+/**
+ * Build the orchestration-tool handler map keyed by tool name — for the
+ * opencode bridge (registered PM-only). Excludes `report_completion` and
+ * `request_edit_mode` (already bridged as control tools); includes
+ * `assign_task_owner` (not a control tool, unlike those two).
+ */
+export function createOrchestrationHandlers(agent: Agent, task: Task): Record<string, (args: unknown) => Promise<ToolResult>> {
+  const handlers: Record<string, (args: unknown) => Promise<ToolResult>> = {};
+  for (const spec of ORCHESTRATION_TOOL_SPECS) {
+    handlers[spec.name] = (args: unknown) => spec.handler(agent, task, args);
+  }
+  return handlers;
+}
+
+/**
+ * One spec per scheduling tool. Mirrors `CommsToolSpec` above — none of these
+ * are control tools, so all 3 are shared as-is between the Claude SDK path
+ * (`createSchedulingMcpServer`) and the opencode bridge path
+ * (`createSchedulingHandlers`).
+ */
+export interface SchedulingToolSpec {
+  name: string;
+  description: string;
+  schema: Record<string, z.ZodTypeAny>;
+  handler: (agent: Agent, task: Task, args: any) => Promise<ToolResult>;
+}
+
+export const SCHEDULING_TOOL_SPECS: readonly SchedulingToolSpec[] = [
+  { name: 'parse_datetime', description: parseDatetimeDescription, schema: parseDatetimeArgsSchema, handler: parseDatetimeHandler },
+  { name: 'set_reminder', description: setReminderDescription, schema: setReminderArgsSchema, handler: setReminderHandler },
+  { name: 'cancel_reminder', description: cancelReminderDescription, schema: cancelReminderArgsSchema, handler: cancelReminderHandler },
+];
 
 /** Scheduling (datetime parsing and reminders). */
 export function createSchedulingMcpServer(agent: Agent, task: Task) {
   return createSdkMcpServer({
     name: 'scheduling-tools',
     version: '1.0.0',
-    tools: [
-      createParseDatetimeTool(agent, task),
-      createSetReminderTool(agent, task),
-      createCancelReminderTool(agent, task),
-    ],
+    tools: SCHEDULING_TOOL_SPECS.map((spec) =>
+      tool(spec.name, spec.description, spec.schema, (args: any) => spec.handler(agent, task, args)),
+    ),
   });
+}
+
+/**
+ * Build the scheduling-tool handler map keyed by tool name — for the opencode
+ * bridge (registered PM-only).
+ */
+export function createSchedulingHandlers(agent: Agent, task: Task): Record<string, (args: unknown) => Promise<ToolResult>> {
+  const handlers: Record<string, (args: unknown) => Promise<ToolResult>> = {};
+  for (const spec of SCHEDULING_TOOL_SPECS) {
+    handlers[spec.name] = (args: unknown) => spec.handler(agent, task, args);
+  }
+  return handlers;
 }
 
 /**

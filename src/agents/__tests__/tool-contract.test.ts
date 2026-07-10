@@ -13,6 +13,9 @@ import {
   createCommsMcpServer,
   createOrchestrationMcpServer,
   createSchedulingMcpServer,
+  createCommsHandlers,
+  createOrchestrationHandlers,
+  createSchedulingHandlers,
 } from '../tools.js';
 import type { Agent } from '../agent.js';
 import type { Task } from '../../tasks/task.js';
@@ -210,5 +213,49 @@ describe('PM MCP server contracts', () => {
     const server = createSchedulingMcpServer(pmAgent(), makeTask());
     const registered = getRegisteredToolNames(server).map((n) => `mcp__scheduling-tools__${n}`);
     expect(registered.sort()).toEqual(PM_SCHEDULING_TOOLS.sort());
+  });
+});
+
+// ---- opencode bridge handler factories ----
+//
+// `createCommsHandlers`/`createOrchestrationHandlers`/`createSchedulingHandlers`
+// (src/agents/tools.ts) are the opencode-bridge counterparts of the Claude SDK
+// servers above — same handler bodies, exposed as a plain
+// `name -> (args) => Promise<ToolResult>` map instead of an MCP server. Each
+// factory's key set must match its SDK server's tool set MINUS the control
+// tools bridged separately (`post_to_user`, `report_completion`,
+// `request_edit_mode` — see `TOOL_WHITELIST` in
+// `src/runtime/opencode/bridge/server.ts`), so there is no double-registration.
+
+const BRIDGED_COMMS_TOOLS = PM_COMMS_TOOLS
+  .map((n) => n.replace('mcp__comms-tools__', ''))
+  .filter((n) => n !== 'post_to_user');
+
+const BRIDGED_ORCHESTRATION_TOOLS = PM_ORCHESTRATION_TOOLS
+  .map((n) => n.replace('mcp__orchestration-tools__', ''))
+  .filter((n) => n !== 'report_completion' && n !== 'request_edit_mode');
+
+const BRIDGED_SCHEDULING_TOOLS = PM_SCHEDULING_TOOLS
+  .map((n) => n.replace('mcp__scheduling-tools__', ''));
+
+describe('opencode bridge handler factories', () => {
+  const pmAgent = () => makeAgent({ isPm: true, repo: undefined, id: 'pm-agent' });
+
+  it('createCommsHandlers matches comms-tools minus already-bridged control tools', () => {
+    const handlers = createCommsHandlers(pmAgent(), makeTask());
+    expect(Object.keys(handlers).sort()).toEqual(BRIDGED_COMMS_TOOLS.sort());
+    expect(Object.keys(handlers)).not.toContain('post_to_user');
+  });
+
+  it('createOrchestrationHandlers matches orchestration-tools minus already-bridged control tools', () => {
+    const handlers = createOrchestrationHandlers(pmAgent(), makeTask());
+    expect(Object.keys(handlers).sort()).toEqual(BRIDGED_ORCHESTRATION_TOOLS.sort());
+    expect(Object.keys(handlers)).not.toContain('report_completion');
+    expect(Object.keys(handlers)).not.toContain('request_edit_mode');
+  });
+
+  it('createSchedulingHandlers matches scheduling-tools exactly (no control tools in this server)', () => {
+    const handlers = createSchedulingHandlers(pmAgent(), makeTask());
+    expect(Object.keys(handlers).sort()).toEqual(BRIDGED_SCHEDULING_TOOLS.sort());
   });
 });
