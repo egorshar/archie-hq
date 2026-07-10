@@ -1,0 +1,255 @@
+/**
+ * Tests for the Slack client behaviours added in the v32 permissions rework:
+ *  - fetchSlackThread.rootAuthorWasBot detection + keeping the bot's root message
+ *  - fetchChannelHistory / fetchExploreThread accessible-set gate
+ *    (assertAccessibleChannel): public, or this task's own channel via allowedIds;
+ *    other private/DMs refused. History returned chronologically.
+ *  - listBotChannels lists public memberships only
+ *  - assertPostableChannel: posting open to public/private channels, closed to DMs/mpims
+ *
+ * The whole Slack WebClient is faked via @slack/web-api. The module is reset
+ * before each test so the client's internal caches (channel info, shared status,
+ * user info) never leak across cases.
+ */
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+// One shared fake WebClient; methods are reconfigured per test.
+const slackApi = {
+  auth: { test: vi.fn() },
+  conversations: { info: vi.fn(), replies: vi.fn(), history: vi.fn() },
+  users: { info: vi.fn(), conversations: vi.fn() },
+  usergroups: { list: vi.fn() },
+};
+
+// WebClient is used with `new`, so the mock implementation must be a regular
+// (constructable) function that returns our shared fake.
+vi.mock('@slack/web-api', () => ({
+  WebClient: vi.fn(function (this: unknown) { return slackApi; }),
+}));
+vi.mock('../../../system/logger.js', () => ({
+  logger: { slack: vi.fn(), warn: vi.fn(), system: vi.fn(), error: vi.fn(), plain: vi.fn() },
+}));
+
+type ClientModule = typeof import('../client.js');
+let client: ClientModule;
+
+/** Build a raw Slack message; `text` falls back through blocks to the text field. */
+function rawMsg(over: Record<string, unknown>): Record<string, unknown> {
+  return { type: 'message', ts: '1.0', text: 'hi', ...over };
+}
+
+const BOT_USER = 'UBOT';
+const BOT_ID = 'BBOT';
+
+beforeEach(async () => {
+  vi.clearAllMocks();
+  vi.resetModules();
+
+  slackApi.auth.test.mockResolvedValue({
+    user_id: BOT_USER, bot_id: BOT_ID, team_id: 'THOME', url: 'https://acme.slack.com',
+  });
+  slackApi.usergroups.list.mockResolvedValue({ usergroups: [] });
+  slackApi.users.info.mockImplementation(async ({ user }: { user: string }) => ({
+    ok: true,
+    user: { id: user, name: user.toLowerCase(), real_name: `Real ${user}`, team_id: 'THOME', profile: {} },
+  }));
+  // Default: a public, non-shared channel.
+  slackApi.conversations.info.mockResolvedValue({
+    ok: true, channel: { id: 'C1', name: 'general', is_private: false, is_im: false, is_mpim: false },
+  });
+
+  client = await import('../client.js');
+  await client.initSlackClient('xoxb-test');
+});
+
+describe('fetchSlackThread — rootAuthorWasBot', () => {
+  it('is true when the root is our bot (by user id) and keeps the root message', async () => {
+    slackApi.conversations.replies.mockResolvedValue({
+      messages: [
+        rawMsg({ ts: '100.0', user: BOT_USER, text: 'anyone seen the deploy fail?' }),
+        rawMsg({ ts: '101.0', user: 'UHUMAN', text: 'yes, looking now' }),
+      ],
+    });
+
+    const thread = await client.fetchSlackThread('C_botuser', '100.0', '101.0');
+
+    expect(thread.rootAuthorWasBot).toBe(true);
+    const texts = thread.messages.map((m) => m.text);
+    expect(texts).toContain('anyone seen the deploy fail?'); // bot root preserved
+    expect(texts).toContain('yes, looking now');
+  });
+
+  it('is true when the root is our bot (by bot_id, no user)', async () => {
+    slackApi.conversations.replies.mockResolvedValue({
+      messages: [
+        rawMsg({ ts: '200.0', user: undefined, bot_id: BOT_ID, bot_profile: { name: 'Archie' }, text: 'posted via app' }),
+        rawMsg({ ts: '201.0', user: 'UHUMAN', text: 'on it' }),
+      ],
+    });
+
+    const thread = await client.fetchSlackThread('C_botid', '200.0', '201.0');
+
+    expect(thread.rootAuthorWasBot).toBe(true);
+  });
+
+  it('is false for a human-started thread, and filters out the bot\'s non-root replies', async () => {
+    slackApi.conversations.replies.mockResolvedValue({
+      messages: [
+        rawMsg({ ts: '300.0', user: 'UHUMAN', text: 'human starts the thread' }),
+        rawMsg({ ts: '301.0', user: BOT_USER, text: 'archie chimed in' }), // non-root bot → filtered
+        rawMsg({ ts: '302.0', user: 'UHUMAN2', text: 'another human' }),
+      ],
+    });
+
+    const thread = await client.fetchSlackThread('C_human', '300.0', '302.0');
+
+    expect(thread.rootAuthorWasBot).toBe(false);
+    const texts = thread.messages.map((m) => m.text);
+    expect(texts).toContain('human starts the thread');
+    expect(texts).toContain('another human');
+    expect(texts).not.toContain('archie chimed in'); // bot non-root message filtered out
+  });
+});
+
+describe('fetchChannelHistory — public only, chronological', () => {
+  it('refuses a private channel before reading any history', async () => {
+    slackApi.conversations.info.mockResolvedValue({
+      ok: true, channel: { id: 'C_priv', name: 'secret', is_private: true },
+    });
+
+    await expect(client.fetchChannelHistory('C_priv')).rejects.toBeInstanceOf(client.PrivateChannelError);
+    expect(slackApi.conversations.history).not.toHaveBeenCalled();
+  });
+
+  it('refuses a DM / group DM', async () => {
+    slackApi.conversations.info.mockResolvedValue({
+      ok: true, channel: { id: 'D_dm', name: 'dm', is_im: true },
+    });
+    await expect(client.fetchChannelHistory('D_dm')).rejects.toBeInstanceOf(client.PrivateChannelError);
+  });
+
+  it('returns a public channel\'s history oldest-first (history API is newest-first)', async () => {
+    slackApi.conversations.info.mockResolvedValue({
+      ok: true, channel: { id: 'C_pub', name: 'general', is_private: false },
+    });
+    slackApi.conversations.history.mockResolvedValue({
+      messages: [
+        rawMsg({ ts: '3.0', user: 'U3', text: 'newest' }),
+        rawMsg({ ts: '2.0', user: 'U2', text: 'middle' }),
+        rawMsg({ ts: '1.0', user: 'U1', text: 'oldest' }),
+      ],
+    });
+
+    const { channel, messages } = await client.fetchChannelHistory('C_pub');
+
+    expect(channel).toMatchObject({ id: 'C_pub', name: 'general' });
+    expect(messages.map((m) => m.text)).toEqual(['oldest', 'middle', 'newest']);
+  });
+
+  it("allows this task's OWN channel even when it's private (via allowedIds)", async () => {
+    slackApi.conversations.info.mockResolvedValue({
+      ok: true, channel: { id: 'C_own', name: 'mgmt', is_private: true },
+    });
+    slackApi.conversations.history.mockResolvedValue({
+      messages: [rawMsg({ ts: '1.0', user: 'U1', text: 'private but ours' })],
+    });
+
+    const { messages } = await client.fetchChannelHistory('C_own', 30, new Set(['C_own']));
+
+    expect(messages.map((m) => m.text)).toEqual(['private but ours']);
+  });
+});
+
+describe('listBotChannels — public memberships only', () => {
+  it('lists the public channels the bot is a member of (never private)', async () => {
+    slackApi.users.conversations.mockResolvedValue({
+      ok: true,
+      channels: [
+        { id: 'C1', name: 'general', is_private: false },
+        { id: 'C2', name: 'eng', is_private: false, topic: { value: 'engineering' } },
+      ],
+    });
+    const channels = await client.listBotChannels();
+    expect(slackApi.users.conversations).toHaveBeenCalledWith(
+      expect.objectContaining({ types: 'public_channel', exclude_archived: true }),
+    );
+    expect(channels.map((c) => c.id)).toEqual(['C1', 'C2']);
+    expect(channels[1]).toMatchObject({ name: 'eng', topic: 'engineering' });
+  });
+});
+
+describe('fetchExploreThread — accessible-set gate, no bot filtering', () => {
+  it("allows this task's OWN channel even when it's private (via allowedIds)", async () => {
+    slackApi.conversations.info.mockResolvedValue({
+      ok: true, channel: { id: 'C_own', name: 'mgmt', is_private: true },
+    });
+    slackApi.conversations.replies.mockResolvedValue({
+      messages: [rawMsg({ ts: '1.0', user: 'U1', text: 'ours' })],
+    });
+    const { messages } = await client.fetchExploreThread('C_own', '1.0', new Set(['C_own']));
+    expect(messages.map((m) => m.text)).toEqual(['ours']);
+  });
+
+  it('refuses a private channel that is NOT this task\'s own (no allowedIds)', async () => {
+    slackApi.conversations.info.mockResolvedValue({
+      ok: true, channel: { id: 'C_pt', name: 'secret', is_private: true },
+    });
+    await expect(client.fetchExploreThread('C_pt', '1.0')).rejects.toBeInstanceOf(client.PrivateChannelError);
+    expect(slackApi.conversations.replies).not.toHaveBeenCalled();
+  });
+
+  it('keeps the bot\'s messages (explore is unfiltered) and preserves files & reactions', async () => {
+    slackApi.conversations.info.mockResolvedValue({
+      ok: true, channel: { id: 'C_pt', name: 'general', is_private: false },
+    });
+    slackApi.conversations.replies.mockResolvedValue({
+      messages: [
+        rawMsg({
+          ts: '1.0', user: 'U1', text: 'see attached',
+          files: [{ id: 'F1', name: 'log.txt', mimetype: 'text/plain', url_private: 'https://x/log.txt' }],
+          reactions: [{ name: 'eyes', count: 2 }],
+        }),
+        rawMsg({ ts: '2.0', user: BOT_USER, text: 'archie reply (kept in explore reads)' }),
+      ],
+    });
+
+    const { messages } = await client.fetchExploreThread('C_pt', '1.0');
+
+    // Unlike task ingestion, explore reads do NOT filter the bot's messages.
+    expect(messages.map((m) => m.text)).toContain('archie reply (kept in explore reads)');
+    const withFile = messages.find((m) => m.files?.length);
+    expect(withFile?.files?.[0]).toMatchObject({ id: 'F1', name: 'log.txt' });
+    const withReaction = messages.find((m) => m.reactions?.length);
+    expect(withReaction?.reactions?.[0]).toMatchObject({ name: 'eyes', count: 2 });
+  });
+});
+
+describe('assertPostableChannel — posting is open to channels, closed to DMs', () => {
+  it('refuses a group DM (mpim) — the case the id-prefix check cannot see', async () => {
+    slackApi.conversations.info.mockResolvedValue({
+      ok: true, channel: { id: 'G_mpim', name: 'mpdm', is_private: true, is_mpim: true },
+    });
+    await expect(client.assertPostableChannel('G_mpim')).rejects.toBeInstanceOf(client.DmPostError);
+  });
+
+  it('refuses a 1:1 DM', async () => {
+    slackApi.conversations.info.mockResolvedValue({
+      ok: true, channel: { id: 'D_dm', name: 'dm', is_im: true },
+    });
+    await expect(client.assertPostableChannel('D_dm')).rejects.toBeInstanceOf(client.DmPostError);
+  });
+
+  it('ALLOWS a private channel (posting is intentionally broad — e.g. escalation)', async () => {
+    slackApi.conversations.info.mockResolvedValue({
+      ok: true, channel: { id: 'C_priv', name: 'mgmt', is_private: true, is_im: false, is_mpim: false },
+    });
+    await expect(client.assertPostableChannel('C_priv')).resolves.toBeUndefined();
+  });
+
+  it('ALLOWS a public channel', async () => {
+    slackApi.conversations.info.mockResolvedValue({
+      ok: true, channel: { id: 'C_pub', name: 'general', is_private: false, is_im: false, is_mpim: false },
+    });
+    await expect(client.assertPostableChannel('C_pub')).resolves.toBeUndefined();
+  });
+});

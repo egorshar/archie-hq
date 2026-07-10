@@ -21,9 +21,9 @@ Models for repo and plugin agents come from each agent's plugin frontmatter (`mo
 
 The triage agent is **not invoked** by the running system. In `src/connectors/slack/events.ts` the `triageSlackMessage` import and dispatch block are commented out — every incoming Slack event is routed directly to the PM agent:
 
-- A new thread (or DM, or @mention in a channel) creates a fresh `Task` and sends `AGENT_PROMPTS.newTask` to the PM.
+- A fresh `Task` is created (and `AGENT_PROMPTS.newTask` sent to the PM) on an `@mention`, a DM, or a human reply to a thread Archie itself started (`rootAuthorWasBot` — a top-level message it posted via the `post_to_channel` explore tool).
 - A reply in a thread already linked to a task appends the new messages and sends `AGENT_PROMPTS.existingTask` to that task's PM.
-- Replies in threads the bot was never part of are ignored.
+- A reply in a human-started thread the bot didn't start is ignored.
 
 GitHub events follow the same deterministic pattern in `connectors/github/webhooks.ts` (PR reviews, push events, CI results) — none of them call triage either.
 
@@ -54,16 +54,18 @@ One PM agent instance is spawned per task. It is the orchestrator: it receives a
 | Tool | Purpose |
 |---|---|
 | `send_message_to_agent` | Send instructions/questions to any agent |
-| `post_to_user` | Send a message to the user. Routes to the default linked channel, an existing linked thread (`target.channel`), a new DM (`target.new_dm`), or a new thread in a channel (`target.new_thread`). The Slack/CLI/GitHub specifics live in `Task.postToUser`, so the PM never picks a transport directly. The prompt steers the PM to stay where the task lives (in a channel thread, `@mention` people there; in a DM, stay 1:1); `new_dm`/`new_thread` are reserved for explicit user requests or cases a loaded skill/workflow requires. |
+| `post_to_user` | Send a message to the user. Routes to the default linked channel or an existing linked thread (`target.channel`). The Slack/CLI/GitHub specifics live in `Task.postToUser`, so the PM never picks a transport directly. The PM cannot open new DMs or new task-linked threads — it stays where the task lives (in a channel thread, `@mention` people there; in a DM, stay 1:1). |
 | `post_files_to_user` | Upload files to an already-linked thread (default channel or `channel` key). Does not open new destinations. |
 | `share_artifact` | Publish an immutable, deduped snapshot of a file under `<task>/shared/artifacts/` for inter-agent sharing. |
-| `find_slack_user` / `find_slack_channel` | Look up Slack user/channel IDs and metadata before opening a DM or new thread. |
+| `find_slack_user` / `find_slack_channel` | Look up Slack user/channel IDs and metadata (e.g. a channel ID before reading or posting to it). |
+| `list_channels` | List the channels readable for this task (`users.conversations`): every public channel Archie's in, **plus this task's own channel** if it's private/a DM (appended from task metadata). Never enumerates other private channels/DMs. |
+| `read_channel_history` / `read_thread` | Read a channel's recent messages, or a specific thread — exploration only, not linked to the task. **Accessible-set gate** (`assertAccessibleChannel`): any public channel, plus this task's own channel (even if private/DM); any *other* private channel/DM is refused. |
+| `post_to_channel` | Post into **any** channel Archie's a member of — public **or** private (e.g. escalate to a private management channel) — WITHOUT linking it to the task. 1:1 DMs and group DMs (mpims) refused via `assertPostableChannel`. NOT accessible-set-gated (posting outward is intentional); a prompt guardrail warns against leaking sensitive content. A human reply to a new top-level post here starts its own fresh task. |
 | `assign_task_owner` | Designate an agent as task owner |
 | `report_completion` | Optionally post a final message, then stop the task |
 | `request_edit_mode` | Post an interactive Approve/Deny prompt to the default channel and pause the task |
 | `get_agents_status` | Check which agents are spawned and active |
 | `mute_channel` | Disengage from one Slack channel/thread (the one named via `channel`, or the task's default channel) until the bot is @mentioned there again. DM channels cannot be muted |
-| `launch_task` | Launch a new independent background task (with notification posted to the current channel). The prompt steers the PM to keep follow-up work inside the current task and reserve this for explicit user requests or workflow-driven background work, since a launched task has no trace back to the originating one. |
 | `parse_datetime` / `set_reminder` / `cancel_reminder` | Schedule a reminder that wakes the task at an ISO datetime |
 | `list_available_repos` | List repos the GitHub App installation can reach (paginates `GET /installation/repositories`); tags repos a plugin specialist already covers. Cached per task. |
 | `spawn_repo_agent` | Create an on-demand repo agent bound to a chosen list of available repos (eager-mounted at spawn). Persists a `DynamicAgentSpec` to `metadata.dynamic_agents` and adds it to `task.team`. Rejects a repo already owned as a plugin specialist's primary. |
