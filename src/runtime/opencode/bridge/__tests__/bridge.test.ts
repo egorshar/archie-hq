@@ -1,6 +1,8 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { mkdir, rm } from 'fs/promises';
 import { SessionRegistry } from '../registry.js';
 import { startBridgeServer, RO_BUILTIN_BLOCK, type BridgeHandle } from '../server.js';
+import { getSharedPath, getTaskPath } from '../../../../tasks/persistence.js';
 
 function fakeSession() {
   const posted: any[] = [];
@@ -241,6 +243,76 @@ describe('bridge server', () => {
       expect(body.some((t: any) => t.name === 'push_branch')).toBe(true);
       expect(body.some((t: any) => t.name === 'list_branches')).toBe(true);
       expect(body.some((t: any) => t.name === 'get_pr_status')).toBe(true);
+    });
+  });
+
+  describe('web_research', () => {
+    // runWebResearch checks PERPLEXITY_API_KEY before the budget check; stub
+    // a dummy value so the budget-exceeded case (below) short-circuits before
+    // any network call. appendAgentFinding on that path writes a real
+    // knowledge.log under <task>/shared/, so create the directory a real
+    // Task.create() would have.
+    const TASK_ID = 'test-bridge-web-research';
+    const ORIGINAL_PERPLEXITY_API_KEY = process.env.PERPLEXITY_API_KEY;
+
+    beforeEach(async () => {
+      process.env.PERPLEXITY_API_KEY = 'test-key';
+      await mkdir(getSharedPath(TASK_ID), { recursive: true });
+    });
+
+    afterEach(async () => {
+      if (ORIGINAL_PERPLEXITY_API_KEY === undefined) {
+        delete process.env.PERPLEXITY_API_KEY;
+      } else {
+        process.env.PERPLEXITY_API_KEY = ORIGINAL_PERPLEXITY_API_KEY;
+      }
+      await rm(getTaskPath(TASK_ID), { recursive: true, force: true });
+    });
+
+    function fakeResearchSession(budgetAllowed: boolean) {
+      const task: any = {
+        taskId: TASK_ID,
+        checkResearchBudget: () => ({ allowed: budgetAllowed, used: budgetAllowed ? 0 : 5, limit: 5 }),
+        incrementResearchCount: vi.fn(),
+        onResearchBudgetExceeded: vi.fn(async () => {}),
+      };
+      const agent: any = { def: { id: 'pm-agent' } };
+      return { task, agent };
+    }
+
+    it('includes web_research in the /tools manifest', async () => {
+      const res = await fetch(`${handle.url}/tools`, { headers: { authorization: `Bearer ${handle.token}` } });
+      const body: any = await res.json();
+      expect(body.some((t: any) => t.name === 'web_research')).toBe(true);
+    });
+
+    it('is not blocked by the read-only write-tool rejection (research is not a repo write)', async () => {
+      const { task, agent } = fakeResearchSession(false);
+      registry.set('ro-research', { task, agent, readOnly: true });
+      const res = await fetch(`${handle.url}/tool`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${handle.token}` },
+        body: JSON.stringify({ sessionId: 'ro-research', tool: 'web_research', args: { topic: 'x' } }),
+      });
+      const body: any = await res.json();
+      // Reached the real handler (not pre-dispatch rejected as a write tool).
+      expect(body.ok).toBe(true);
+    });
+
+    it('dispatches to the real handler end-to-end: budget-exceeded triggers the stop flow and returns a defense-wrapped result', async () => {
+      const { task, agent } = fakeResearchSession(false);
+      registry.set('s-research', { task, agent, readOnly: false });
+      const res = await fetch(`${handle.url}/tool`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${handle.token}` },
+        body: JSON.stringify({ sessionId: 's-research', tool: 'web_research', args: { topic: 'x' } }),
+      });
+      const body: any = await res.json();
+      expect(body.ok).toBe(true);
+      expect(typeof body.result).toBe('string');
+      expect(body.result).toMatch(/^<research_result source="external_web">/);
+      expect(body.result).toMatch(/budget exceeded/i);
+      expect(task.onResearchBudgetExceeded).toHaveBeenCalled();
     });
   });
 });

@@ -1,17 +1,21 @@
 /**
  * opencode tool bridge — Archie-side HTTP listener.
  *
- * opencode's server runs as a child process; Archie's typed control tools and
- * repo-host (git/PR) tools (which close over the live in-memory
- * `Task`/`Agent`) are reached from an opencode plugin via this localhost-only
- * bridge. The plugin POSTs `{ sessionId, tool, args }` to `/tool`; the bridge
- * resolves the session in the `SessionRegistry`, dispatches to one of a FIXED
- * whitelist built from the 3 control-tool handlers plus the session's
- * repo-tool handlers (`createRepoToolHandlers`, from `src/agents/tools.ts` —
- * the same handler bodies the Claude-path SDK MCP server uses), and returns
- * `{ ok: true, result }` or `{ ok: false, error }`. `result` is the tool's
- * `ToolResult` unwrapped to a plain string (opencode's custom-tool `execute`
- * must return a string, not a JSON object).
+ * opencode's server runs as a child process; Archie's typed control tools,
+ * the research tool, and repo-host (git/PR) tools (all of which close over
+ * the live in-memory `Task`/`Agent`) are reached from an opencode plugin via
+ * this localhost-only bridge. The plugin POSTs `{ sessionId, tool, args }` to
+ * `/tool`; the bridge resolves the session in the `SessionRegistry`,
+ * dispatches to one of a FIXED whitelist built from the 3 control-tool
+ * handlers, the `web_research` handler (`createResearchToolHandler`, from
+ * `src/mcp/research-tools.ts` — folds in the budget check, persistence, and
+ * defense-tag wrapping the Claude path spreads across the tool + 2
+ * PostToolUse hooks), and the session's repo-tool handlers
+ * (`createRepoToolHandlers`, from `src/agents/tools.ts` — the same handler
+ * bodies the Claude-path SDK MCP server uses), and returns `{ ok: true,
+ * result }` or `{ ok: false, error }`. `result` is the tool's `ToolResult`
+ * unwrapped to a plain string (opencode's custom-tool `execute` must return a
+ * string, not a JSON object).
  *
  * Read-only enforcement (defense in depth, layer 2 — layer 1 is the opencode
  * plugin's `tool.execute.before` guard blocking built-in write tools):
@@ -44,6 +48,7 @@ import {
   type RequestEditModeArgs,
   type ToolResult,
 } from '../../../agents/tools.js';
+import { createResearchToolHandler } from '../../../mcp/research-tools.js';
 import type { Agent } from '../../../agents/agent.js';
 import type { Task } from '../../../tasks/task.js';
 import type { SessionRegistry, BridgeSession } from './registry.js';
@@ -109,6 +114,14 @@ const TOOL_DESCRIPTORS: ToolDescriptor[] = [
       reason: { type: 'string' },
       channel: { type: 'string', optional: true },
     } satisfies Record<keyof RequestEditModeArgs, ArgSpec>,
+  },
+  {
+    name: 'web_research',
+    description: 'Research a topic using web search. Classifies query complexity and delegates to the appropriate search engine. Returns findings as markdown. Use for any task requiring up-to-date information from the internet.',
+    argsSchema: {
+      topic: { type: 'string' },
+      context: { type: 'string', optional: true },
+    },
   },
 ];
 
@@ -239,9 +252,10 @@ type BoundHandler = (args: unknown) => Promise<ToolResult>;
 
 /**
  * Build the full own-key-only handler map for one session: the 3 fixed
- * control-tool handlers (bound to this session's `agent`/`task`) plus the
- * session's repo-tool handlers (`createRepoToolHandlers`, already bound to
- * `agent`/`task` — same handler bodies the Claude-path SDK MCP server uses).
+ * control-tool handlers plus `web_research` (all bound to this session's
+ * `agent`/`task`), plus the session's repo-tool handlers
+ * (`createRepoToolHandlers`, already bound to `agent`/`task` — same handler
+ * bodies the Claude-path SDK MCP server uses).
  * A `Map`, never a plain object, for the same prototype-fallthrough reason as
  * `TOOL_WHITELIST` above: `Object.keys(repoHandlers)` only ever yields the
  * fixed, own, enumerable tool names `createRepoToolHandlers` assigned, so
@@ -255,6 +269,10 @@ function buildSessionHandlers(session: BridgeSession): Map<string, BoundHandler>
   for (const [name, handler] of TOOL_WHITELIST) {
     handlers.set(name, (args: unknown) => handler(session.agent, session.task, args));
   }
+  // Every agent gets research (like the control tools above) — folds the
+  // Claude-path budget/persistence/defense-tag logic into the handler itself
+  // (see createResearchToolHandler's doc comment).
+  handlers.set('web_research', createResearchToolHandler(session.agent, session.task));
   const repoHandlers = createRepoToolHandlers(session.agent, session.task);
   for (const name of Object.keys(repoHandlers)) {
     handlers.set(name, repoHandlers[name]!);
