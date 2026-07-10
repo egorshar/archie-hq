@@ -36,6 +36,11 @@ describe('claude-render byte-identical regression', () => {
     expect(out).toContain('- If NO: I must call `Skill` tool to load it before proceeding');
     expect(out).toContain('- Action: [Load skill via `Skill` tool / Already loaded, using workflow from it]');
     expect(out).toContain('- Load the relevant domain skill via `Skill` tool (e.g. engineering, marketing)');
+    // Completion-guidance block: claude keeps the verbatim original (incl. the
+    // "confirm completion" line the opencode variant drops).
+    expect(out).toContain('**When to include a message with report_completion** (user-facing milestones):');
+    expect(out).toContain('- Work completed (confirm completion)');
+    expect(out).toContain('**When to omit the message** (internal transitions):');
     expect(out).not.toContain('{{');
   });
 
@@ -47,6 +52,20 @@ describe('claude-render byte-identical regression', () => {
       PM_INTEGRATIONS: '',
     });
     expect(out).not.toMatch(/`Skill`/);
+    expect(out).not.toContain('{{');
+  });
+
+  it('opencode render of pm-agent enforces single-delivery completion (no redundant confirm)', async () => {
+    const out = await loadPrompt('pm-agent', {
+      ...runtimePromptVars('opencode'),
+      TEAM_LIST: '',
+      TEAM_EXPERTISE: '',
+      PM_INTEGRATIONS: '',
+    });
+    expect(out).toContain('**Deliver your answer exactly once, then finish.**');
+    expect(out).toContain('`report_completion()` with NO message');
+    // The "confirm completion" invitation that induced the double-post is gone.
+    expect(out).not.toContain('- Work completed (confirm completion)');
     expect(out).not.toContain('{{');
   });
 
