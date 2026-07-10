@@ -149,6 +149,13 @@ describe('OpencodeLlmOneShot.text', () => {
 
     expect(serverA.close).toHaveBeenCalledTimes(1); // boot A closed its own stale server
     expect(serverB.close).not.toHaveBeenCalled(); // boot B's server is untouched
+
+    // Adjacent hole: boot A's failure-path catch must NOT null the singleton that
+    // now points at boot B — a later call must reuse B's live server (no third
+    // boot, no orphaned/leaked B child).
+    await oneShot.text({ model: 'haiku', prompt: 'c' });
+    expect(startEmbeddedServerMock).toHaveBeenCalledTimes(2); // still only A + B
+    expect(serverB.close).not.toHaveBeenCalled(); // B stays live and reachable
   });
 });
 

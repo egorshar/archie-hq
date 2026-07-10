@@ -36,7 +36,7 @@ let bootGeneration = 0;
 function getOneShotClient(): Promise<OpencodeClient> {
   if (!servePromise) {
     const myGeneration = bootGeneration;
-    servePromise = (async () => {
+    const boot: Promise<EmbeddedServer> = (async () => {
       const root = join(WORKDIR, 'opencode-server', 'one-shot');
       await prepareServeRoot(root);
       const model = resolveOpencodeModel('haiku');
@@ -50,9 +50,13 @@ function getOneShotClient(): Promise<OpencodeClient> {
       }
       return server;
     })().catch((err) => {
-      servePromise = null; // allow a later call to retry a failed startup
+      // Identity-guarded: only clear the singleton if it still points at THIS
+      // boot — a stale boot's failure (e.g. a close-during-boot self-abort) must
+      // not null out a newer boot's live chain and orphan its server.
+      if (servePromise === boot) servePromise = null; // allow a later call to retry a failed startup
       throw err;
     });
+    servePromise = boot;
   }
   return servePromise.then((s) => s.client);
 }
