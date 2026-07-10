@@ -10,6 +10,9 @@
  * steered by its prompt, not by which skills are visible. See
  * docs/guides/opencode-setup.md.
  */
+import { mkdir, readFile, appendFile } from 'fs/promises';
+import { join, dirname } from 'path';
+import type { AgentDef } from '../../types/agent.js';
 import { getAllAgentDefs } from '../../agents/registry.js';
 import { linkAgentSkills } from '../../agents/skill-linking.js';
 
@@ -29,4 +32,39 @@ export async function stageOpencodeSkills(skillsDir: string): Promise<number> {
   );
   await linkAgentSkills(skillsDir, sources);
   return sources.length;
+}
+
+/**
+ * Stage ONE agent's skills into a per-child skills dir (P3a §4): only
+ * `def.skillsPath` + `def.coreSkillsPath`, plugin source first so it shadows a
+ * core skill of the same name (same ordering the Claude spawn path uses).
+ * Returns the staged source count for logging. Clear-and-rebuild via
+ * linkAgentSkills, so idempotent.
+ */
+export async function stageAgentSkills(def: AgentDef, skillsDir: string): Promise<number> {
+  const sources = [def.skillsPath, def.coreSkillsPath].filter(
+    (s): s is string => typeof s === 'string' && s.length > 0,
+  );
+  await linkAgentSkills(skillsDir, sources);
+  return sources.length;
+}
+
+/**
+ * Keep a clone-hosted `.opencode/` (staged skills + generated bridge plugin,
+ * which embeds a live bearer token) out of any commit by appending it to the
+ * clone's `.git/info/exclude` (repo-local, never touches tracked files —
+ * same mechanism planned for ai-context outputs). Idempotent.
+ */
+export async function excludeOpencodeFromGit(cloneRoot: string): Promise<void> {
+  const excludePath = join(cloneRoot, '.git', 'info', 'exclude');
+  await mkdir(dirname(excludePath), { recursive: true });
+  let current = '';
+  try {
+    current = await readFile(excludePath, 'utf8');
+  } catch {
+    current = ''; // no exclude file yet — created by the append below
+  }
+  if (current.split('\n').includes('.opencode/')) return;
+  const sep = current === '' || current.endsWith('\n') ? '' : '\n';
+  await appendFile(excludePath, `${sep}.opencode/\n`);
 }
