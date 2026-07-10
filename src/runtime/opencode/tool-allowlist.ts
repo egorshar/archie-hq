@@ -1,11 +1,11 @@
 /**
  * Per-turn external-MCP tool DENYLIST for opencode (body.tools). config.mcp is
- * server-global, so every session sees every MCP server's tools. The B.3 T0
- * spike (b3-spike.md) pinned that body.tools is a denylist overlay — unlisted
- * tools stay ON — so to restrict a turn to the external servers THIS agent
+ * server-global, so every session sees every MCP server's tools. opencode's
+ * body.tools is a denylist overlay — unlisted tools stay ON — so to restrict a
+ * turn to the external servers THIS agent
  * declared (def.mcpServers), we DISABLE every other external server via the
  * `<server>_*` wildcard. body.tools globs are raw string-PREFIX matches and MCP
- * tools are named `<server>_<tool>` (T0 spike), so the deny key must carry the
+ * tools are named `<server>_<tool>`, so the deny key must carry the
  * `_` separator: `jira_*` scopes exactly to `jira`'s tools and does NOT collide
  * with a declared `jira-cloud` (whose tools start with `jira-`, not `jira_`). A
  * bare `jira*` would silently disable `jira-cloud` too. The agent's own

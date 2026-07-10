@@ -65,7 +65,7 @@ const CLAUDE_ID_IN_ROUTE_RE = /(anthropic\/)?claude-.*/;
 
 /**
  * The server-global model route as a `provider/model` string, for the footer.
- * config.model is server-wide in opencode (spike.md §5), so this reflects the
+ * config.model is server-wide in opencode, so this reflects the
  * single default route. Returns null when unresolved (never throws — the footer
  * is best-effort). When the route contains a claude id, this trims any
  * provider-wrapper prefix so it begins at `anthropic/claude-`/`claude-`, letting

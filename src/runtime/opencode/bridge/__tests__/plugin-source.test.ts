@@ -35,7 +35,7 @@ describe('bridge plugin source', () => {
     const src = renderBridgePlugin('http://127.0.0.1:54321', 'tok-abc');
     expect(src).toContain('http://127.0.0.1:54321');
     expect(src).toContain('tok-abc');
-    expect(src).toContain('ctx.sessionID'); // spike-confirmed accessor
+    expect(src).toContain('ctx.sessionID'); // opencode's session-id accessor
     expect(src).toContain('/tools'); // fetches the manifest on load
     expect(src).toContain('/tool'); // forwards execute
     expect(src).toContain('@opencode-ai/plugin');

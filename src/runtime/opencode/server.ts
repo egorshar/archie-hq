@@ -8,8 +8,7 @@
  * boot (Task 4: fixes the "first caller decides whether the bridge exists"
  * race — a one-shot firing before any agent turn still yields a
  * bridge-equipped server; one-shots simply never call the bridged control
- * tools). See src/runtime/opencode/__spike__/spike.md §5 (model routing) and
- * §6 (permission hang fix).
+ * tools).
  */
 import { createOpencode } from '@opencode-ai/sdk';
 import { join } from 'node:path';
@@ -32,7 +31,7 @@ export type OpencodeClient = Awaited<ReturnType<typeof createOpencode>>['client'
 export const sharedRegistry = new SessionRegistry();
 
 /**
- * B.1 read-only permission recipe (spike.md §6): allow reads/webfetch/
+ * B.1 read-only permission recipe: allow reads/webfetch/
  * external-directory access so the turn doesn't hang on a permission ask.
  * RO enforcement (denying edit/bash while read-only) is B.2, NOT here.
  */
@@ -45,7 +44,7 @@ const READ_ONLY_PERMISSION = {
 
 /**
  * Logical model name for the server-global `config.model` route. `config.model`
- * is set once for the whole embedded-server singleton (spike.md §5): it isn't
+ * is set once for the whole embedded-server singleton: it isn't
  * per-prompt, so a single shared-server default is required. B.1 is PM-only,
  * so resolving the generic `default` route (env `ARCHIE_OPENCODE_MODEL_DEFAULT`)
  * is sufficient here. If a specialist turn later needs a different model on
@@ -80,12 +79,12 @@ let serverHandle: { close(): void } | null = null;
  *
  * On first call: starts the bridge listener (`startBridgeServer`), places the
  * generated bridge plugin into `<serverCwd>/.opencode/plugins/` with the live
- * url+token (spike.md §1: plugins load from `<serverCwd>/.opencode/plugins/*.ts`,
+ * url+token (plugins load from `<serverCwd>/.opencode/plugins/*.ts`,
  * server cwd = the process cwd — Archie is always launched from its project
  * root, which is writable and stable, so no `process.chdir()`/project-dir
  * override is needed here), resolves the server-global model route, and boots
  * `createOpencode` with `config.model` + `config.permission` set so the turn
- * doesn't hang and uses the intended model (spike.md §5–6). If bridge startup
+ * doesn't hang and uses the intended model. If bridge startup
  * or the opencode boot fails, the bridge (if started) is closed and the
  * promise is cleared so a later call can retry cleanly.
  */

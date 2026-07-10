@@ -1,17 +1,17 @@
 /**
  * Generates the opencode bridge plugin — the plugin file opencode's Bun
- * runtime loads from `<serverCwd>/.opencode/plugins/*.ts` (spike.md §1). At
+ * runtime loads from `<serverCwd>/.opencode/plugins/*.ts`. At
  * startup it `fetch`es the bridge's `GET /tools` manifest and registers one
  * opencode custom tool per entry; each tool's `execute` forwards the call to
  * the bridge's `POST /tool` endpoint, carrying the opencode session id
- * (`ctx.sessionID` — spike.md §2, the second arg of `execute(args, ctx)`) so
+ * (`ctx.sessionID`, the second arg of `execute(args, ctx)`) so
  * the bridge can resolve the calling Task/Agent via its SessionRegistry.
  *
  * The bridge URL + bearer token are baked as literals into the generated
  * source (via `JSON.stringify`, never `process.env`) because both are known
  * in the Archie process at boot, when the bridge listener is started — this
  * sidesteps any question of whether env vars are forwarded into the
- * `opencode serve` child process (spike.md §6, Plan impact).
+ * `opencode serve` child process.
  *
  * Security: the generated file embeds the bearer token in plaintext on disk,
  * so `pluginsDir`'s ancestor (`.opencode/`) MUST stay out of version control
@@ -110,11 +110,11 @@ export const ArchieBridgePlugin = async (pluginCtx) => {
     });
   }
 
-  // RO guard (B.2 spike-proven mechanism, see __spike__/b2-spike.md): opencode's
-  // built-in edit/write/bash tools have no per-session permission surface, so
+  // RO guard: opencode's built-in edit/write/bash tools have no per-session
+  // permission surface, so
   // the shared server-wide config.permission can't gate them per session. A
   // plugin "tool.execute.before" hook that throws for a session's blocked
-  // tools is the only mechanism the spike found that actually blocks them.
+  // tools is the only mechanism that actually blocks them.
   // The guard resolves each session's policy via the bridge's bearer-gated
   // GET /policy?sessionId=<id> on EVERY tool.execute.before call — no
   // per-session caching. A session's policy can change mid-session: the

@@ -261,8 +261,8 @@ function getSchedulingToolDescriptors(): ToolDescriptor[] {
 
 /**
  * opencode built-in write-shaped tool names to block for read-only sessions.
- * A conservative superset (spike decision — b2-spike.md): the live
- * plugin-guard adversarial test (a later task) confirms/extends this against
+ * A conservative superset: the live plugin-guard adversarial test
+ * confirms/extends this against
  * opencode's actual `config.tools` enumeration. Read built-ins (`read`,
  * `grep`, `glob`, `list`, `webfetch`) are deliberately NOT included.
  */
@@ -315,7 +315,7 @@ function isAuthorized(req: IncomingMessage, token: string): boolean {
 
 /**
  * Unwrap a `ToolResult` (`{ content: [{ type: 'text', text }] }`) to the plain
- * string opencode's custom-tool `execute` must return (spike-confirmed — a
+ * string opencode's custom-tool `execute` must return (a
  * JSON blob renders as-is in the model's view instead of the tool's message).
  * Joins all text parts; coerces anything unexpected to a string rather than
  * dropping it silently.
