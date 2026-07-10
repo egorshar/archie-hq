@@ -67,10 +67,22 @@ export interface BridgeHandle {
   close(): Promise<void>;
 }
 
-/** JSON-serializable descriptor of a single arg: its primitive kind + whether it's optional. */
+/**
+ * JSON-serializable descriptor of a single arg. Recursive: `object` carries its
+ * `properties`, `array` carries its element `items`, and `description`/`enum`
+ * are preserved — so the generated plugin can rebuild a faithful zod schema
+ * (nested shapes + field docs) instead of a bare `any`. Without this, a tool
+ * with a structured arg (e.g. `spawn_repo_agent`'s `repos: [{github,...}]`)
+ * reaches the opencode model as `any`, it guesses the shape wrong, and the
+ * handler receives `undefined` fields (the 2026-07-10 "no MR" bug).
+ */
 interface ArgSpec {
-  type: 'string' | 'object' | 'number' | 'boolean';
+  type: 'string' | 'object' | 'number' | 'boolean' | 'array';
   optional?: boolean;
+  description?: string;
+  enum?: string[];
+  properties?: Record<string, ArgSpec>; // when type === 'object'
+  items?: ArgSpec;                       // when type === 'array'
 }
 
 /** JSON-serializable descriptor of a tool's args shape: argName -> spec. */
@@ -134,24 +146,41 @@ const TOOL_DESCRIPTORS: ToolDescriptor[] = [
 
 /**
  * Derive a JSON-serializable {@link ArgSpec} from a single zod field of a
- * repo-tool's schema (`src/agents/tools.ts` `RepoToolSpec.schema`). Unwraps
- * `.optional()`/`.default()`/`.nullable()` wrappers to find the base type and
- * to determine optionality — mirrors how the hand-written `TOOL_DESCRIPTORS`
- * above describe the 3 control tools, just derived instead of hand-written
- * (the repo-tools surface is too large to keep a hand-written copy in sync).
+ * tool's schema (`src/agents/tools.ts` `*_TOOL_SPECS[].schema`). Unwraps
+ * `.optional()`/`.default()`/`.nullable()` wrappers to find the base type +
+ * optionality, and RECURSES into objects/arrays so nested shapes and per-field
+ * descriptions survive to the generated plugin (a tool with a structured arg
+ * would otherwise reach the opencode model as `any`). Exported for unit tests.
  */
-function zodFieldToArgSpec(field: z.ZodTypeAny): ArgSpec {
+export function zodFieldToArgSpec(field: z.ZodTypeAny): ArgSpec {
   const optional = field.isOptional();
   let inner: z.ZodTypeAny = field;
   while (inner instanceof z.ZodOptional || inner instanceof z.ZodDefault || inner instanceof z.ZodNullable) {
     inner = inner.unwrap() as z.ZodTypeAny;
   }
-  let type: ArgSpec['type'];
-  if (inner instanceof z.ZodNumber) type = 'number';
-  else if (inner instanceof z.ZodBoolean) type = 'boolean';
-  else if (inner instanceof z.ZodObject || inner instanceof z.ZodArray) type = 'object';
-  else type = 'string';
-  return optional ? { type, optional: true } : { type };
+  const description = field.description ?? inner.description;
+
+  let spec: ArgSpec;
+  if (inner instanceof z.ZodNumber) {
+    spec = { type: 'number' };
+  } else if (inner instanceof z.ZodBoolean) {
+    spec = { type: 'boolean' };
+  } else if (inner instanceof z.ZodEnum) {
+    spec = { type: 'string', enum: (inner as z.ZodEnum).options as string[] };
+  } else if (inner instanceof z.ZodArray) {
+    spec = { type: 'array', items: zodFieldToArgSpec((inner as z.ZodArray).element as z.ZodTypeAny) };
+  } else if (inner instanceof z.ZodObject) {
+    const properties: Record<string, ArgSpec> = {};
+    for (const [key, value] of Object.entries((inner as z.ZodObject).shape)) {
+      properties[key] = zodFieldToArgSpec(value as z.ZodTypeAny);
+    }
+    spec = { type: 'object', properties };
+  } else {
+    spec = { type: 'string' };
+  }
+  if (optional) spec.optional = true;
+  if (description) spec.description = description;
+  return spec;
 }
 
 /** Common shape of the `*_TOOL_SPECS` arrays exported from `tools.ts` (repo, comms, orchestration, scheduling). */

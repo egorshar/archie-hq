@@ -41,11 +41,16 @@ const BRIDGE_TOKEN = ${JSON.stringify(token)};
 // authoritatively resolved (bridge unreachable, non-2xx, or malformed body).
 const FAIL_CLOSED_BLOCKED_TOOLS = ${JSON.stringify(RO_BUILTIN_BLOCK)};
 
+// Rebuild a zod schema from the bridge's recursive ArgSpec (see server.ts).
+// Nested objects/arrays + descriptions + enums are reconstructed faithfully so
+// the opencode model gets the same arg guidance the Claude SDK path gives it —
+// a structured arg (e.g. spawn_repo_agent's repos: [{github,...}]) is NOT
+// flattened to any(), which would make the model guess the shape wrong.
 function schemaFor(spec) {
   let base;
   switch (spec.type) {
     case "string":
-      base = tool.schema.string();
+      base = (spec.enum && spec.enum.length) ? tool.schema.enum(spec.enum) : tool.schema.string();
       break;
     case "number":
       base = tool.schema.number();
@@ -53,11 +58,23 @@ function schemaFor(spec) {
     case "boolean":
       base = tool.schema.boolean();
       break;
+    case "array":
+      base = tool.schema.array(spec.items ? schemaFor(spec.items) : tool.schema.any());
+      break;
     case "object":
+      if (spec.properties) {
+        const shape = {};
+        for (const key of Object.keys(spec.properties)) shape[key] = schemaFor(spec.properties[key]);
+        base = tool.schema.object(shape);
+      } else {
+        base = tool.schema.any();
+      }
+      break;
     default:
       base = tool.schema.any();
       break;
   }
+  if (spec.description) base = base.describe(spec.description);
   return spec.optional ? base.optional() : base;
 }
 

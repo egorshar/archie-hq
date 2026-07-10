@@ -11,17 +11,21 @@ import { renderBridgePlugin, writeBridgePlugin } from '../plugin-source.js';
  * `.optional()` on a given arg's schema.
  */
 vi.mock('@opencode-ai/plugin', () => {
-  const makeSchema = (kind: string, isOptional = false) => {
-    const schema: any = { kind, isOptional };
-    schema.optional = () => makeSchema(kind, true);
+  const makeSchema = (props: any) => {
+    const schema: any = { isOptional: false, ...props };
+    schema.optional = () => makeSchema({ ...schema, isOptional: true });
+    schema.describe = (description: string) => makeSchema({ ...schema, description });
     return schema;
   };
   const toolFn = (config: any) => config; // identity — just lets the test inspect config.args
   (toolFn as any).schema = {
-    string: () => makeSchema('string'),
-    number: () => makeSchema('number'),
-    boolean: () => makeSchema('boolean'),
-    any: () => makeSchema('any'),
+    string: () => makeSchema({ kind: 'string' }),
+    number: () => makeSchema({ kind: 'number' }),
+    boolean: () => makeSchema({ kind: 'boolean' }),
+    any: () => makeSchema({ kind: 'any' }),
+    enum: (values: string[]) => makeSchema({ kind: 'enum', values }),
+    array: (element: any) => makeSchema({ kind: 'array', element }),
+    object: (shape: any) => makeSchema({ kind: 'object', shape }),
   };
   return { tool: toolFn };
 });
@@ -74,6 +78,48 @@ describe('bridge plugin source', () => {
 
       expect(args.requiredArg.isOptional).toBe(false);
       expect(args.optionalArg.isOptional).toBe(true);
+
+      vi.unstubAllGlobals();
+    });
+
+    it('rebuilds a NESTED array-of-object arg (not flattened to any) with field types + descriptions', async () => {
+      dir = await mkdtemp(join(tmpdir(), 'archie-bridge-plugin-nested-'));
+      const src = renderBridgePlugin('http://127.0.0.1:1', 'tok');
+      const file = join(dir, 'plugin.mjs');
+      await writeFile(file, src, 'utf8');
+
+      // Shape of spawn_repo_agent's `repos` — the arg that broke the MR flow.
+      const fakeManifest = [
+        {
+          name: 'spawn_repo_agent',
+          description: 'test',
+          argsSchema: {
+            shortname: { type: 'string' },
+            repos: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  github: { type: 'string', description: 'org/repo' },
+                  baseBranch: { type: 'string', optional: true },
+                },
+              },
+            },
+          },
+        },
+      ];
+      const fetchMock = vi.fn(async () => ({ json: async () => fakeManifest }));
+      vi.stubGlobal('fetch', fetchMock);
+
+      const mod = await import(pathToFileURL(file).href);
+      const plugin = await mod.ArchieBridgePlugin({});
+      const repos = plugin.tool.spawn_repo_agent.args.repos;
+
+      expect(repos.kind).toBe('array'); // NOT 'any'
+      expect(repos.element.kind).toBe('object');
+      expect(repos.element.shape.github.kind).toBe('string');
+      expect(repos.element.shape.github.description).toBe('org/repo');
+      expect(repos.element.shape.baseBranch.isOptional).toBe(true);
 
       vi.unstubAllGlobals();
     });
