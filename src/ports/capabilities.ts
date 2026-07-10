@@ -57,10 +57,10 @@ export const CLAUDE_RUNTIME_CAPABILITIES: RuntimeCapabilities = {
 };
 
 /**
- * opencode runtime — least-capable baseline (spec P3). No built-in OS sandbox
- * (Phase 3 adds a firewall + guard enforcement), no native Skills (a read_skill
- * tool arrives in P2-C), no 1M-context / effort / background-task event parity
- * yet. Individual flags are raised as later Phase-2 slices earn them.
+ * opencode runtime — least-capable baseline. No built-in OS sandbox
+ * (Phase 3 adds a firewall + guard enforcement), no native Skills, no
+ * 1M-context / effort / background-task event parity yet. Individual flags are
+ * raised as later work earns them.
  */
 export const OPENCODE_RUNTIME_CAPABILITIES: RuntimeCapabilities = {
   osSandbox: false,

@@ -12,7 +12,7 @@
  * This replaced the blocking `session.prompt`, whose single held-open HTTP
  * request tripped undici's headers timeout (`UND_ERR_HEADERS_TIMEOUT`) on long
  * turns (a heavy glm-5.2 repo-edit turn ran past the ~5-min default), killing
- * the turn mid-flight and looping recovery (2026-07-10).
+ * the turn mid-flight and looping recovery.
  *
  * Semantics: `completeTurn` resolves with the accumulated text; `failTurn`
  * rejects (a real turn error the caller should surface); `cancelTurn` resolves

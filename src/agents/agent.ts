@@ -61,7 +61,7 @@ export class Agent {
    * each turn; `report_completion` reads it (opencode only) to drop a redundant
    * trailing "task completed" confirmation when the substantive answer was
    * already posted this turn — the double-post symptom a weaker model exhibits
-   * (observed live in the P2-C smoke). The Claude path sets it but never reads
+   * (observed live). The Claude path sets it but never reads
    * it, so its behavior is unchanged.
    */
   postedToUserThisTurn = false;

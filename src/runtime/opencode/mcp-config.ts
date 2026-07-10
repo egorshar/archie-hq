@@ -8,7 +8,7 @@
  *
  * config.mcp is server-global (one embedded server shared by all sessions), so
  * this registers the UNION of all servers; per-agent scoping is a turn-level
- * body.tools overlay (see runtime.ts / the B.3 design §4.3).
+ * body.tools overlay (see runtime.ts).
  */
 import { getRootMcpConfig } from '../../system/plugin-loader.js';
 import { applyOAuthBindings } from '../../system/oauth/inject.js';

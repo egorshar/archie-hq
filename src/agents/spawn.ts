@@ -121,7 +121,7 @@ async function generatePluginAgentPrompt(agent: Agent, task: Task): Promise<stri
  * `existsSync(target)`, which FOLLOWS the link, so a DANGLING link returned
  * false, slipped the guard, and made `symlink()` throw EEXIST — and that
  * rejection, uncaught in the recovery re-spawn path, crashed the daemon
- * (2026-07-10 cross-instance-workdir incident). Clearing the dir first heals any
+ * (a cross-instance-workdir incident). Clearing the dir first heals any
  * stale/dangling links; within the fresh build the first source to claim a name
  * wins, which preserves plugin-shadows-core.
  */
@@ -241,7 +241,7 @@ export interface AgentLaunchContext {
   /**
    * Repo-agent extras (undefined for PM/plugin agents). The Claude assembly in
    * spawnAgent uses these to build the repo-tools MCP server and the read-only
-   * disallowedTools list; the future opencode tool bridge (P2-B) will reuse them.
+   * disallowedTools list; the opencode tool bridge reuses them.
    */
   repo?: { editAllowed: boolean; repoMounts: RepoMount[]; allClonePaths: string[] };
 }

@@ -7,7 +7,7 @@
  * configured only afterwards (spawn.ts prepareAgentContext), a commit could land
  * first and fall back to the host's global ~/.gitconfig, whose email is not a
  * verified email of the GitLab token account — so the push was declined by the
- * pre-receive hook (2026-07-10 dev-metrics MR run). These tests use a real temp
+ * pre-receive hook. These tests use a real temp
  * git repo and assert a commit made immediately after clone creation carries the
  * bot committer, not the host identity.
  */

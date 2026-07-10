@@ -113,7 +113,7 @@ export function scheduleIdleCheck(task: Task): void {
     // unhandled rejection here (e.g. a spawn failure during triggerRecovery)
     // becomes an unhandledRejection that crashes the daemon. A failed
     // idle-check for one task must never take down the process — log and move
-    // on; the next event or idle tick re-arms recovery. (2026-07-10: a dangling
+    // on; the next event or idle tick re-arms recovery. (a dangling
     // skill symlink made a recovery re-spawn throw EEXIST uncaught here.)
     try {
       if (getIsShuttingDown()) return;
@@ -165,7 +165,7 @@ async function triggerRecovery(task: Task): Promise<void> {
     // recoveryAttempts=2, and silently stalled (no new agent:inactive event
     // ever re-arms the idle check). The task then hung until the 30-min
     // wall-clock. The PM owns the user conversation and is the right agent to
-    // either continue or park. (Playstorm 2026-06-11 stall.)
+    // either continue or park.
     const owner = (task.metadata.task_owner || 'pm-agent') as AgentName;
     const candidates: AgentName[] =
       owner === 'pm-agent' ? ['pm-agent'] : [owner, 'pm-agent'];

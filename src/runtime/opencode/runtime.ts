@@ -6,8 +6,7 @@
  * 204); the turn's completion is the `session.idle` SSE event, delivered via the
  * turn-completion registry that `events.ts` drives — NOT the HTTP response.
  * (This replaced the blocking `session.prompt`, whose held-open request tripped
- * undici's headers timeout on long turns.) Tool bridge, guards, and read-only
- * enforcement are Phase 2-B; per-agent MCP scoping is B.3.
+ * undici's headers timeout on long turns.)
  */
 import type { AgentRuntime } from '../../ports/agent-runtime.js';
 import type { RuntimeCapabilities } from '../../ports/capabilities.js';
@@ -45,7 +44,7 @@ function errorSignalsNotFound(e: any): boolean {
  * session_id after a server restart / session-store loss / GC. Covers BOTH
  * shapes the SDK can hand back:
  *   • a RETURNED result object whose `.error` carries the failure. The live
- *     opencode shape (confirmed in the P2-C smoke) is
+ *     opencode shape (confirmed live) is
  *     `res.error = { name: "NotFoundError", data: { message: "Session not found: <id>" } }`
  *     — concatPromptText logs exactly this via `res.error`. The older
  *     `res.data.info.error.name` location is also covered.
@@ -72,7 +71,7 @@ function isErrorResult(res: unknown): boolean {
  * Run ONE turn via `session.promptAsync` (returns immediately, HTTP 204) and
  * await completion off the SSE stream (`session.idle` → the turn-completion
  * registry), NOT the HTTP response — so a long turn can't trip undici's headers
- * timeout the way the blocking `session.prompt` did (2026-07-10).
+ * timeout the way the blocking `session.prompt` did.
  *
  * Session-not-found recovery is preserved: `promptAsync` still returns/throws a
  * 404 fast on a stale session, so on not-found we discard it, create a fresh

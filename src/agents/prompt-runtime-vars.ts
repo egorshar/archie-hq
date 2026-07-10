@@ -23,8 +23,8 @@ const CLAUDE_SKILL_GUIDANCE =
 const OPENCODE_SKILL_GUIDANCE =
   'Domain-specific guidance for your team members is provided in your context (AGENTS.md and the task briefing). Consult it before delegating so you apply each domain\'s workflow and coordination patterns. There is no separate skill-loading step.';
 
-// Clause-level Skill-tool neutralization (design §4.4: "soften prompts that
-// reference the `Skill` tool"). Each var covers one distinct grammatical context
+// Clause-level Skill-tool neutralization: soften prompts that reference the
+// `Skill` tool. Each var covers one distinct grammatical context
 // where a prompt tells the model to call the native `Skill` tool — which doesn't
 // exist under opencode (capabilities.skills = false). A single paragraph var
 // (SKILL_GUIDANCE) can't fit these mid-sentence/mid-checklist spots, so each gets
@@ -57,7 +57,7 @@ const OPENCODE_SKILL_TOOL_BULLET = 'Domain guidance is available in your context
 // is reworded to enforce single delivery (answer once, then finish) and to drop
 // the "Work completed (confirm completion)" line that invited a redundant
 // "task completed" post on top of an already-posted answer — the double-post
-// symptom observed live in the P2-C smoke.
+// symptom observed live.
 const CLAUDE_COMPLETION_MESSAGE_GUIDANCE = `**When to include a message with report_completion** (user-facing milestones):
 
 - Answering a question or providing status

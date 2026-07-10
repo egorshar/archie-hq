@@ -607,7 +607,7 @@ export async function reportCompletionHandler(agent: Agent, task: Task, args: Re
   }
   // opencode-only backstop for the double-post symptom: a weaker model sometimes
   // posts its answer via post_to_user and THEN passes a redundant "task
-  // completed" summary here (observed live in the P2-C smoke; the opencode
+  // completed" summary here (observed live; the opencode
   // prompt guidance reduces but doesn't fully eliminate it). When a user-facing
   // message already went out this turn, drop this one and finish silently.
   // Claude never exhibits this and keeps its exact behavior (gate is false).

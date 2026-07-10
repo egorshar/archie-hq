@@ -5,7 +5,7 @@
  *
  * ALWAYS wires in the tool bridge + model/permission config, regardless of
  * which caller (the one-shot LLM path or OpencodeRuntime) triggers the first
- * boot (Task 4: fixes the "first caller decides whether the bridge exists"
+ * boot (fixes the "first caller decides whether the bridge exists"
  * race — a one-shot firing before any agent turn still yields a
  * bridge-equipped server; one-shots simply never call the bridged control
  * tools).
@@ -31,9 +31,9 @@ export type OpencodeClient = Awaited<ReturnType<typeof createOpencode>>['client'
 export const sharedRegistry = new SessionRegistry();
 
 /**
- * B.1 read-only permission recipe: allow reads/webfetch/
+ * Read-only permission recipe: allow reads/webfetch/
  * external-directory access so the turn doesn't hang on a permission ask.
- * RO enforcement (denying edit/bash while read-only) is B.2, NOT here.
+ * RO enforcement (denying edit/bash while read-only) is handled elsewhere, NOT here.
  */
 const READ_ONLY_PERMISSION = {
   edit: 'allow',
@@ -45,11 +45,10 @@ const READ_ONLY_PERMISSION = {
 /**
  * Logical model name for the server-global `config.model` route. `config.model`
  * is set once for the whole embedded-server singleton: it isn't
- * per-prompt, so a single shared-server default is required. B.1 is PM-only,
- * so resolving the generic `default` route (env `ARCHIE_OPENCODE_MODEL_DEFAULT`)
- * is sufficient here. If a specialist turn later needs a different model on
- * this same shared server (before B.2's per-role `config.agent.<role>.model`
- * routing lands), that's an escalation — see the note in runtime.ts.
+ * per-prompt, so a single shared-server default is required. Per-agent routing
+ * is applied per turn via `body.model` (runtime.ts `resolveAgentOpencodeModel`);
+ * this generic `default` route (env `ARCHIE_OPENCODE_MODEL_DEFAULT`) is only the
+ * fallback used when a turn omits `body.model`.
  */
 const SERVER_MODEL_LOGICAL = 'default';
 
@@ -70,7 +69,7 @@ let shuttingDown = false;
  * returns `{ client, server: { url, close() } }`; keeping `server` is what lets
  * `closeOpencodeBridge` actually terminate the child on shutdown. Without it the
  * child was orphaned on every dev reload (a fresh one spawned per restart —
- * ~10 leaked `opencode serve` processes observed on 2026-07-10).
+ * ~10 leaked `opencode serve` processes observed).
  */
 let serverHandle: { close(): void } | null = null;
 

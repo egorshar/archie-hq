@@ -76,7 +76,7 @@ export interface BridgeHandle {
  * (nested shapes + field docs) instead of a bare `any`. Without this, a tool
  * with a structured arg (e.g. `spawn_repo_agent`'s `repos: [{github,...}]`)
  * reaches the opencode model as `any`, it guesses the shape wrong, and the
- * handler receives `undefined` fields (the 2026-07-10 "no MR" bug).
+ * handler receives `undefined` fields (the "no MR" bug).
  */
 interface ArgSpec {
   type: 'string' | 'object' | 'number' | 'boolean' | 'array';

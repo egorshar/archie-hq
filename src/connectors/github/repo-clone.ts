@@ -187,7 +187,7 @@ export async function setupSharedClone(
   // commit`, so if identity were configured only as a later, separate step
   // (spawn.ts prepareAgentContext) a commit could land first and fall back to
   // the host's global ~/.gitconfig — which failed GitLab's push rule (committer
-  // must be the token account's verified email; 2026-07-10 dev-metrics MR run).
+  // must be the token account's verified email).
   // Doing it here makes "identity set" a precondition of the clone existing, and
   // overwrites any stale value left by a reused base cache / earlier bot token.
   await configureGitIdentity(clonePath);

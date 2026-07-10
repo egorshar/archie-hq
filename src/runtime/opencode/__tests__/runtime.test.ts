@@ -275,7 +275,7 @@ describe('isSessionNotFound', () => {
   it('false on an unrelated error', () => {
     expect(isSessionNotFound({ data: { info: { error: { name: 'ProviderAuthError' } } } })).toBe(false);
   });
-  it('true for the LIVE opencode not-found shape (captured in the P2-C smoke)', () => {
+  it('true for the LIVE opencode not-found shape', () => {
     // Exact payload observed live: res.error = { name, data: { message } }.
     expect(
       isSessionNotFound({
