@@ -182,9 +182,15 @@ describe('serve pool (P3a §1/§5)', () => {
     expect(mocks.excludeOpencodeFromGit).not.toHaveBeenCalled();
   });
 
-  it('P3b: vendors the bridge plugin dep into the child .opencode/node_modules before spawn', async () => {
+  it('P3b: vendors the bridge plugin dep into the child .opencode/node_modules before spawn (synthetic root)', async () => {
     const h = await getAgentServe(agentOf('pm-agent'), taskOf('t1'));
     expect(mocks.vendorBridgeDeps).toHaveBeenCalledWith(join(h.cwd, '.opencode', 'node_modules'));
+  });
+
+  it('P3b: vendors the bridge plugin dep for a clone-based repo agent too', async () => {
+    const clone = join(WORKDIR_STUB, 'clones', 'backend');
+    await getAgentServe(agentOf('backend'), taskOf('t1'), { clonePath: clone });
+    expect(mocks.vendorBridgeDeps).toHaveBeenCalledWith(join(clone, '.opencode', 'node_modules'));
   });
 
   it('clone cwd for repo agents: no synthetic prepare; .opencode excluded from git', async () => {

@@ -6,7 +6,7 @@
  * repo agents the cwd is the clone, so the staged dir is kept out of commits
  * via `.git/info/exclude` (excludeOpencodeFromGit).
  */
-import { mkdir, readFile, appendFile, cp, access } from 'fs/promises';
+import { mkdir, readFile, appendFile, cp, access, rm, rename } from 'fs/promises';
 import { existsSync } from 'node:fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'node:url';
@@ -76,10 +76,18 @@ export async function vendorBridgeDeps(nodeModulesDir: string): Promise<void> {
   }
   // Copy the package the orchestrator actually installed (dev: repo
   // node_modules; container: /app/node_modules), so the vendored copy always
-  // matches the package.json/lockfile version.
+  // matches the package.json/lockfile version. Copy into a temp sibling then
+  // atomically rename into place, so a crash mid-copy can't leave a PARTIAL
+  // `plugin/` dir that the access()-guard above would then skip re-copying
+  // (which would silently reproduce the broken-bridge failure this fixes). A
+  // stale temp from a prior crash is cleared first; boots are serialized per
+  // serve root (one per pool key), so the fixed temp name can't collide.
   const src = findBridgePluginPkgRoot();
+  const tmp = `${dest}.incomplete`;
   await mkdir(dirname(dest), { recursive: true });
-  await cp(src, dest, { recursive: true });
+  await rm(tmp, { recursive: true, force: true });
+  await cp(src, tmp, { recursive: true });
+  await rename(tmp, dest);
 }
 
 /**
