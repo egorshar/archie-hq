@@ -1,8 +1,14 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { connect } from 'node:net';
 import { createServer, request as httpRequest, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+
+vi.mock('../../../system/logger.js', () => ({
+  logger: { warn: vi.fn(), system: vi.fn(), error: vi.fn(), debug: vi.fn(), agent: vi.fn(), plain: vi.fn() },
+}));
+
 import { getEgressProxy, closeEgressProxy, hostAllowed, type EgressProxyHandle } from '../egress-proxy.js';
+import { logger } from '../../../system/logger.js';
 
 afterEach(() => closeEgressProxy());
 
@@ -56,6 +62,25 @@ describe('hostAllowed', () => {
   it('rejects a disallowed port unless an entry pins host:port', () => {
     expect(hostAllowed('mcp.host', 8443, ['mcp.host'])).toBe(false);       // default 443/80 only
     expect(hostAllowed('mcp.host', 8443, ['mcp.host:8443'])).toBe(true);   // explicit pair
+  });
+
+  it('skips an unsupported IPv6/bracketed allowlist ENTRY with a one-time warning, never matching it', () => {
+    (logger.warn as any).mockClear();
+    // A bare IPv6 literal (two+ colons) and a bracketed host — both unsupported.
+    expect(hostAllowed('fdya::1', 443, ['fdya::1'])).toBe(false);          // v6 literal entry skipped
+    expect(hostAllowed('mcp.host', 8443, ['[fdyb::1]:8443'])).toBe(false); // bracketed entry skipped
+    expect(logger.warn).toHaveBeenCalledWith('opencode', expect.stringContaining('unsupported shape'));
+    // A valid entry alongside the bad one still matches (bad one skipped, not fatal).
+    expect(hostAllowed('ok.host', 443, ['fdyc::1', 'ok.host'])).toBe(true);
+    // Warn is once-per-distinct-entry: repeating the same bad entry does not re-warn.
+    const before = (logger.warn as any).mock.calls.length;
+    hostAllowed('x', 443, ['fdya::1']); // already-warned entry
+    expect((logger.warn as any).mock.calls.length).toBe(before);
+  });
+
+  it('denies an IP-literal CONNECT TARGET (v4 and v6) even against a non-empty hostname allowlist', () => {
+    expect(hostAllowed('203.0.113.7', 443, ['openrouter.ai', 'example.com'])).toBe(false);   // v4 target, no hostname match
+    expect(hostAllowed('2001:db8::5', 443, ['openrouter.ai', 'example.com'])).toBe(false);   // v6 target, no hostname match
   });
 });
 

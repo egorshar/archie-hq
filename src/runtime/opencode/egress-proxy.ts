@@ -27,10 +27,39 @@ export interface EgressProxyHandle {
 
 /** Exact host, dot-suffix subdomain, or an explicit `host:port` allowlist entry.
  * Bare entries permit ports 443 and 80 only. */
+// Allowlist entries we've already warned about being unsupported, so the warn
+// fires once per distinct bad entry rather than on every request that carries it.
+const warnedUnsupportedEntries = new Set<string>();
+
+/**
+ * Whether an egress target is permitted by an allowlist.
+ *
+ * CONTRACT — allowlist entries are DNS HOSTNAMES, optionally with a single
+ * `:port` suffix (`example.com`, or `mcp.example.com:8443`). Matching is exact
+ * host or dot-suffix subdomain; a bare entry permits ports 443/80, a `host:port`
+ * entry permits exactly that pair. IP LITERALS ARE NOT SUPPORTED as entries:
+ * an IPv6 literal (`::1`), a bracketed host (`[::1]:8443`), or any entry with
+ * more than one `:` is unsupported — it is warn-logged once and skipped (never
+ * split into a garbage entry by the naive `:`-split below). As a consequence an
+ * IP-literal CONNECT *target* (v4 or v6) matches no hostname entry and is denied
+ * by default — the intended fail-closed behavior. This is deliberately
+ * hostname-only; no IPv6 parsing.
+ */
 export function hostAllowed(host: string, port: number, allowlist: string[]): boolean {
   const h = host.toLowerCase();
   for (const raw of allowlist) {
-    const [entry, entryPort] = raw.toLowerCase().split(':');
+    const entry0 = raw.trim();
+    // Reject unsupported entry shapes (IP literals / IPv6 / bracketed hosts)
+    // rather than silently mangling them via split(':'): a bracketed host or an
+    // entry with >1 colon can never be a valid `hostname[:port]`.
+    if (entry0.startsWith('[') || entry0.indexOf(':') !== entry0.lastIndexOf(':')) {
+      if (!warnedUnsupportedEntries.has(entry0)) {
+        warnedUnsupportedEntries.add(entry0);
+        logger.warn('opencode', `egress allowlist entry ignored — unsupported shape (hostnames only, no IP literals / IPv6 / bracketed hosts): ${entry0}`);
+      }
+      continue;
+    }
+    const [entry, entryPort] = entry0.toLowerCase().split(':');
     const hostMatch = h === entry || h.endsWith('.' + entry);
     if (!hostMatch) continue;
     if (entryPort) { if (port === Number(entryPort)) return true; }
