@@ -94,3 +94,41 @@ Three sub-findings, all confirmed with proxy-side evidence (not just "the reply 
 ## Cleanup
 
 All `opencode serve` children spawned by the three probe runs were killed by the probe's own `finally` blocks except one: an `s3` dry run crashed the harness (unhandled `ECONNRESET` on the proxy's CONNECT socket before the client-error listener was attached — fixed in the script) and left one orphaned `opencode serve` child (PID 26501, reparented to PID 1). Verified via `lsof -p 26501 | grep cwd` that its cwd was the probe's own scratch dir (`archie-p3b-s3-cwd-*`), not the live Archie dev server, then killed it and removed its temp dir. After the fix, `s3` reran cleanly through its own `finally` cleanup. Final check: `pgrep -fl "opencode serve"` → no processes running.
+
+## Live container smoke (P3b Task 6)
+
+Date: 2026-07-11. Host: macOS (darwin) controller.
+
+**Status: ENV-BLOCKED.** Not attempted, for two independent reasons, either of which alone would block it:
+
+- This is a darwin controller host. `bwrap` is Linux-only by design (it wraps Linux namespace syscalls) — it cannot run here regardless of container availability.
+- The `archie-e2e` Docker instance cannot be booted from this host right now: a live Archie dev server is already running locally, and the E2E harness's Docker container collides with it on the same `.env` (same Slack app credentials) and the same `./workdir` bind-mount. Booting the container alongside the live dev server would corrupt both.
+
+No pass is claimed for anything in this section — this records what was NOT run and why, plus what IS verified without it, plus the exact runbook for whoever runs it next on a Linux host with the local dev server stopped first.
+
+### What IS verified without the container
+
+- **The bwrap argv builder** (`buildSandboxArgv`, `profileFingerprint`) — full unit coverage in `src/runtime/opencode/__tests__/child-sandbox.test.ts`: mount ordering (system ro-binds → agent ro-binds → cwd/home rw → agent rw → deny-after-rw downgrade), hardening flags present, `--unshare-net` absent, nonexistent bind sources skipped, fingerprint stability/sensitivity to mount/allowlist changes.
+- **The egress proxy** — `src/runtime/opencode/__tests__/egress-proxy.test.ts` drives real loopback CONNECT/HTTP round-trips against the actual `net.Server` (not a mock): allowed CONNECT, denied CONNECT (403), missing/bad credential (407), per-child credential scoping (one child's cred can't reach another child's allowlist), revocation, and the `hostAllowed` exact/dot-suffix/`host:port` matching rules.
+- **The profile assembler** — `src/runtime/opencode/__tests__/child-sandbox-profile.test.ts`: `buildChildSandboxProfile`/`buildOneShotSandboxProfile` allowlist composition (provider-or-throw, repo-host-only-for-repo-agents, registries edit-mode-only, declared-MCP-hosts-only, frontmatter domains), `buildChildEnv` pruning (base allowlist + `LC_*` + pinned `HOME`/`XDG_DATA_HOME` + proxy vars + only the route provider's key — no secret leakage), and `agentProfileFingerprint` agreeing with the built profile's own fingerprint.
+- **The pool / one-shot / embedded-server wiring** — `src/runtime/opencode/__tests__/serve-pool.test.ts`, `llm-one-shot.test.ts`, and `embedded-server.test.ts`: `startEmbeddedServer` uses `spawnOverride`/`env` verbatim (never spread with `process.env`), `bootChild` mints and later revokes the egress credential (including on boot-failure paths), `getAgentServe`'s warm-path fingerprint recompute triggers a mode-transition recycle on a mount/allowlist flip, and `closeServePool`/`closeOneShotServe` revoke every live credential on shutdown.
+- **The Task 1 spikes**, above in this same file, proved the cooperative egress layer live against the real `openrouter.ai` provider (S3): an allowed CONNECT completed a real model turn ("PONG"), a non-allowlisted host (`example.com`) was denied with a clean 403 surfaced back through the tool call, and `NO_PROXY=127.0.0.1,localhost` correctly bypassed the proxy for the loopback bridge callback (confirmed by the proxy's own connect log showing no entry for that call, not just that the reply arrived). S2 proved `XDG_DATA_HOME`/`HOME` store isolation end-to-end, including session resume across a child restart when pointed at the same pinned dir, and that the real `~/.local/share/opencode` was left untouched.
+
+None of the above exercises `bwrap` itself — the argv builder is unit-tested for what flags it *produces*, not that those flags actually enforce a jail when handed to a real `bwrap` binary. That gap is exactly what the runbook below closes.
+
+### Runbook for whoever runs this on Linux
+
+Prerequisite: stop the local dev server first (or run this on a host/VM with no other instance holding the same `.env`/`./workdir`) — see the `E2E boot shares .env/workdir/Slack` collision note. Then, using the `archie-e2e` skill against this branch:
+
+1. Boot the branch in the dev container (Docker, which already ships `bwrap`+`socat` per `Dockerfile.dev`).
+2. Drive the `archie-e2e` basic scenario (PM + one repo agent, edit-mode if you want the trusted-registry allowlist entries exercised too).
+3. Verify, in order:
+   1. **Children spawn under `bwrap`.** `ps aux | grep "bwrap.*opencode serve"` (or inspect the process command line another way) shows the agent's serve child's argv starting with `bwrap` and the expected flags, not a bare `opencode serve`.
+   2. **The filesystem jail actually holds.** From inside the jail (e.g. via the agent's own bash tool, prompted through a task), `cat /app/package.json` (or any other repo-root file outside the agent's allowed read/write paths) **fails**, and a write attempt outside the bound mounts (e.g. `touch /app/should-fail`) **fails**.
+   3. **The egress proxy actually holds.** The model turn itself succeeds (proves the allowed provider route works end-to-end through the jail+proxy), but `curl https://example.com` from inside the jail is **denied** — check the egress-proxy's own log for a `DENY` line for that host, not just that the curl failed (a failed curl could mean many things; the proxy log is the actual evidence).
+   4. **Session store isolation.** Confirm (from the host, since `/private/tmp`... i.e. `<workdir>` is host-visible via the bind mount) that the agent's opencode session store lands under `<workdir>/opencode-server/<taskId>/<agentId>/home`, not under any shared `~/.local/share/opencode`.
+   5. **Env pruning.** `bwrap ... env | grep -c SLACK` (or equivalent — dump the child's actual env, e.g. via `/proc/<pid>/environ` on the host, or an in-jail `env` call through the agent's bash tool) returns `0` for `SLACK_*` and `GITLAB_*` — none of the orchestrator's own secrets reached the child.
+   6. **Teardown cleans up.** After the task completes/is torn down, confirm the per-agent home dir under `<workdir>/opencode-server/<taskId>/<agentId>/` no longer exists.
+4. Also re-confirm the Task-1 S3 finding under the real jail+proxy: the opencode CLI's own background `models.dev`/telemetry calls should still be denied by the allowlist (expect repeated `DENY` log lines for those hosts) while the model turn itself still completes — i.e. the CLI keeps degrading gracefully rather than hanging or erroring on that denial. If the CLI's model *resolution* itself breaks (as opposed to just the background telemetry call), that's a real regression and `models.dev` needs to be added as a follow-up allowlist entry (a "CLI baseline" host set), not silently worked around.
+
+Record the pass/fail for each check, the opencode CLI version used, and the run date when this is actually executed — do not backfill a pass into this section without having run it.
