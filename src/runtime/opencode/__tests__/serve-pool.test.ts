@@ -22,6 +22,7 @@ const { WORKDIR_STUB, ...mocks } = vi.hoisted(() => {
     getBridge: vi.fn(),
     stageAgentSkills: vi.fn(async () => 1),
     excludeOpencodeFromGit: vi.fn(async () => {}),
+    vendorBridgeDeps: vi.fn(async () => {}),
     writeBridgePlugin: vi.fn(async () => '/plugin/path'),
     buildOpencodeMcpConfig: vi.fn(async () => ({})),
     startEventConsumer: vi.fn(),
@@ -53,7 +54,7 @@ vi.mock('../embedded-server.js', async (importOriginal) => {
   return { ...actual, startEmbeddedServer: mocks.startEmbeddedServer, prepareServeRoot: mocks.prepareServeRoot };
 });
 vi.mock('../server.js', () => ({ getBridge: mocks.getBridge, sharedRegistry: { set: vi.fn(), get: vi.fn(), delete: vi.fn() } }));
-vi.mock('../skills.js', () => ({ stageAgentSkills: mocks.stageAgentSkills, excludeOpencodeFromGit: mocks.excludeOpencodeFromGit }));
+vi.mock('../skills.js', () => ({ stageAgentSkills: mocks.stageAgentSkills, excludeOpencodeFromGit: mocks.excludeOpencodeFromGit, vendorBridgeDeps: mocks.vendorBridgeDeps }));
 vi.mock('../bridge/plugin-source.js', () => ({ writeBridgePlugin: mocks.writeBridgePlugin }));
 vi.mock('../mcp-config.js', () => ({ buildOpencodeMcpConfig: mocks.buildOpencodeMcpConfig }));
 vi.mock('../events.js', () => ({ startEventConsumer: mocks.startEventConsumer }));
@@ -179,6 +180,11 @@ describe('serve pool (P3a §1/§5)', () => {
     expect(mocks.prepareServeRoot).toHaveBeenCalledWith(expected);
     expect(mocks.stageAgentSkills).toHaveBeenCalledWith(expect.objectContaining({ id: 'pm-agent' }), join(expected, '.opencode', 'skills'));
     expect(mocks.excludeOpencodeFromGit).not.toHaveBeenCalled();
+  });
+
+  it('P3b: vendors the bridge plugin dep into the child .opencode/node_modules before spawn', async () => {
+    const h = await getAgentServe(agentOf('pm-agent'), taskOf('t1'));
+    expect(mocks.vendorBridgeDeps).toHaveBeenCalledWith(join(h.cwd, '.opencode', 'node_modules'));
   });
 
   it('clone cwd for repo agents: no synthetic prepare; .opencode excluded from git', async () => {

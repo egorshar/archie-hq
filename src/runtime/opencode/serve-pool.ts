@@ -24,7 +24,7 @@ import {
 } from './embedded-server.js';
 import { getBridge, sharedRegistry } from './server.js';
 import { writeBridgePlugin } from './bridge/plugin-source.js';
-import { stageAgentSkills, excludeOpencodeFromGit } from './skills.js';
+import { stageAgentSkills, excludeOpencodeFromGit, vendorBridgeDeps } from './skills.js';
 import { buildOpencodeMcpConfig } from './mcp-config.js';
 import { resolveAgentOpencodeModel } from './model.js';
 import { startEventConsumer } from './events.js';
@@ -193,6 +193,7 @@ async function bootChild(
   const myGeneration = poolGeneration; // bumped by closeServePool → post-spawn guard self-aborts
   const skillsDir = join(cwd, '.opencode', 'skills');
   const pluginsDir = join(cwd, '.opencode', 'plugins');
+  const nodeModulesDir = join(cwd, '.opencode', 'node_modules');
 
   // Everything a boot needs before it can call startEmbeddedServer is
   // independent I/O, merged into ONE concurrent wave (rather than several
@@ -236,6 +237,21 @@ async function bootChild(
           logger.system(`opencode[${key}]: staged ${n} skill source(s) into ${skillsDir}`);
         } catch (err) {
           logger.warn('opencode', `opencode[${key}]: skill staging failed (agent runs without skills): ${err instanceof Error ? err.message : String(err)}`);
+        }
+      })(),
+      // P3b: vendor the bridge plugin's dependency (@opencode-ai/plugin) into
+      // the child's .opencode/node_modules so opencode resolves it offline. The
+      // egress jail denies registry.npmjs.org to non-(edit-mode-repo) agents,
+      // which would otherwise 403 opencode's boot-time auto-install and leave
+      // the bridge with zero tools (a live-smoke merge blocker). Best-effort +
+      // loud warn: a copy failure shouldn't kill the boot (on darwin dev the
+      // open-egress auto-install still works), but under the jail it means the
+      // bridge won't load, so the warn must be actionable.
+      (async () => {
+        try {
+          await vendorBridgeDeps(nodeModulesDir);
+        } catch (err) {
+          logger.warn('opencode', `opencode[${key}]: bridge-dep vendoring failed — the bridge plugin will have no tools under the egress sandbox: ${err instanceof Error ? err.message : String(err)}`);
         }
       })(),
     ]);

@@ -68,6 +68,29 @@ describe('stageAgentSkills (per-agent, P3a §4)', () => {
   });
 });
 
+describe('vendorBridgeDeps (P3b — offline bridge-plugin dependency)', () => {
+  it('copies @opencode-ai/plugin (incl. its nested zod) into the node_modules dir', async () => {
+    const { vendorBridgeDeps } = await import('../skills.js');
+    const root = await tmpRoot('oc-vendor-');
+    const nm = join(root, '.opencode', 'node_modules');
+    await vendorBridgeDeps(nm);
+    // The package the bridge plugin imports must resolve entirely offline: its
+    // entry, the tool module, and its self-contained nested zod.
+    expect(await readFile(join(nm, '@opencode-ai/plugin/package.json'), 'utf8')).toContain('"@opencode-ai/plugin"');
+    expect(await readFile(join(nm, '@opencode-ai/plugin/dist/tool.js'), 'utf8')).toContain('zod');
+    expect(await readFile(join(nm, '@opencode-ai/plugin/node_modules/zod/package.json'), 'utf8')).toContain('"zod"');
+  });
+
+  it('is idempotent — a second call over an already-vendored dir does not throw', async () => {
+    const { vendorBridgeDeps } = await import('../skills.js');
+    const root = await tmpRoot('oc-vendor-');
+    const nm = join(root, '.opencode', 'node_modules');
+    await vendorBridgeDeps(nm);
+    await expect(vendorBridgeDeps(nm)).resolves.toBeUndefined();
+    expect(await readFile(join(nm, '@opencode-ai/plugin/dist/index.js'), 'utf8')).toContain('tool.js');
+  });
+});
+
 describe('excludeOpencodeFromGit', () => {
   it('appends .opencode/ to .git/info/exclude exactly once across repeat calls', async () => {
     const { excludeOpencodeFromGit } = await import('../skills.js');
