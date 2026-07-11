@@ -50,6 +50,11 @@ export const SERVE_PERMISSION = {
   external_directory: 'allow',
 } as const;
 
+/** The `opencode serve` invocation tail, shared by the default spawn and the
+ * P3b bwrap-wrapped spawn (child-sandbox wrapServeCommand appends these after
+ * the bwrap flags). Port 0 → an ephemeral free port. */
+export const SERVE_ARGS = ['serve', '--hostname=127.0.0.1', '--port=0'] as const;
+
 export interface EmbeddedServer {
   client: OpencodeClient;
   /** The child's listening base url (also baked into `client`). */
@@ -70,7 +75,7 @@ export async function startEmbeddedServer(opts: {
   timeoutMs?: number;
 }): Promise<EmbeddedServer> {
   const timeoutMs = opts.timeoutMs ?? 15000;
-  const proc = spawn('opencode', ['serve', '--hostname=127.0.0.1', '--port=0'], {
+  const proc = spawn('opencode', [...SERVE_ARGS], {
     cwd: opts.cwd,
     env: { ...process.env, OPENCODE_CONFIG_CONTENT: JSON.stringify(opts.config) },
   });
