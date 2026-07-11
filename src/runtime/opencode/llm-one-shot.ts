@@ -57,21 +57,29 @@ function getOneShotClient(): Promise<OpencodeClient> {
       const proxy = await getEgressProxy();
       const homeDir = join(root, 'home');
       await mkdir(homeDir, { recursive: true }); // must exist before the wrapped spawn (bind-source invariant)
-      const profile = buildOneShotSandboxProfile({ homeDir, proxy });
-      const { command, args } = await wrapServeCommand(profile);
-      const model = resolveOpencodeModel('haiku');
-      const server = await startEmbeddedServer({
-        cwd: root,
-        config: { model: `${model.providerID}/${model.modelID}`, permission: SERVE_PERMISSION },
-        spawnOverride: { command, args },
-        env: profile.env,
-      });
-      if (bootGeneration !== myGeneration) {
-        try { server.close(); } catch { /* best-effort */ }
+      // Profile cwd == spawn cwd (`root`) — see buildOneShotSandboxProfile. The
+      // credential is minted here; any throw after this point (wrapServeCommand,
+      // startEmbeddedServer, or the shutdown-abort below) must revoke it, so the
+      // whole boot body runs under a catch that revokes (mirrors bootChild).
+      const profile = buildOneShotSandboxProfile({ root, homeDir, proxy });
+      try {
+        const { command, args } = await wrapServeCommand(profile);
+        const model = resolveOpencodeModel('haiku');
+        const server = await startEmbeddedServer({
+          cwd: root,
+          config: { model: `${model.providerID}/${model.modelID}`, permission: SERVE_PERMISSION },
+          spawnOverride: { command, args },
+          env: profile.env,
+        });
+        if (bootGeneration !== myGeneration) {
+          try { server.close(); } catch { /* best-effort */ }
+          throw new Error('one-shot serve boot aborted during shutdown');
+        }
+        return { ...server, egressProxy: proxy, egressCred: profile.cred };
+      } catch (err) {
         proxy.revokeCredential(profile.cred);
-        throw new Error('one-shot serve boot aborted during shutdown');
+        throw err;
       }
-      return { ...server, egressProxy: proxy, egressCred: profile.cred };
     })().catch((err) => {
       // Identity-guarded: only clear the singleton if it still points at THIS
       // boot — a stale boot's failure (e.g. a close-during-boot self-abort) must

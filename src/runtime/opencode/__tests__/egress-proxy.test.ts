@@ -1,8 +1,35 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { connect } from 'node:net';
+import { createServer, request as httpRequest, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { getEgressProxy, closeEgressProxy, hostAllowed, type EgressProxyHandle } from '../egress-proxy.js';
 
 afterEach(() => closeEgressProxy());
+
+/** A tiny loopback origin that echoes the request headers it received as JSON. */
+function startEchoServer(): Promise<{ server: Server; port: number }> {
+  return new Promise((resolve) => {
+    const server = createServer((req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(req.headers));
+    });
+    server.listen(0, '127.0.0.1', () => resolve({ server, port: (server.address() as AddressInfo).port }));
+  });
+}
+
+/** Absolute-URI (plain HTTP) request THROUGH the proxy; resolves the echoed headers. */
+function httpVia(proxyUrl: string, cred: { username: string; password: string }, originPort: number): Promise<Record<string, string>> {
+  const u = new URL(proxyUrl);
+  const auth = `Basic ${Buffer.from(`${cred.username}:${cred.password}`).toString('base64')}`;
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(
+      { host: u.hostname, port: Number(u.port), method: 'GET', path: `http://127.0.0.1:${originPort}/`, headers: { host: `127.0.0.1:${originPort}`, 'proxy-authorization': auth } },
+      (res) => { let body = ''; res.on('data', (d) => (body += d)); res.on('end', () => resolve(JSON.parse(body))); },
+    );
+    req.on('error', reject);
+    req.end();
+  });
+}
 
 /** Issue a raw CONNECT through the proxy; resolve the status line. */
 function connectVia(proxyUrl: string, cred: { username: string; password: string } | null, target: string): Promise<string> {
@@ -52,6 +79,22 @@ describe('egress proxy CONNECT gating', () => {
     const b = proxy.mintCredential({ taskId: 't1', agentId: 'b' }, ['b-host.com']);
     expect(await connectVia(proxy.url, a, 'b-host.com:443')).toMatch(/403/);
     expect(await connectVia(proxy.url, b, 'b-host.com:443')).toMatch(/200/);
+  });
+
+  it('strips the proxy-authorization credential from an allowed absolute-URI HTTP request before forwarding upstream (I1)', async () => {
+    const { server, port } = await startEchoServer();
+    try {
+      const proxy = await getEgressProxy();
+      const cred = proxy.mintCredential({ taskId: 't1', agentId: 'backend' }, [`127.0.0.1:${port}`]);
+      const echoed = await httpVia(proxy.url, cred, port);
+      // The origin received the forwarded request but MUST NOT see the per-child
+      // proxy credential (nor the hop-by-hop proxy-connection header).
+      expect(echoed['proxy-authorization']).toBeUndefined();
+      expect(echoed['proxy-connection']).toBeUndefined();
+      expect(echoed['host']).toBe(`127.0.0.1:${port}`); // request did reach the origin
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+    }
   });
 
   it('getEgressProxy is a singleton; closeEgressProxy lets a later call re-open', async () => {

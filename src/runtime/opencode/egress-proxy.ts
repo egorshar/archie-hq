@@ -98,7 +98,13 @@ function startProxy(): Promise<EgressProxyHandle> {
         logger.warn('opencode', `egress DENY (http) ${entry.identity.taskId}:${entry.identity.agentId} → ${target.hostname}:${port}`);
         res.writeHead(403); res.end('egress not permitted'); return;
       }
-      up = httpRequest({ host: target.hostname, port, path: target.pathname + target.search, method: req.method, headers: req.headers }, (upRes) => {
+      // Strip the hop-by-hop proxy headers before forwarding upstream — the
+      // per-child Basic credential in Proxy-Authorization must never reach the
+      // origin server.
+      const fwdHeaders = { ...req.headers };
+      delete fwdHeaders['proxy-authorization'];
+      delete fwdHeaders['proxy-connection'];
+      up = httpRequest({ host: target.hostname, port, path: target.pathname + target.search, method: req.method, headers: fwdHeaders }, (upRes) => {
         res.writeHead(upRes.statusCode ?? 502, upRes.headers); upRes.pipe(res);
       });
       up.on('error', () => { if (!res.headersSent) res.writeHead(502); res.end(); });

@@ -65,9 +65,58 @@ describe('mount derivation + one-shot', () => {
     expect(p.rwBinds).toEqual(expect.arrayContaining(['/clone', '/clone/.opencode', agentHomeDir('t1', 'backend')]));
     expect(p.denyWriteRoBinds).toContain('/clone/.git/HEAD');
   });
-  it('one-shot profile: provider-only allowlist, no clone mounts', () => {
-    const p = buildOneShotSandboxProfile({ homeDir: '/wd/opencode-server/one-shot/home', proxy: fakeProxy() });
+  it('one-shot profile: provider-only allowlist, cwd == the serve root (== spawn cwd), home under root', () => {
+    const root = '/wd/opencode-server/one-shot';
+    const p = buildOneShotSandboxProfile({ root, homeDir: `${root}/home`, proxy: fakeProxy() });
     expect(p.allowlist).toEqual(PROVIDER_EGRESS_HOSTS['openrouter'] ?? expect.any(Array));
-    expect(p.rwBinds).toContain('/wd/opencode-server/one-shot/home');
+    // I4: profile cwd MUST equal root (the process spawn cwd in llm-one-shot),
+    // and root is bound rw — homeDir lives under it, so it's covered.
+    expect(p.cwd).toBe(root);
+    expect(p.rwBinds).toEqual([root]);
+    expect(p.homeDir).toBe(`${root}/home`);
+    expect(p.env.HOME).toBe(`${root}/home`); // HOME/XDG still the home dir
+  });
+});
+
+describe('computeProfileSkeleton cwd writability (C1)', () => {
+  it('RO repo agent: clone is ro-only, cwd is NOT in rwBinds (so the deny cannot shadow .opencode)', () => {
+    const roAgent = agent({ sandbox: { cwd: '/clone', allowReadPaths: ['/clone'], allowWritePaths: [], denyWritePaths: ['/clone'] } });
+    const p = buildChildSandboxProfile({ agent: roAgent, task, cwd: '/clone', editAllowed: false, proxy: fakeProxy() });
+    expect(p.roBinds).toContain('/clone');
+    expect(p.rwBinds).not.toContain('/clone');
+    expect(p.rwBinds).toEqual(expect.arrayContaining(['/clone/.opencode', agentHomeDir('t1', 'backend')]));
+    expect(p.denyWriteRoBinds).toContain('/clone');
+  });
+  it('edit-mode repo agent: cwd (clone) IS in rwBinds', () => {
+    const p = buildChildSandboxProfile({ agent: agent({ sandbox: { cwd: '/clone', allowReadPaths: [], allowWritePaths: [], denyWritePaths: ['/clone/.git/HEAD'] } }), task, cwd: '/clone', editAllowed: true, proxy: fakeProxy() });
+    expect(p.rwBinds).toContain('/clone');
+  });
+  it('synthetic-root agent (no repo): cwd IS added to rwBinds even though the sandbox lists never mention it', () => {
+    const synthetic = agent({ def: { repo: undefined }, sandbox: { cwd: '/synthetic', allowReadPaths: [], allowWritePaths: [], denyWritePaths: [] } });
+    const p = buildChildSandboxProfile({ agent: synthetic, task, cwd: '/synthetic', editAllowed: false, proxy: fakeProxy() });
+    expect(p.rwBinds).toContain('/synthetic');
+  });
+});
+
+describe('repoHostEgressDomains normalization (I2)', () => {
+  it('REPO_HOST unset defaults to github hosts (mirrors backends.ts resolveRepoHostKind)', () => {
+    delete process.env.REPO_HOST;
+    delete process.env.GITLAB_BASE_URL;
+    const p = buildChildSandboxProfile({ agent: agent(), task, cwd: '/clone', editAllowed: false, proxy: fakeProxy() });
+    expect(p.allowlist).toEqual(expect.arrayContaining(['github.com', 'api.github.com', 'codeload.github.com']));
+    expect(p.allowlist).not.toContain('gitlab.walli.com');
+  });
+  it('mixed-case "GitHub" still resolves to the github hosts (trim + lowercase)', () => {
+    process.env.REPO_HOST = 'GitHub';
+    delete process.env.GITLAB_BASE_URL;
+    const p = buildChildSandboxProfile({ agent: agent(), task, cwd: '/clone', editAllowed: false, proxy: fakeProxy() });
+    expect(p.allowlist).toContain('github.com');
+  });
+  it('mixed-case "GitLab" + GITLAB_BASE_URL resolves to the gitlab base host', () => {
+    process.env.REPO_HOST = 'GitLab';
+    process.env.GITLAB_BASE_URL = 'https://gitlab.walli.com';
+    const p = buildChildSandboxProfile({ agent: agent(), task, cwd: '/clone', editAllowed: false, proxy: fakeProxy() });
+    expect(p.allowlist).toContain('gitlab.walli.com');
+    expect(p.allowlist).not.toContain('github.com');
   });
 });

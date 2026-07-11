@@ -52,15 +52,25 @@ export interface ChildSandboxProfile {
  * root: /app and the workdir are simply never mounted except explicit allow paths. */
 export const SANDBOX_SYSTEM_ROBINDS = ['/usr', '/bin', '/lib', '/lib64', '/etc', '/opt', '/sbin'];
 
+/** True when `p` equals, or is nested under, some rw bind — i.e. `p` would
+ * otherwise sit in a writable region. Used to decide whether a denyWrite path
+ * actually needs a downgrade re-bind (see buildSandboxArgv). Path-boundary
+ * aware: `/clone` is NOT under `/clone-2`, and `/clone/.git` IS under `/clone`. */
+function isUnderAnyRwBind(p: string, rwBinds: string[]): boolean {
+  return rwBinds.some((rw) => p === rw || p.startsWith(rw.endsWith('/') ? rw : rw + '/'));
+}
+
 /** Build the bwrap argv (flags only — the caller appends `opencode <SERVE_ARGS>`).
- * Nonexistent bind sources are skipped (clone/lib paths vary by host/task); cwd
- * and homeDir are created by the pool before this runs, so they always bind. */
+ * Nonexistent bind sources are skipped (clone/lib paths vary by host/task). cwd
+ * and homeDir bind via the profile's ro/rw lists — the assembler places cwd in
+ * roBinds (RO clone) or rwBinds (edit clone / synthetic root) and homeDir always
+ * in rwBinds; the pool guarantees both exist on disk before this runs. */
 export function buildSandboxArgv(profile: ChildSandboxProfile): string[] {
   const argv: string[] = [];
   const roBind = (p: string) => { if (existsSync(p)) argv.push('--ro-bind', p, p); };
   // /tmp is already tmpfs'd below and every rw path is bound at most once —
-  // dedupe so cwd/homeDir binding explicitly and also appearing in rwBinds
-  // (as the profile assembler is free to do) doesn't emit a redundant mount.
+  // dedupe so a path appearing more than once across the rw lists doesn't emit
+  // a redundant mount.
   const rwSeen = new Set<string>(['/tmp']);
   const rwBind = (p: string) => {
     if (rwSeen.has(p)) return;
@@ -72,14 +82,15 @@ export function buildSandboxArgv(profile: ChildSandboxProfile): string[] {
   argv.push('--tmpfs', '/tmp', '--proc', '/proc', '--dev', '/dev');
 
   for (const p of profile.roBinds) roBind(p);
-  // cwd and homeDir always bind rw, regardless of whether the assembler also
-  // lists them in rwBinds — the serve-pool guarantees both exist on disk
-  // before this runs (see class docstring above).
-  rwBind(profile.cwd);
-  rwBind(profile.homeDir);
   for (const p of profile.rwBinds) rwBind(p);
-  // deny paths re-bound read-only AFTER the rw regions → sequential-mount downgrade
-  for (const p of profile.denyWriteRoBinds) roBind(p);
+  // Re-ro-bind a denyWrite path ONLY when it sits INSIDE an rw region — that is
+  // the sole case where it would otherwise be writable, and the later ro-bind
+  // downgrades just that sub-path (sequential-mount semantics). A deny path
+  // that is NOT under any rw bind is already read-only (RO clone root: bound ro
+  // via roBinds) or unmounted; re-ro-binding it would over-mount its subtree
+  // and SHADOW a deeper rw carve-out — e.g. an RO clone's `clone/.opencode` rw
+  // sub-bind — silently defeating it. So it is skipped.
+  for (const p of profile.denyWriteRoBinds) if (isUnderAnyRwBind(p, profile.rwBinds)) roBind(p);
 
   argv.push('--die-with-parent', '--unshare-pid', '--unshare-ipc', '--unshare-uts');
   // NOTE: deliberately NO --unshare-net (Option A) — loopback must stay for the
@@ -162,14 +173,18 @@ function providerHostsOrThrow(providerID: string): string[] {
 }
 
 /** The repo-host egress domain(s), gated on REPO_HOST. GitLab: the GITLAB_BASE_URL
- * host. GitHub: the fixed github.com endpoints. Empty when unset. */
+ * host. GitHub: the fixed github.com endpoints. Normalizes REPO_HOST exactly as
+ * src/system/backends.ts resolveRepoHostKind does — unset defaults to 'github'
+ * and the value is trimmed + lowercased — so a default-GitHub deploy (REPO_HOST
+ * unset or 'GitHub') still gets the github allowlist entries. */
 function repoHostEgressDomains(): string[] {
-  if (process.env.REPO_HOST === 'gitlab') {
+  const kind = (process.env.REPO_HOST ?? 'github').trim().toLowerCase();
+  if (kind === 'gitlab') {
     const base = process.env.GITLAB_BASE_URL;
     if (!base) return [];
     try { return [new URL(base).hostname]; } catch { return []; }
   }
-  if (process.env.REPO_HOST === 'github') return ['github.com', 'api.github.com', 'codeload.github.com'];
+  if (kind === 'github') return ['github.com', 'api.github.com', 'codeload.github.com'];
   return [];
 }
 
@@ -222,11 +237,25 @@ function computeProfileSkeleton(agent: Agent, task: Task, cwd: string, editAllow
     ...declaredMcpHosts(agent.def),
     ...(agent.def.allowedNetworkDomains ?? []),
   ]));
+  // cwd is writable ONLY for a synthetic root (PM/plugin — never a clone) or an
+  // edit-mode clone. For an RO clone, cwd is deliberately LEFT OUT of rwBinds —
+  // it is covered read-only by roBinds (allowReadPaths contains the clone), and
+  // adding it to rwBinds would make the whole RO clone writable AND (via the
+  // deny re-bind) shadow the `cwd/.opencode` rw carve-out. The synthetic root
+  // cwd is NOT in allowReadPaths/allowWritePaths (prepareAgentContext doesn't
+  // know about the opencode serve root), so without this it would not bind at
+  // all. `cwd/.opencode` and homeDir stay rw for every kind.
+  const cwdWritable = !isRepoAgent(agent.def) || editAllowed;
   return {
     cwd,
     homeDir,
     roBinds: [...(sb?.allowReadPaths ?? [])],
-    rwBinds: Array.from(new Set([...(sb?.allowWritePaths ?? []), join(cwd, '.opencode'), homeDir])),
+    rwBinds: Array.from(new Set([
+      ...(sb?.allowWritePaths ?? []),
+      ...(cwdWritable ? [cwd] : []),
+      join(cwd, '.opencode'),
+      homeDir,
+    ])),
     denyWriteRoBinds: [...(sb?.denyWritePaths ?? [])],
     allowlist,
     providerID: route.providerID,
@@ -264,16 +293,20 @@ export function agentProfileFingerprint(agent: Agent, task: Task, cwd: string, e
   });
 }
 
-export function buildOneShotSandboxProfile(args: { homeDir: string; proxy: EgressProxyHandle }): ChildSandboxProfile {
+export function buildOneShotSandboxProfile(args: { root: string; homeDir: string; proxy: EgressProxyHandle }): ChildSandboxProfile {
   const route = resolveOpencodeModel('haiku'); // the one-shot route
   const allowlist = providerHostsOrThrow(route.providerID);
   const cred = args.proxy.mintCredential({ taskId: 'one-shot', agentId: 'one-shot' }, allowlist);
   const proxyEnv = { url: args.proxy.url, noProxy: '127.0.0.1,localhost' };
+  // Profile cwd MUST equal the process spawn cwd (llm-one-shot spawns `cwd: root`)
+  // — otherwise the jail binds a dir the process never runs in, and the actual
+  // cwd (with its git-inited contents) is invisible. homeDir lives under root,
+  // so binding root rw covers it; HOME/XDG still point at homeDir.
   return {
-    cwd: args.homeDir, // the one-shot serve root doubles as its own dir
+    cwd: args.root,
     homeDir: args.homeDir,
     roBinds: [],
-    rwBinds: [args.homeDir],
+    rwBinds: [args.root],
     denyWriteRoBinds: [],
     proxy: proxyEnv,
     allowlist,

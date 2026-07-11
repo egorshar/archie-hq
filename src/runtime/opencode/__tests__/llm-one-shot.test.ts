@@ -20,10 +20,10 @@ const {
     sessionCreate,
     sessionPrompt,
     fakeServer,
-    buildOneShotSandboxProfileMock: vi.fn((_args: { homeDir: string; proxy: unknown }) => ({
-      cwd: '/fake-workdir/opencode-server/one-shot/home', homeDir: '/fake-workdir/opencode-server/one-shot/home',
-      roBinds: [], rwBinds: [], denyWriteRoBinds: [], proxy: { url: 'http://127.0.0.1:1', noProxy: '127.0.0.1' },
-      allowlist: ['openrouter.ai'], env: { HOME: '/fake-workdir/opencode-server/one-shot/home' },
+    buildOneShotSandboxProfileMock: vi.fn((args: { root: string; homeDir: string; proxy: unknown }) => ({
+      cwd: args.root, homeDir: args.homeDir, // I4: profile cwd == root (== spawn cwd)
+      roBinds: [], rwBinds: [args.root], denyWriteRoBinds: [], proxy: { url: 'http://127.0.0.1:1', noProxy: '127.0.0.1' },
+      allowlist: ['openrouter.ai'], env: { HOME: args.homeDir },
       cred: { username: 'one-shot-u', password: 'one-shot-p' },
     })),
     wrapServeCommandMock: vi.fn(async () => ({ command: 'bwrap', args: ['opencode', 'serve'] })),
@@ -157,6 +157,10 @@ describe('OpencodeLlmOneShot.text', () => {
     const opts = startEmbeddedServerMock.mock.calls[0][0];
     expect(opts.spawnOverride).toEqual({ command: 'bwrap', args: ['opencode', 'serve'] });
     expect(opts.env).toEqual(expect.objectContaining({ HOME: expect.stringContaining('one-shot/home') }));
+    // I4: the profile's cwd (root) MUST be the exact dir the process is spawned
+    // in — otherwise the jail binds a dir the process never runs in.
+    expect(profileArgs.root).toBe(opts.cwd);
+    expect(profileArgs.homeDir).toBe(`${opts.cwd}/home`);
 
     // homeDir must exist on disk before the wrapped spawn (same invariant as
     // the per-agent pool — a nonexistent bind source is silently skipped).
@@ -180,6 +184,15 @@ describe('OpencodeLlmOneShot.text', () => {
     const oneShot = new OpencodeLlmOneShot();
     await oneShot.text({ model: 'haiku', prompt: 'a' });
     await closeOneShotServe();
+    expect(revokeCredentialMock).toHaveBeenCalledWith({ username: 'one-shot-u', password: 'one-shot-p' });
+  });
+
+  it('revokes the minted credential when the boot throws AFTER minting (M1 — mirrors bootChild)', async () => {
+    startEmbeddedServerMock.mockRejectedValueOnce(new Error('spawn boom'));
+    const oneShot = new OpencodeLlmOneShot();
+    // text() swallows the boot rejection and returns null; the credential minted
+    // for this failed boot must still be revoked so it doesn't leak.
+    expect(await oneShot.text({ model: 'haiku', prompt: 'a' })).toBeNull();
     expect(revokeCredentialMock).toHaveBeenCalledWith({ username: 'one-shot-u', password: 'one-shot-p' });
   });
 

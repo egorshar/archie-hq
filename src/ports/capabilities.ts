@@ -58,9 +58,15 @@ export const CLAUDE_RUNTIME_CAPABILITIES: RuntimeCapabilities = {
 
 /**
  * opencode runtime. These flags are declarative (spec P3: document parity,
- * degrade gracefully) — nothing branches on them yet. No built-in OS sandbox
- * (Phase 3 adds a firewall + guard enforcement). Native skills ARE supported:
- * the embedded server exposes opencode's `skill` tool over the union of agent
+ * degrade gracefully) — nothing branches on them yet. P3b DID add a per-child
+ * OS sandbox: on Linux every serve child runs inside a fail-closed bwrap
+ * filesystem jail with a cooperative egress proxy (see
+ * runtime/opencode/child-sandbox.ts); on darwin dev it runs unwrapped (env
+ * pruning + proxy still apply). osSandbox stays `false` for now — nothing
+ * branches on it, and it's kept honest until the Linux container live smoke
+ * (the genuinely-unverified bwrap enforcement, tracked in the P3b spike
+ * runbook) proves the jail actually holds. Native skills ARE supported: the
+ * embedded server exposes opencode's `skill` tool over the union of agent
  * skills staged at its working dir (see runtime/opencode/skills.ts).
  */
 export const OPENCODE_RUNTIME_CAPABILITIES: RuntimeCapabilities = {
