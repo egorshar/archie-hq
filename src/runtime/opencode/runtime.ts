@@ -18,6 +18,7 @@ import { logger } from '../../system/logger.js';
 import { sharedRegistry, closeBridge } from './server.js';
 import { getAgentServe, scheduleIdleReap, markAllServesStale, closeServePool, evictTask, type AgentServeSpec, type ServeHandle } from './serve-pool.js';
 import { closeOneShotServe } from './llm-one-shot.js';
+import { closeEgressProxy } from './egress-proxy.js';
 import type { OpencodeClient } from './embedded-server.js';
 import { buildToolAllowlist } from './tool-allowlist.js';
 import { turnCompletion } from './turn-completion.js';
@@ -163,12 +164,14 @@ export class OpencodeRuntime implements AgentRuntime {
     return opencodeFooterModel();
   }
 
-  /** Tear down every per-agent serve child, then the bridge, then the one-shot
-   * utility serve (P3a error-handling order) — so a dev reload leaves no
-   * orphaned `opencode serve` children. */
+  /** Tear down every per-agent serve child, then the bridge, then the P3b
+   * egress proxy, then the one-shot utility serve (P3a/P3b error-handling
+   * order) — so a dev reload leaves no orphaned `opencode serve` children and
+   * no dangling proxy listener. */
   async shutdown(): Promise<void> {
     await closeServePool();
     await closeBridge();
+    await closeEgressProxy();
     await closeOneShotServe();
   }
 

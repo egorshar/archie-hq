@@ -12,12 +12,15 @@
  * src/runtime/opencode/ (spec R4).
  */
 import { join } from 'node:path';
+import { mkdir } from 'node:fs/promises';
 import type { LlmOneShot, LlmTextRequest, LlmJsonRequest } from '../../ports/llm-one-shot.js';
 import { logger } from '../../system/logger.js';
 import { WORKDIR } from '../../system/workdir.js';
 import { resolveOpencodeModel } from './model.js';
 import { concatPromptText } from './server.js';
 import { startEmbeddedServer, prepareServeRoot, SERVE_PERMISSION, type OpencodeClient, type EmbeddedServer } from './embedded-server.js';
+import { buildOneShotSandboxProfile, wrapServeCommand, type EgressCredential } from './child-sandbox.js';
+import { getEgressProxy, type EgressProxyHandle } from './egress-proxy.js';
 
 /**
  * Singleton utility serve for one-shot LLM calls (P3a §7): one small
@@ -27,7 +30,17 @@ import { startEmbeddedServer, prepareServeRoot, SERVE_PERMISSION, type OpencodeC
  * config.model = the one-shot route ('haiku' → ARCHIE_OPENCODE_MODEL_HAIKU or
  * the DEFAULT fallback); callers still pass body.model per request.
  */
-let servePromise: Promise<EmbeddedServer> | null = null;
+/** The resolved utility server, plus the P3b egress-proxy credential minted
+ * for it — carried on the resolved value (not an outer variable) so
+ * closeOneShotServe always revokes the credential belonging to the SAME boot
+ * it's tearing down, never a newer boot's (mirrors the identity-guarded
+ * servePromise-nulling below). */
+interface OneShotServer extends EmbeddedServer {
+  egressProxy: EgressProxyHandle;
+  egressCred: EgressCredential;
+}
+
+let servePromise: Promise<OneShotServer> | null = null;
 // Per-boot generation token: a close() that happens WHILE a boot is in flight
 // bumps this, so that boot's post-spawn guard always sees a mismatch and
 // self-aborts — even if a later boot has since started and reset servePromise.
@@ -36,19 +49,29 @@ let bootGeneration = 0;
 function getOneShotClient(): Promise<OpencodeClient> {
   if (!servePromise) {
     const myGeneration = bootGeneration;
-    const boot: Promise<EmbeddedServer> = (async () => {
+    const boot: Promise<OneShotServer> = (async () => {
       const root = join(WORKDIR, 'opencode-server', 'one-shot');
       await prepareServeRoot(root);
+      // P3b: minimal sandbox profile (no repo mounts — the one-shot never
+      // touches a clone) + its own proxy credential + its own home dir.
+      const proxy = await getEgressProxy();
+      const homeDir = join(root, 'home');
+      await mkdir(homeDir, { recursive: true }); // must exist before the wrapped spawn (bind-source invariant)
+      const profile = buildOneShotSandboxProfile({ homeDir, proxy });
+      const { command, args } = await wrapServeCommand(profile);
       const model = resolveOpencodeModel('haiku');
       const server = await startEmbeddedServer({
         cwd: root,
         config: { model: `${model.providerID}/${model.modelID}`, permission: SERVE_PERMISSION },
+        spawnOverride: { command, args },
+        env: profile.env,
       });
       if (bootGeneration !== myGeneration) {
         try { server.close(); } catch { /* best-effort */ }
+        proxy.revokeCredential(profile.cred);
         throw new Error('one-shot serve boot aborted during shutdown');
       }
-      return server;
+      return { ...server, egressProxy: proxy, egressCred: profile.cred };
     })().catch((err) => {
       // Identity-guarded: only clear the singleton if it still points at THIS
       // boot — a stale boot's failure (e.g. a close-during-boot self-abort) must
@@ -61,14 +84,18 @@ function getOneShotClient(): Promise<OpencodeClient> {
   return servePromise.then((s) => s.client);
 }
 
-/** Tear down the utility serve (idempotent; no-op if never booted). */
+/** Tear down the utility serve (idempotent; no-op if never booted). Revokes
+ * this boot's own egress-proxy credential (P3b) alongside killing the child. */
 export async function closeOneShotServe(): Promise<void> {
   bootGeneration++;
   if (!servePromise) return;
   const p = servePromise;
   servePromise = null;
   const server = await p.catch(() => null);
-  if (server) { try { server.close(); } catch { /* already gone */ } }
+  if (server) {
+    try { server.close(); } catch { /* already gone */ }
+    server.egressProxy.revokeCredential(server.egressCred);
+  }
 }
 
 export class OpencodeLlmOneShot implements LlmOneShot {

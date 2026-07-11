@@ -73,11 +73,25 @@ export async function startEmbeddedServer(opts: {
   cwd: string;
   config: Record<string, unknown>;
   timeoutMs?: number;
+  /** P3b: the bwrap-wrapped invocation (`{command:'bwrap', args:[...flags, 'opencode', ...SERVE_ARGS]}`)
+   * in place of the default bare `opencode serve`. Omitted on darwin (no OS
+   * sandbox there) and by callers with no sandbox profile. */
+  spawnOverride?: { command: string; args: string[] };
+  /** P3b: the pruned per-child env (child-sandbox.ts buildChildEnv) — used
+   * VERBATIM, never spread with process.env (see below). Omitted falls back
+   * to the inherited env (macOS pre-P3b / callers without a profile). */
+  env?: Record<string, string>;
 }): Promise<EmbeddedServer> {
   const timeoutMs = opts.timeoutMs ?? 15000;
-  const proc = spawn('opencode', [...SERVE_ARGS], {
+  const { command, args } = opts.spawnOverride ?? { command: 'opencode', args: [...SERVE_ARGS] };
+  // When a pruned env is provided (P3b), use it VERBATIM — do NOT spread
+  // process.env, that would re-leak the orchestrator secrets the sandbox's
+  // env-pruning (Task 4) deliberately drops. Otherwise fall back to the
+  // inherited env (macOS pre-P3b / callers without a profile).
+  const baseEnv = opts.env ?? process.env;
+  const proc = spawn(command, args, {
     cwd: opts.cwd,
-    env: { ...process.env, OPENCODE_CONFIG_CONTENT: JSON.stringify(opts.config) },
+    env: { ...baseEnv, OPENCODE_CONFIG_CONTENT: JSON.stringify(opts.config) },
   });
 
   const url = await new Promise<string>((resolve, reject) => {

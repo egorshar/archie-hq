@@ -1,6 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-const { startEmbeddedServerMock, prepareServeRootMock, sessionCreate, sessionPrompt, fakeServer } = vi.hoisted(() => {
+const {
+  startEmbeddedServerMock, prepareServeRootMock, sessionCreate, sessionPrompt, fakeServer,
+  buildOneShotSandboxProfileMock, wrapServeCommandMock, getEgressProxyMock, revokeCredentialMock, fsMkdirMock,
+} = vi.hoisted(() => {
   const sessionCreate = vi.fn();
   const sessionPrompt = vi.fn();
   const client = { session: { create: sessionCreate, prompt: sessionPrompt } };
@@ -10,12 +13,28 @@ const { startEmbeddedServerMock, prepareServeRootMock, sessionCreate, sessionPro
     close: vi.fn(),
     onExit: vi.fn(),
   };
+  const revokeCredentialMock = vi.fn();
   return {
-    startEmbeddedServerMock: vi.fn(async (_opts: { cwd: string; config: Record<string, unknown> }) => fakeServer),
+    startEmbeddedServerMock: vi.fn(async (_opts: { cwd: string; config: Record<string, unknown>; spawnOverride?: { command: string; args: string[] }; env?: Record<string, string> }) => fakeServer),
     prepareServeRootMock: vi.fn(async (_root: string) => {}),
     sessionCreate,
     sessionPrompt,
     fakeServer,
+    buildOneShotSandboxProfileMock: vi.fn((_args: { homeDir: string; proxy: unknown }) => ({
+      cwd: '/fake-workdir/opencode-server/one-shot/home', homeDir: '/fake-workdir/opencode-server/one-shot/home',
+      roBinds: [], rwBinds: [], denyWriteRoBinds: [], proxy: { url: 'http://127.0.0.1:1', noProxy: '127.0.0.1' },
+      allowlist: ['openrouter.ai'], env: { HOME: '/fake-workdir/opencode-server/one-shot/home' },
+      cred: { username: 'one-shot-u', password: 'one-shot-p' },
+    })),
+    wrapServeCommandMock: vi.fn(async () => ({ command: 'bwrap', args: ['opencode', 'serve'] })),
+    getEgressProxyMock: vi.fn(async () => ({
+      url: 'http://127.0.0.1:1',
+      mintCredential: vi.fn(() => ({ username: 'one-shot-u', password: 'one-shot-p' })),
+      revokeCredential: revokeCredentialMock,
+      close: vi.fn(),
+    })),
+    revokeCredentialMock,
+    fsMkdirMock: vi.fn(async () => undefined),
   };
 });
 
@@ -30,6 +49,19 @@ vi.mock('../embedded-server.js', () => ({
   prepareServeRoot: prepareServeRootMock,
   SERVE_PERMISSION: { edit: 'allow', bash: 'allow', webfetch: 'allow', external_directory: 'allow' },
 }));
+// P3b: llm-one-shot.ts now builds a minimal sandbox profile + mints its own
+// egress-proxy credential + creates its own homeDir before spawning wrapped.
+vi.mock('../child-sandbox.js', () => ({
+  buildOneShotSandboxProfile: buildOneShotSandboxProfileMock,
+  wrapServeCommand: wrapServeCommandMock,
+}));
+vi.mock('../egress-proxy.js', () => ({ getEgressProxy: getEgressProxyMock }));
+// Real disk I/O would be needless overhead/flakiness in a unit test — stub it
+// like the rest of the boot preamble (prepareServeRoot above).
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return { ...actual, mkdir: fsMkdirMock };
+});
 vi.mock('../../../system/workdir.js', () => ({ WORKDIR: '/fake-workdir' }));
 vi.mock('../../../system/logger.js', () => ({
   logger: { error: vi.fn(), system: vi.fn(), warn: vi.fn(), debug: vi.fn(), info: vi.fn(), plain: vi.fn() },
@@ -46,6 +78,11 @@ beforeEach(() => {
   startEmbeddedServerMock.mockClear();
   prepareServeRootMock.mockClear();
   fakeServer.close.mockClear();
+  buildOneShotSandboxProfileMock.mockClear();
+  wrapServeCommandMock.mockClear();
+  getEgressProxyMock.mockClear();
+  revokeCredentialMock.mockClear();
+  fsMkdirMock.mockClear();
   delete process.env.ARCHIE_OPENCODE_MODEL_HAIKU;
   // getOneShotClient() resolves the utility serve's own config.model via
   // resolveOpencodeModel('haiku') — set DEFAULT as the fallback so that
@@ -107,6 +144,27 @@ describe('OpencodeLlmOneShot.text', () => {
     expect(opts.config.mcp).toBeUndefined(); // no skills, no plugin, no MCP — one-shots never use tools
   });
 
+  it('spawns wrapped through wrapServeCommand with the minimal profile env, homeDir created first (P3b)', async () => {
+    sessionPrompt.mockResolvedValue({ data: { info: {}, parts: [{ type: 'text', text: 'ok' }] } });
+    const oneShot = new OpencodeLlmOneShot();
+    await oneShot.text({ model: 'haiku', prompt: 'a' });
+
+    expect(getEgressProxyMock).toHaveBeenCalledTimes(1);
+    expect(buildOneShotSandboxProfileMock).toHaveBeenCalledTimes(1);
+    const profileArgs = buildOneShotSandboxProfileMock.mock.calls[0][0];
+    expect(profileArgs.homeDir).toContain('opencode-server/one-shot/home');
+
+    const opts = startEmbeddedServerMock.mock.calls[0][0];
+    expect(opts.spawnOverride).toEqual({ command: 'bwrap', args: ['opencode', 'serve'] });
+    expect(opts.env).toEqual(expect.objectContaining({ HOME: expect.stringContaining('one-shot/home') }));
+
+    // homeDir must exist on disk before the wrapped spawn (same invariant as
+    // the per-agent pool — a nonexistent bind source is silently skipped).
+    const mkdirOrder = fsMkdirMock.mock.invocationCallOrder[0];
+    const spawnOrder = startEmbeddedServerMock.mock.invocationCallOrder[0];
+    expect(mkdirOrder).toBeLessThan(spawnOrder);
+  });
+
   it('closeOneShotServe closes the child and a later call re-boots', async () => {
     sessionPrompt.mockResolvedValue({ data: { info: {}, parts: [{ type: 'text', text: 'ok' }] } });
     const oneShot = new OpencodeLlmOneShot();
@@ -115,6 +173,14 @@ describe('OpencodeLlmOneShot.text', () => {
     expect(fakeServer.close).toHaveBeenCalledTimes(1);
     await oneShot.text({ model: 'haiku', prompt: 'b' });
     expect(startEmbeddedServerMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('revokes the one-shot proxy credential in closeOneShotServe', async () => {
+    sessionPrompt.mockResolvedValue({ data: { info: {}, parts: [{ type: 'text', text: 'ok' }] } });
+    const oneShot = new OpencodeLlmOneShot();
+    await oneShot.text({ model: 'haiku', prompt: 'a' });
+    await closeOneShotServe();
+    expect(revokeCredentialMock).toHaveBeenCalledWith({ username: 'one-shot-u', password: 'one-shot-p' });
   });
 
   it('aborts an in-flight boot if close() lands mid-boot, even after a newer boot has since started (generation token)', async () => {

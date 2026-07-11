@@ -14,7 +14,7 @@
  * dirs live under the clone and are cleaned with the clone.
  */
 import { join } from 'node:path';
-import { rm } from 'node:fs/promises';
+import { rm, mkdir } from 'node:fs/promises';
 import type { Agent } from '../../agents/agent.js';
 import type { Task } from '../../tasks/task.js';
 import { logger } from '../../system/logger.js';
@@ -28,6 +28,8 @@ import { stageAgentSkills, excludeOpencodeFromGit } from './skills.js';
 import { buildOpencodeMcpConfig } from './mcp-config.js';
 import { resolveAgentOpencodeModel } from './model.js';
 import { startEventConsumer } from './events.js';
+import { buildChildSandboxProfile, wrapServeCommand, agentProfileFingerprint, agentHomeDir } from './child-sandbox.js';
+import { getEgressProxy } from './egress-proxy.js';
 
 export type StaleReason = 'plugins' | 'mode-transition';
 
@@ -36,14 +38,21 @@ export interface ServeHandle {
   url: string;
   /** This child's bridge bearer token (A4). Revoked on close. Never log it. */
   token: string;
-  /** The serve cwd this child booted with — compared on re-acquire so a clone
-   * re-created at a new path (RO→RW) recycles the child (mode-transition). */
+  /** The serve cwd this child booted with. */
   cwd: string;
+  /** The P3b sandbox-profile fingerprint this child booted with (mounts +
+   * allowlist + cwd + home — see child-sandbox.ts agentProfileFingerprint).
+   * getAgentServe recomputes the desired fingerprint on every acquire and
+   * recycles on a mismatch — this subsumes the old cwd-only staleness check
+   * (cwd is one of the fingerprint's inputs) and additionally catches a
+   * mount/allowlist flip (e.g. RO→RW edit-mode grant) on the SAME cwd. */
+  fingerprint: string;
   markStale(reason: StaleReason): void;
   isStale(): boolean;
   isClosed(): boolean;
-  /** Kill the serve child, stop its SSE consumer, revoke its token, evict it
-   * from the pool. LEAVES the serve root on disk (evictTask rm's it). */
+  /** Kill the serve child, stop its SSE consumer, revoke its bridge token AND
+   * its egress-proxy credential (P3b), evict it from the pool. LEAVES the
+   * serve root on disk (evictTask rm's it). */
   close(): Promise<void>;
 }
 
@@ -145,11 +154,14 @@ export async function getAgentServe(agent: Agent, task: Task, spec: AgentServeSp
   if (existing) {
     const handle = await existing.promise.catch(() => null); // a failed boot was already evicted
     if (handle && !handle.isClosed()) {
-      if (handle.cwd !== desiredCwd) {
-        // RO→RW: the clone was re-created at a NEW path while the pool key
-        // stayed constant — the child's world changed under a warm handle.
-        // This is also the future P3b remount point.
-        handle.markStale('mode-transition');
+      // Proxy-free fingerprint recompute (no credential minted on this warm
+      // path) — subsumes the old cwd-only check (cwd is a fingerprint input,
+      // so a clone re-create at a NEW path — RO→RW — still recycles) AND
+      // additionally catches a mount/allowlist flip on the SAME cwd (e.g. an
+      // edit-mode grant mid-task), which the old cwd comparison couldn't see.
+      const desiredFp = agentProfileFingerprint(agent, task, desiredCwd, agent.editModeAtSpawn === true);
+      if (handle.fingerprint !== desiredFp) {
+        handle.markStale('mode-transition'); // cwd OR mount/allowlist drift (RO→RW, etc.)
       }
       if (!handle.isStale()) return handle;
       await handle.close(); // turn-boundary recycle: fresh boot below re-stages skills
@@ -197,10 +209,21 @@ async function bootChild(
   // can still revoke a token that was successfully minted.
   let bridge: Awaited<ReturnType<typeof getBridge>> | undefined;
   let token: string | undefined;
+  // Set once the P3b sandbox profile is built (mints the egress-proxy
+  // credential). Captured in outer scope — like bridge/token above — so a
+  // later failure (in wrapServeCommand or startEmbeddedServer) can still
+  // revoke the credential via the boot-failure catch.
+  let proxy: Awaited<ReturnType<typeof getEgressProxy>> | undefined;
+  let profile: ReturnType<typeof buildChildSandboxProfile> | undefined;
   try {
     const [, mcp] = await Promise.all([
       isClone ? Promise.resolve() : prepareServeRoot(cwd),
       buildOpencodeMcpConfig(),
+      // The child's per-agent HOME/XDG_DATA_HOME dir (session-store
+      // isolation). CRITICAL: must exist on disk before wrapServeCommand runs
+      // — buildSandboxArgv silently skips a nonexistent bind SOURCE, so a
+      // missing homeDir would boot the child with no writable HOME at all.
+      mkdir(agentHomeDir(task.taskId, agent.def.id), { recursive: true }),
       (async () => {
         bridge = await getBridge();
         token = bridge.mintChildToken({ taskId: task.taskId, agentId: agent.def.id });
@@ -227,15 +250,31 @@ async function bootChild(
     // shared-server 'default' resolution) and task recovery runs.
     const model = resolveAgentOpencodeModel(agent.def);
 
-    // Spawn. THIS is the P3b sandbox-wrap point: the per-child OS sandbox
-    // (bubblewrap mounts + egress proxy) will wrap this child spawn.
+    // P3b: build the per-child OS-sandbox profile (bwrap mounts + egress
+    // allowlist), mint this child's proxy credential, and wrap the spawn.
+    // editAllowed is the exact edit-mode snapshot prepareAgentContext froze
+    // for this spawn (the same signal the runtime's readOnly derivation
+    // uses); a mid-task edit-mode grant re-spawns the agent, so it's current
+    // for the child being booted.
+    proxy = await getEgressProxy();
+    const editAllowed = agent.editModeAtSpawn === true;
+    profile = buildChildSandboxProfile({ agent, task, cwd, editAllowed, proxy });
+    const fingerprint = agentProfileFingerprint(agent, task, cwd, editAllowed);
+    const { command, args } = await wrapServeCommand(profile);
+
+    // Spawn, jailed (Linux: bwrap; darwin: unwrapped dev parity — see
+    // wrapServeCommand) and with the pruned per-child env (no orchestrator
+    // secrets, no process.env leak — see embedded-server.ts).
     const server = await startEmbeddedServer({
       cwd,
       config: { model: `${model.providerID}/${model.modelID}`, permission: SERVE_PERMISSION, mcp },
+      spawnOverride: { command, args },
+      env: profile.env,
     });
     if (poolGeneration !== myGeneration) {
       try { server.close(); } catch { /* best-effort */ }
       liveBridge.revokeChildToken(liveToken);
+      proxy.revokeCredential(profile.cred);
       throw new Error(`opencode[${key}]: child boot aborted during shutdown`);
     }
 
@@ -251,6 +290,7 @@ async function bootChild(
       url: server.url,
       token: liveToken,
       cwd,
+      fingerprint,
       markStale: (reason) => {
         if (!stale) logger.system(`opencode[${key}]: marked stale (${reason}) — recycles at the next turn boundary`);
         stale = reason;
@@ -263,6 +303,7 @@ async function bootChild(
         consumer.stop();
         try { server.close(); } catch { /* child already gone */ }
         liveBridge.revokeChildToken(liveToken);
+        proxy!.revokeCredential(profile!.cred);
         if (pool.get(key) === entry) pool.delete(key);
       },
     };
@@ -286,6 +327,10 @@ async function bootChild(
     // Promise.all short-circuited on a different branch's rejection) — only
     // revoke a token that was actually minted.
     if (bridge && token) bridge.revokeChildToken(token);
+    // Likewise, only revoke a proxy credential that was actually minted
+    // (buildChildSandboxProfile succeeded before a later failure, e.g. in
+    // wrapServeCommand or startEmbeddedServer).
+    if (proxy && profile) proxy.revokeCredential(profile.cred);
     throw err;
   }
 }

@@ -14,6 +14,7 @@ const { WORKDIR_STUB, ...mocks } = vi.hoisted(() => {
   const { tmpdir: osTmpdir } = require('node:os');
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const { join: pathJoin } = require('node:path');
+  const revokeCredential = vi.fn();
   return {
     WORKDIR_STUB: pathJoin(osTmpdir(), `oc-pool-${process.pid}`),
     startEmbeddedServer: vi.fn(),
@@ -25,7 +26,27 @@ const { WORKDIR_STUB, ...mocks } = vi.hoisted(() => {
     buildOpencodeMcpConfig: vi.fn(async () => ({})),
     startEventConsumer: vi.fn(),
     loggerWarn: vi.fn(),
+    buildChildSandboxProfile: vi.fn(() => ({
+      cwd: '/clone', homeDir: '/h', roBinds: [], rwBinds: ['/clone', '/h'], denyWriteRoBinds: [],
+      proxy: { url: 'http://127.0.0.1:9', noProxy: '127.0.0.1' }, allowlist: ['openrouter.ai'],
+      env: { HOME: '/h' }, cred: { username: 'u', password: 'p' },
+    })),
+    wrapServeCommand: vi.fn(async () => ({ command: 'bwrap', args: ['opencode', 'serve'] })),
+    agentProfileFingerprint: vi.fn((_agent: unknown, _task: unknown, _cwd: string, _editAllowed: boolean) => 'fp-base'),
+    agentHomeDir: vi.fn((_taskId: string, _agentId: string) => pathJoin(osTmpdir(), `oc-pool-${process.pid}`, 'child-home')),
+    revokeCredential,
+    fsMkdir: vi.fn(async () => undefined),
+    getEgressProxy: vi.fn(async () => ({
+      url: 'http://127.0.0.1:9',
+      mintCredential: vi.fn(() => ({ username: 'u', password: 'p' })),
+      revokeCredential,
+      close: vi.fn(),
+    })),
   };
+  // (declared above the returned object literal so getEgressProxy's factory
+  // and the outer test file can share the SAME spy instance — `mocks` is only
+  // bound once vi.hoisted() returns, so it can't be referenced from inside
+  // this callback.)
 });
 vi.mock('../embedded-server.js', async (importOriginal) => {
   const actual = await importOriginal<any>();
@@ -36,6 +57,26 @@ vi.mock('../skills.js', () => ({ stageAgentSkills: mocks.stageAgentSkills, exclu
 vi.mock('../bridge/plugin-source.js', () => ({ writeBridgePlugin: mocks.writeBridgePlugin }));
 vi.mock('../mcp-config.js', () => ({ buildOpencodeMcpConfig: mocks.buildOpencodeMcpConfig }));
 vi.mock('../events.js', () => ({ startEventConsumer: mocks.startEventConsumer }));
+vi.mock('../child-sandbox.js', () => ({
+  buildChildSandboxProfile: mocks.buildChildSandboxProfile,
+  wrapServeCommand: mocks.wrapServeCommand,
+  agentProfileFingerprint: mocks.agentProfileFingerprint,
+  agentHomeDir: mocks.agentHomeDir,
+}));
+vi.mock('../egress-proxy.js', () => ({ getEgressProxy: mocks.getEgressProxy }));
+// serve-pool.ts's own `mkdir(agentHomeDir(...))` call (the homeDir-exists
+// invariant) is real disk I/O — genuinely slower than the purely-mocked,
+// microtask-resolved preamble steps around it. Left real, it races the
+// closeServePool()-mid-boot tests below (their `await closeServePool()`
+// resolves on microtasks alone and can return before this I/O completes,
+// leaving e.g. `resolveBoot` never captured). Stub it to a fast microtask
+// resolve — serve-pool.ts imports mkdir from 'node:fs/promises' (prefixed);
+// the test's OWN setup/teardown import the bare 'fs/promises' specifier, a
+// distinct module id, so their real mkdir/rm/access are unaffected.
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return { ...actual, mkdir: mocks.fsMkdir };
+});
 vi.mock('../../../system/workdir.js', () => ({ WORKDIR: WORKDIR_STUB }));
 vi.mock('../../../system/logger.js', () => ({
   logger: { system: vi.fn(), warn: mocks.loggerWarn, error: vi.fn(), debug: vi.fn(), agent: vi.fn() },
@@ -85,6 +126,10 @@ describe('serve pool (P3a §1/§5)', () => {
     mocks.getBridge.mockResolvedValue(bridge);
     mocks.startEmbeddedServer.mockImplementation(async () => fakeEmbedded().server);
     mocks.startEventConsumer.mockReturnValue({ stop: vi.fn() });
+    // vi.clearAllMocks() clears call history but NOT a custom mockImplementation
+    // set by a previous test — restore the default constant fingerprint here so
+    // a test that drives it by cwd (below) can't leak into a later test.
+    mocks.agentProfileFingerprint.mockImplementation(() => 'fp-base');
     process.env.ARCHIE_OPENCODE_MODEL_DEFAULT = 'openrouter/z-ai/glm-4.7';
     process.env.ARCHIE_OPENCODE_MODEL_OPUS = 'openrouter/z-ai/glm-5.2';
     delete process.env.OPENCODE_CHILD_IDLE_TTL;
@@ -156,6 +201,10 @@ describe('serve pool (P3a §1/§5)', () => {
   });
 
   it('cwd change under a constant key (RO→RW clone re-create) recycles as mode-transition', async () => {
+    // The pool no longer compares cwd directly (P3b) — it recycles on a
+    // fingerprint mismatch, and cwd is one of the fingerprint's inputs. Drive
+    // the (mocked) fingerprint by the cwd argument to exercise that path.
+    mocks.agentProfileFingerprint.mockImplementation((_agent: unknown, _task: unknown, cwd: string) => `fp:${cwd}`);
     const h1 = await getAgentServe(agentOf('backend'), taskOf('t1'), { clonePath: '/clones/ro' });
     const h2 = await getAgentServe(agentOf('backend'), taskOf('t1'), { clonePath: '/clones/rw' });
     expect(h1.isClosed()).toBe(true);
@@ -233,23 +282,70 @@ describe('serve pool (P3a §1/§5)', () => {
     await expect(access(taskRoot)).rejects.toThrow(); // dir removed
   });
 
-  it('boot failure rejects, revokes the minted token, and leaves the pool retryable', async () => {
+  it('boot failure rejects, revokes the minted token AND the minted proxy credential, and leaves the pool retryable', async () => {
     mocks.startEmbeddedServer.mockRejectedValueOnce(new Error('spawn opencode ENOENT'));
     await expect(getAgentServe(agentOf('backend'), taskOf('t1'))).rejects.toThrow('ENOENT');
     expect(bridge.revokeChildToken).toHaveBeenCalledWith('child-token-1');
+    expect(mocks.revokeCredential).toHaveBeenCalledWith({ username: 'u', password: 'p' });
     await expect(getAgentServe(agentOf('backend'), taskOf('t1'))).resolves.toBeTruthy();
     expect(mocks.startEmbeddedServer).toHaveBeenCalledTimes(2);
   });
 
+  it('spawns the child through wrapServeCommand with the profile env and records the fingerprint', async () => {
+    const h = await getAgentServe(agentOf('backend'), taskOf('t1'), { clonePath: '/clone' });
+    const call = mocks.startEmbeddedServer.mock.calls[0][0];
+    expect(call.spawnOverride).toEqual({ command: 'bwrap', args: ['opencode', 'serve'] });
+    expect(call.env).toEqual(expect.objectContaining({ HOME: '/h' }));
+    expect(h.fingerprint).toBe('fp-base');
+  });
+
+  it('creates the per-agent homeDir on disk BEFORE spawning (buildSandboxArgv silently skips a nonexistent bind source)', async () => {
+    await getAgentServe(agentOf('backend'), taskOf('t1'), { clonePath: '/clone' });
+    expect(mocks.fsMkdir).toHaveBeenCalledWith(mocks.agentHomeDir('t1', 'backend'), { recursive: true });
+    // Ordering: the mkdir call must land before the spawn, not just "also happen".
+    const mkdirCallOrder = mocks.fsMkdir.mock.invocationCallOrder[0];
+    const spawnCallOrder = mocks.startEmbeddedServer.mock.invocationCallOrder[0];
+    expect(mkdirCallOrder).toBeLessThan(spawnCallOrder);
+  });
+
+  it('recycles a warm child when the profile fingerprint changes (RO→RW mount flip on the SAME cwd)', async () => {
+    mocks.agentProfileFingerprint.mockReturnValueOnce('fp-ro'); // boot: stored on the handle
+    const h1 = await getAgentServe(agentOf('backend'), taskOf('t1'), { clonePath: '/clone' });
+    mocks.agentProfileFingerprint.mockReturnValue('fp-rw'); // next acquire: desired differs → recycle
+    const h2 = await getAgentServe(agentOf('backend'), taskOf('t1'), { clonePath: '/clone' });
+    expect(h2).not.toBe(h1);
+    expect(h1.isClosed()).toBe(true);
+  });
+
+  it('does NOT recycle when the fingerprint is unchanged (warm reuse, no mint on the warm path)', async () => {
+    const h1 = await getAgentServe(agentOf('backend'), taskOf('t1'), { clonePath: '/clone' });
+    const h2 = await getAgentServe(agentOf('backend'), taskOf('t1'), { clonePath: '/clone' });
+    expect(h2).toBe(h1);
+    expect(mocks.startEmbeddedServer).toHaveBeenCalledTimes(1);
+  });
+
+  it('revokes the proxy credential on close', async () => {
+    const h = await getAgentServe(agentOf('backend'), taskOf('t1'), { clonePath: '/clone' });
+    await h.close();
+    expect(mocks.revokeCredential).toHaveBeenCalled();
+  });
+
   it('closeServePool closes every child and a boot resolving after shutdown is closed too', async () => {
     const h = await getAgentServe(agentOf('backend'), taskOf('t1'));
-    let resolveBoot!: (v: any) => void;
+    let resolveBoot: ((v: any) => void) | undefined;
     mocks.startEmbeddedServer.mockImplementationOnce(() => new Promise((r) => { resolveBoot = r; }));
     const inFlight = getAgentServe(agentOf('mobile'), taskOf('t1'));
     await closeServePool();
     expect(h.isClosed()).toBe(true);
+    // The P3b preamble (egress-proxy fetch + wrapServeCommand, on top of the
+    // existing bridge/skills/mcp wave) adds microtask ticks before mobile's
+    // boot reaches startEmbeddedServer — more than closeServePool's own
+    // (near-instant, nothing real to await) resolution takes. Poll for the
+    // in-flight boot to actually reach the spawn call instead of assuming a
+    // fixed tick count.
+    await vi.waitFor(() => { if (!resolveBoot) throw new Error('boot has not reached startEmbeddedServer yet'); });
     const late = fakeEmbedded();
-    resolveBoot(late.server);
+    resolveBoot!(late.server);
     await inFlight.catch(() => {}); // boot-after-teardown rejects or resolves-closed; either way the child is killed
     expect(late.closed).toHaveBeenCalled();
   });

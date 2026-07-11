@@ -32,6 +32,8 @@ vi.mock('../server.js', () => ({
 }));
 const { closeOneShotServe } = vi.hoisted(() => ({ closeOneShotServe: vi.fn(async () => {}) }));
 vi.mock('../llm-one-shot.js', () => ({ closeOneShotServe }));
+const { closeEgressProxy } = vi.hoisted(() => ({ closeEgressProxy: vi.fn(async () => {}) }));
+vi.mock('../egress-proxy.js', () => ({ closeEgressProxy }));
 const { prepareAgentContext } = vi.hoisted(() => ({ prepareAgentContext: vi.fn() }));
 vi.mock('../../../agents/spawn.js', () => ({ prepareAgentContext }));
 
@@ -131,13 +133,14 @@ describe('OpencodeRuntime.spawn', () => {
     expect(task.updateAgentState).toHaveBeenCalledWith('pm', false);
   });
 
-  it('shutdown() closes pool → bridge → one-shot serve, in that order', async () => {
+  it('shutdown() closes pool → bridge → egress proxy → one-shot serve, in that order', async () => {
     const order: string[] = [];
     closeServePool.mockImplementation(async () => { order.push('pool'); });
     closeBridge.mockImplementation(async () => { order.push('bridge'); });
+    closeEgressProxy.mockImplementation(async () => { order.push('egress'); });
     closeOneShotServe.mockImplementation(async () => { order.push('one-shot'); });
     await new OpencodeRuntime().shutdown();
-    expect(order).toEqual(['pool', 'bridge', 'one-shot']);
+    expect(order).toEqual(['pool', 'bridge', 'egress', 'one-shot']);
   });
 
   it('onPluginsRefreshed marks every live child stale (recycled at next turn boundary)', async () => {
