@@ -40,3 +40,12 @@ This is version-sensitive — re-verify on CLI bumps.
 **Check (2) — prompt.** Asked the session to use the `skill` tool to load `probe-clone-body` and echo its token line verbatim; the model replied `"PROBE-BODY-TOKEN: XYZZY-42"` — an exact match. Result: **PASS**. (This resolves the original spike's caveat: the earlier empty-echo was indeed a one-off model-behavior artifact, not a load failure — glm-4.7 echoed cleanly on this re-run.)
 
 **Conclusion.** Skill body content IS demonstrably retrievable from a clone cwd by both an API check and a prompt check — S2's A3 Option 1 (cwd = clone, skills staged in `<clone>/.opencode/skills`) is confirmed end-to-end for load, not just discovery; no P3a design change needed. Cleanup verified: no `opencode serve` process left running after either run.
+
+## Manual pre-release smoke — plugins-push recycle session continuity (A6, unit-tests can't cover)
+
+Unit tests mock the serve/session, so the S1=RESUME continuity claim — that a stale-recycled child resumes its opencode session WITH prior context — can only be proven against a live serve + a real model turn. Add this to the pre-release checklist whenever the opencode serve topology, the session-store pinning, or the CLI version changes:
+
+1. Boot the branch (container or `npm run dev`, `AGENT_RUNTIME=opencode`). Drive a task and, in the PM's first turn, establish a memorable in-session fact (e.g. ask it to remember a codeword).
+2. Trigger a stale-recycle without ending the task: push a plugins change (or otherwise fire `onPluginsRefreshed`), so `markAllServesStale('plugins')` marks the live child; the child is `close()`d and re-acquired at the next turn boundary.
+3. Send a follow-up turn that depends on the established fact (ask for the codeword). PASS = the agent recalls it (the recycled child resumed the same session from the per-agent store), with no second `session.create` in the logs and no `NotFoundError` recovery. FAIL = it cold-starts / can't recall → the per-agent store pin or S1 resume regressed on this CLI.
+4. Same check across a daemon restart (stop/start the process, not just the child): the per-agent store is on the `workdir` volume, so the reopened task's next turn must still resume the codeword.

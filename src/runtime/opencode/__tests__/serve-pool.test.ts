@@ -294,6 +294,25 @@ describe('serve pool (P3a §1/§5)', () => {
     await expect(access(taskRoot)).rejects.toThrow(); // dir removed
   });
 
+  it('evictTask does not hang on a wedged in-flight boot — bounded wait, warns, removes the root anyway', async () => {
+    vi.useFakeTimers();
+    try {
+      const taskRoot = join(WORKDIR_STUB, 'opencode-server', 't9');
+      await mkdir(taskRoot, { recursive: true });
+      // A boot whose startEmbeddedServer never settles (a wedged `opencode serve`).
+      mocks.startEmbeddedServer.mockImplementationOnce(() => new Promise(() => {}));
+      const inflight = getAgentServe(agentOf('backend'), taskOf('t9'));
+      inflight.catch(() => {}); // the entry never resolves; avoid an unhandled rejection
+      const evict = evictTask('t9');
+      await vi.advanceTimersByTimeAsync(31_000); // past EVICT_BOOT_WAIT_MS (30s)
+      await evict; // resolves despite the wedged boot — teardown is not hung
+      expect(mocks.loggerWarn).toHaveBeenCalledWith('opencode', expect.stringContaining('did not settle'));
+      await expect(access(taskRoot)).rejects.toThrow(); // root removed anyway
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('boot failure rejects, revokes the minted token AND the minted proxy credential, and leaves the pool retryable', async () => {
     mocks.startEmbeddedServer.mockRejectedValueOnce(new Error('spawn opencode ENOENT'));
     await expect(getAgentServe(agentOf('backend'), taskOf('t1'))).rejects.toThrow('ENOENT');
@@ -418,5 +437,18 @@ describe('serve pool (P3a §1/§5)', () => {
     expect(liveChildCount()).toBe(2); // not blocked
     expect(mocks.loggerWarn).toHaveBeenCalledWith('opencode', expect.stringContaining('OPENCODE_CHILD_SOFT_CAP'));
     expect(childSoftCap()).toBe(1);
+  });
+
+  it('census warn lists only LIVE children — a closed child is excluded from the readout', async () => {
+    process.env.OPENCODE_CHILD_SOFT_CAP = '1';
+    const hA = await getAgentServe(agentOf('backend'), taskOf('t1'));
+    await getAgentServe(agentOf('mobile'), taskOf('t1')); // 2 > 1 → warn fires
+    await hA.close(); // backend is now a closed entry (evicted from the pool)
+    mocks.loggerWarn.mockClear();
+    await getAgentServe(agentOf('research'), taskOf('t1')); // warn fires again
+    const censusCall = mocks.loggerWarn.mock.calls.find((c) => String(c[1]).includes('census'));
+    expect(censusCall).toBeTruthy();
+    expect(String(censusCall![1])).not.toContain('t1:backend'); // closed → not in the census
+    expect(String(censusCall![1])).toContain('t1:research'); // the child being booted is
   });
 });

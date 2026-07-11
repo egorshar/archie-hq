@@ -179,7 +179,9 @@ export class OpencodeRuntime implements AgentRuntime {
    * Plugins hot-reload: mark every live child stale; each recycles at its own
    * next turn boundary and re-stages fresh skills on boot (per-child restart —
    * tiny blast radius vs the old shared-server managed restart). Agents spawned
-   * after the push stage fresh by construction. Best-effort, never throws.
+   * after the push — AND boots in flight right now (markAllServesStale skips
+   * null-handle entries) — stage fresh from the just-refreshed plugins by
+   * construction, so they need no stale mark. Best-effort, never throws.
    */
   async onPluginsRefreshed(): Promise<void> {
     markAllServesStale('plugins');
@@ -379,10 +381,10 @@ export class OpencodeRuntime implements AgentRuntime {
           turnCompletion.cancelTurn(liveId, 'turn loop exited');
         }
         // Agent wind-down (P3a data flow): close this agent's child if one was
-        // acquired (root kept — evictTask rm's it at task teardown; sessions
-        // persist in opencode's global store, so a later re-spawn resumes).
-        // Never boot a child just to close it; best-effort — never mask the
-        // loop's exit.
+        // acquired (root + per-agent session store kept — evictTask rm's them
+        // at task teardown; the store is on the workdir volume, so a later
+        // re-spawn resumes from it). Never boot a child just to close it;
+        // best-effort — never mask the loop's exit.
         if (lastServe) await lastServe.close().catch(() => {});
         handle.isRunning = false;
         agent.backgroundTasks.clear();

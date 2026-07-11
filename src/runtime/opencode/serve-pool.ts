@@ -5,8 +5,13 @@
  * unique to it, and its own SSE consumer. Children boot on demand, are recycled
  * at turn boundaries when stale (plugins push / mode transition), reaped when
  * their agent idles past OPENCODE_CHILD_IDLE_TTL, and evicted (+ synthetic
- * roots rm'd) at task teardown. Sessions persist in opencode's process-global
- * store (spike S1=RESUME), so recycle/reap are context-free.
+ * roots rm'd) at task teardown. Each child's opencode session store is pinned
+ * to a PER-AGENT data dir under the workdir volume (P3b: HOME/XDG_DATA_HOME =
+ * agentHomeDir; it is NOT opencode's process-global ~/.local/share store), so
+ * resume is context-free across a child recycle/reap AND across daemon restarts
+ * (the store outlives the process on the mounted volume); a resume miss (store
+ * erased, or a task reopened after teardown removed its per-agent dir) falls
+ * back to runPromptTurn's 404 → fresh-session recovery.
  *
  * Serve-root ownership: the pool owns only SYNTHETIC roots (clone-less PM /
  * plugin agents) and rm's them ONLY in evictTask — child close/reap always
@@ -75,6 +80,12 @@ const pool = new Map<string, PoolEntry>();
 // the teardown, so nothing else could ever close its child → ~300MB orphan).
 let poolGeneration = 0;
 
+/** How long evictTask waits on an in-flight boot before dropping the entry and
+ * removing the root anyway, so a wedged `opencode serve` spawn can't hang task
+ * teardown. Comfortably above the embedded-server 15s start timeout, so a
+ * normally-booting child is never abandoned; only a genuinely stuck spawn hits it. */
+const EVICT_BOOT_WAIT_MS = 30_000;
+
 const poolKey = (taskId: string, agentId: string): string => `${taskId}:${agentId}`;
 const taskServeRoot = (taskId: string): string => join(WORKDIR, 'opencode-server', taskId);
 const syntheticRoot = (taskId: string, agentId: string): string => join(taskServeRoot(taskId), agentId);
@@ -90,7 +101,9 @@ function parseDurationMs(raw: string | undefined): number | null {
 }
 
 /** OPENCODE_CHILD_IDLE_TTL — how long an agent may park on nextMessage() before
- * its child is reaped. 15m default is safe: reap is context-free (S1=RESUME). */
+ * its child is reaped. 15m default is safe: reap is context-free — the agent's
+ * per-agent session store (agentHomeDir, on the workdir volume) outlives the
+ * reaped child, so the next boot resumes it. */
 export function childIdleTtlMs(): number {
   return parseDurationMs(process.env.OPENCODE_CHILD_IDLE_TTL) ?? 15 * 60_000;
 }
@@ -102,10 +115,26 @@ export function childSoftCap(): number {
   return Number.isInteger(n) && n > 0 ? n : 12;
 }
 
+/** True when a pool entry holds a booted, not-yet-closed child. Shared by
+ * liveChildCount and the census warn so both count the same thing (a live
+ * child) — not booting or already-closed entries. */
+function isLiveEntry(entry: PoolEntry): boolean {
+  return entry.handle != null && !entry.handle.isClosed();
+}
+
 export function liveChildCount(): number {
   let n = 0;
-  for (const entry of pool.values()) if (entry.handle && !entry.handle.isClosed()) n++;
+  for (const entry of pool.values()) if (isLiveEntry(entry)) n++;
   return n;
+}
+
+/** The keys of the currently-live children — the census for the soft-cap warn.
+ * Live-only (via isLiveEntry) so a booting or closed entry can't pollute an
+ * incident readout. */
+function liveChildKeys(): string[] {
+  const keys: string[] = [];
+  for (const [key, entry] of pool) if (isLiveEntry(entry)) keys.push(key);
+  return keys;
 }
 
 /**
@@ -335,7 +364,10 @@ async function bootChild(
     const live = liveChildCount() + 1; // this handle isn't in entry.handle yet
     const cap = childSoftCap();
     if (live > cap) {
-      logger.warn('opencode', `live serve children (${live}) exceed OPENCODE_CHILD_SOFT_CAP (${cap}) — census: ${[...pool.keys()].join(', ')}`);
+      // Census lists only LIVE children (+ this key, being booted) — booting/
+      // closed entries must not pollute an incident readout.
+      const census = [...liveChildKeys(), key].join(', ');
+      logger.warn('opencode', `live serve children (${live}) exceed OPENCODE_CHILD_SOFT_CAP (${cap}) — census: ${census}`);
     }
     return handle;
   } catch (err) {
@@ -363,7 +395,7 @@ export function scheduleIdleReap(agent: Agent, task: Task): () => void {
   const timer = setTimeout(() => {
     const handle = pool.get(key)?.handle;
     if (!handle || handle.isClosed()) return;
-    logger.system(`opencode[${key}]: parked > ${childIdleTtlMs()}ms — reaping child (root kept; sessions resume from opencode's global store)`);
+    logger.system(`opencode[${key}]: parked > ${childIdleTtlMs()}ms — reaping child (root + per-agent session store kept; next boot resumes from it)`);
     void handle.close();
   }, childIdleTtlMs());
   timer.unref?.();
@@ -374,6 +406,9 @@ export function scheduleIdleReap(agent: Agent, task: Task): () => void {
  * boundary (tiny blast radius). Children still booting stage fresh skills by
  * construction. */
 export function markAllServesStale(reason: StaleReason): void {
+  // `?.` skips in-flight boots (null handle) deliberately: a boot running now
+  // stages from the just-refreshed plugins by construction, so it needs no
+  // stale mark — only already-booted children hold a frozen skill set.
   for (const entry of pool.values()) entry.handle?.markStale(reason);
 }
 
@@ -383,7 +418,30 @@ export async function evictTask(taskId: string): Promise<void> {
   const prefix = `${taskId}:`;
   for (const [key, entry] of [...pool.entries()]) {
     if (!key.startsWith(prefix)) continue;
-    const handle = entry.handle ?? (await entry.promise.catch(() => null));
+    // Prefer the resolved handle; otherwise await the in-flight boot — but
+    // BOUND that await, so a wedged spawn (a hung `opencode serve`) can't hang
+    // task teardown indefinitely. On timeout we drop the pool entry and rm the
+    // root anyway: if that boot ever completes, its own close() self-guards via
+    // `pool.get(key) === entry` (the entry is gone, so it evicts itself) and
+    // its child is `--die-with-parent`, so it dies with the daemon regardless.
+    let handle = entry.handle;
+    if (!handle) {
+      // Whatever the wait outcome below, guarantee a late-resolving boot that
+      // finds its entry already evicted closes ITSELF (kills the serve child +
+      // revokes its tokens) rather than orphaning a live process. close() is
+      // idempotent, so this is safe even when the race resolves in time.
+      void entry.promise.then((h) => { if (h && pool.get(key) !== entry) void h.close(); }).catch(() => {});
+      handle = await Promise.race([
+        entry.promise.catch(() => null),
+        new Promise<null>((resolve) => {
+          const t = setTimeout(() => {
+            logger.warn('opencode', `evictTask(${taskId}): boot for ${key} did not settle within ${EVICT_BOOT_WAIT_MS}ms — dropping the entry; the late boot self-closes when it resolves`);
+            resolve(null);
+          }, EVICT_BOOT_WAIT_MS);
+          t.unref?.();
+        }),
+      ]);
+    }
     if (handle) await handle.close();
     pool.delete(key);
   }
