@@ -42,6 +42,7 @@ import {
   createRecoverableInputGenerator,
 } from './message-queue.js';
 import { setupSharedClone, cloneExists, type CloneCheckout } from '../connectors/github/repo-clone.js';
+import { runRepoPostCheckout } from './post-checkout.js';
 import { configureGitIdentity, getGitHubAppIdentity } from '../connectors/github/client.js';
 import { buildChannelCanvasPromptSection } from '../connectors/slack/channel-canvas.js';
 import { loadPrompt } from '../utils/prompt-loader.js';
@@ -418,6 +419,15 @@ Shared folder: ${sharedPath} [READ-ONLY]
       }
 
       await configureGitIdentity(clonePath);
+      // Post-checkout hook (every spawn, fresh or reused clone): run the
+      // operator-defined ARCHIE_REPO_POSTCHECKOUT command in the clone for repos
+      // whose frontmatter opts in (e.g. write .npmrc + `npx ai-context sync`).
+      // Best-effort — never blocks the spawn. See runRepoPostCheckout for why
+      // the command is env-driven (orchestrator process) while the opt-in is a
+      // per-repo frontmatter boolean.
+      if (entry.postCheckout) {
+        await runRepoPostCheckout({ clonePath, github: att.github, editAllowed });
+      }
       repoMounts.push({
         github: att.github,
         clonePath,
