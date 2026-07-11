@@ -11,8 +11,17 @@ import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { join } from 'node:path';
 import { logger } from '../../system/logger.js';
 import { SERVE_ARGS } from './embedded-server.js';
+import type { Agent } from '../../agents/agent.js';
+import type { Task } from '../../tasks/task.js';
+import { WORKDIR } from '../../system/workdir.js';
+import { resolveAgentOpencodeModel, resolveOpencodeModel } from './model.js';
+import { TRUSTED_PACKAGE_REGISTRY_DOMAINS } from '../../agents/sandbox.js';
+import { getRootMcpConfig } from '../../system/plugin-loader.js';
+import { isRepoAgent } from '../../types/agent.js';
+import type { EgressProxyHandle } from './egress-proxy.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -125,4 +134,150 @@ export async function wrapServeCommand(profile: ChildSandboxProfile): Promise<{ 
     throw new Error('bwrap not available — refusing to run an opencode child unsandboxed on a non-darwin platform (fail-closed)');
   }
   return { command: 'bwrap', args: [...buildSandboxArgv(profile), 'opencode', ...SERVE_ARGS] };
+}
+
+/** Hardcoded, orchestrator-controlled provider→egress-host map. NOT env/plugin
+ * settable (so a hot reload can't widen egress). Extend when adding a route. */
+export const PROVIDER_EGRESS_HOSTS: Record<string, string[]> = {
+  openrouter: ['openrouter.ai'],
+  anthropic: ['api.anthropic.com'],
+};
+
+/** Hardcoded provider→required-env-key map (the only secret the child inherits). */
+export const PROVIDER_ENV_KEYS: Record<string, string[]> = {
+  openrouter: ['OPENROUTER_API_KEY'],
+  anthropic: ['ANTHROPIC_API_KEY'],
+};
+
+/** Per-agent HOME/XDG_DATA_HOME dir (session-store isolation). Lives under the
+ * task serve root so P3a's evictTask rm's the store at task teardown. */
+export function agentHomeDir(taskId: string, agentId: string): string {
+  return join(WORKDIR, 'opencode-server', taskId, agentId, 'home');
+}
+
+function providerHostsOrThrow(providerID: string): string[] {
+  const hosts = PROVIDER_EGRESS_HOSTS[providerID];
+  if (!hosts) throw new Error(`No egress hosts for provider "${providerID}" — extend PROVIDER_EGRESS_HOSTS in child-sandbox.ts`);
+  return hosts;
+}
+
+/** The repo-host egress domain(s), gated on REPO_HOST. GitLab: the GITLAB_BASE_URL
+ * host. GitHub: the fixed github.com endpoints. Empty when unset. */
+function repoHostEgressDomains(): string[] {
+  if (process.env.REPO_HOST === 'gitlab') {
+    const base = process.env.GITLAB_BASE_URL;
+    if (!base) return [];
+    try { return [new URL(base).hostname]; } catch { return []; }
+  }
+  if (process.env.REPO_HOST === 'github') return ['github.com', 'api.github.com', 'codeload.github.com'];
+  return [];
+}
+
+/** Remote hosts for the MCP servers THIS agent declares (not the global union). */
+function declaredMcpHosts(def: Agent['def']): string[] {
+  const declared = new Set(Object.keys(def.mcpServers ?? {}));
+  if (declared.size === 0) return [];
+  const servers = getRootMcpConfig().servers ?? {};
+  const hosts: string[] = [];
+  for (const [name, cfg] of Object.entries(servers)) {
+    if (!declared.has(name)) continue;
+    const url = (cfg as { url?: string }).url;
+    if (!url) continue;
+    try { const u = new URL(url); hosts.push(u.port ? `${u.hostname}:${u.port}` : u.hostname); } catch { /* skip */ }
+  }
+  return hosts;
+}
+
+const BASE_ENV_KEYS = ['PATH', 'TERM', 'LANG', 'TZ'];
+
+/** Compose the pruned child env: base vars + LC_*, the per-agent HOME/XDG,
+ * the proxy vars, and ONLY the route provider's key(s). Orchestrator secrets
+ * (Slack/GitLab/GitHub tokens) are dropped. OPENCODE_CONFIG_CONTENT is added by
+ * startEmbeddedServer from config. */
+function buildChildEnv(providerID: string, homeDir: string, proxy: { url: string; noProxy: string }, cred: { username: string; password: string }): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const k of BASE_ENV_KEYS) if (process.env[k] != null) env[k] = process.env[k]!;
+  for (const [k, v] of Object.entries(process.env)) if (k.startsWith('LC_') && v != null) env[k] = v;
+  env.HOME = homeDir;
+  env.XDG_DATA_HOME = homeDir;
+  for (const key of (PROVIDER_ENV_KEYS[providerID] ?? [])) if (process.env[key] != null) env[key] = process.env[key]!;
+  const withCreds = proxy.url.replace('http://', `http://${cred.username}:${cred.password}@`);
+  env.HTTP_PROXY = withCreds; env.HTTPS_PROXY = withCreds; env.http_proxy = withCreds; env.https_proxy = withCreds;
+  env.NO_PROXY = proxy.noProxy; env.no_proxy = proxy.noProxy;
+  return env;
+}
+
+/** Credential-free profile skeleton: the mount + allowlist + home material that
+ * defines the security boundary, WITHOUT the proxy credential/env. Shared by
+ * buildChildSandboxProfile (which adds the cred + env) and agentProfileFingerprint
+ * (which just hashes it) so the two can never disagree on what a "change" is. */
+function computeProfileSkeleton(agent: Agent, task: Task, cwd: string, editAllowed: boolean): { cwd: string; homeDir: string; roBinds: string[]; rwBinds: string[]; denyWriteRoBinds: string[]; allowlist: string[]; providerID: string } {
+  const sb = agent.sandbox; // SandboxOptions, set by prepareAgentContext
+  const route = resolveAgentOpencodeModel(agent.def);
+  const homeDir = agentHomeDir(task.taskId, agent.def.id);
+  const allowlist = Array.from(new Set([
+    ...providerHostsOrThrow(route.providerID),
+    ...(isRepoAgent(agent.def) ? repoHostEgressDomains() : []),
+    ...(isRepoAgent(agent.def) && editAllowed ? TRUSTED_PACKAGE_REGISTRY_DOMAINS : []),
+    ...declaredMcpHosts(agent.def),
+    ...(agent.def.allowedNetworkDomains ?? []),
+  ]));
+  return {
+    cwd,
+    homeDir,
+    roBinds: [...(sb?.allowReadPaths ?? [])],
+    rwBinds: Array.from(new Set([...(sb?.allowWritePaths ?? []), join(cwd, '.opencode'), homeDir])),
+    denyWriteRoBinds: [...(sb?.denyWritePaths ?? [])],
+    allowlist,
+    providerID: route.providerID,
+  };
+}
+
+export function buildChildSandboxProfile(args: { agent: Agent; task: Task; cwd: string; editAllowed: boolean; proxy: EgressProxyHandle }): ChildSandboxProfile {
+  const { agent, task, cwd, editAllowed, proxy } = args;
+  const s = computeProfileSkeleton(agent, task, cwd, editAllowed);
+  const cred = proxy.mintCredential({ taskId: task.taskId, agentId: agent.def.id }, s.allowlist);
+  const proxyEnv = { url: proxy.url, noProxy: '127.0.0.1,localhost' };
+  return {
+    cwd: s.cwd,
+    homeDir: s.homeDir,
+    roBinds: s.roBinds,
+    rwBinds: s.rwBinds,
+    denyWriteRoBinds: s.denyWriteRoBinds,
+    proxy: proxyEnv,
+    allowlist: s.allowlist,
+    env: buildChildEnv(s.providerID, s.homeDir, proxyEnv, cred),
+    cred,
+  };
+}
+
+/** Proxy-free fingerprint over the skeleton — same field shape profileFingerprint
+ * hashes (cwd, home, sorted ro/rw/deny/allow), so a warm handle's stored
+ * fingerprint (set from the built profile) and the desired one computed here
+ * agree exactly. No credential minted. */
+export function agentProfileFingerprint(agent: Agent, task: Task, cwd: string, editAllowed: boolean): string {
+  const s = computeProfileSkeleton(agent, task, cwd, editAllowed);
+  return profileFingerprint({
+    cwd: s.cwd, homeDir: s.homeDir, roBinds: s.roBinds, rwBinds: s.rwBinds,
+    denyWriteRoBinds: s.denyWriteRoBinds, allowlist: s.allowlist,
+    proxy: { url: '', noProxy: '' }, env: {}, cred: { username: '', password: '' },
+  });
+}
+
+export function buildOneShotSandboxProfile(args: { homeDir: string; proxy: EgressProxyHandle }): ChildSandboxProfile {
+  const route = resolveOpencodeModel('haiku'); // the one-shot route
+  const allowlist = providerHostsOrThrow(route.providerID);
+  const cred = args.proxy.mintCredential({ taskId: 'one-shot', agentId: 'one-shot' }, allowlist);
+  const proxyEnv = { url: args.proxy.url, noProxy: '127.0.0.1,localhost' };
+  return {
+    cwd: args.homeDir, // the one-shot serve root doubles as its own dir
+    homeDir: args.homeDir,
+    roBinds: [],
+    rwBinds: [args.homeDir],
+    denyWriteRoBinds: [],
+    proxy: proxyEnv,
+    allowlist,
+    env: buildChildEnv(route.providerID, args.homeDir, proxyEnv, cred),
+    cred,
+  };
 }
