@@ -58,19 +58,22 @@ export const CLAUDE_RUNTIME_CAPABILITIES: RuntimeCapabilities = {
 
 /**
  * opencode runtime. These flags are declarative (spec P3: document parity,
- * degrade gracefully) — nothing branches on them yet. P3b DID add a per-child
- * OS sandbox: on Linux every serve child runs inside a fail-closed bwrap
- * filesystem jail with a cooperative egress proxy (see
+ * degrade gracefully) — nothing branches on them yet. P3b added a per-child OS
+ * sandbox: on Linux (the deploy target) every serve child runs inside a
+ * fail-closed bwrap filesystem jail with a cooperative egress proxy (see
  * runtime/opencode/child-sandbox.ts); on darwin dev it runs unwrapped (env
- * pruning + proxy still apply). osSandbox stays `false` for now — nothing
- * branches on it, and it's kept honest until the Linux container live smoke
- * (the genuinely-unverified bwrap enforcement, tracked in the P3b spike
- * runbook) proves the jail actually holds. Native skills ARE supported: the
- * embedded server exposes opencode's `skill` tool over the union of agent
- * skills staged at its working dir (see runtime/opencode/skills.ts).
+ * pruning + proxy still apply). `osSandbox: true` reflects that production
+ * (Linux) posture — verified live in the container smoke: both the read-only
+ * and edit-mode clone profiles jail correctly (clone RO with a `.opencode` rw
+ * carve-out; clone RW with `.git/HEAD` denied), `/app` and out-of-mount writes
+ * are denied in-jail, and the child env carries no orchestrator secrets (P3b
+ * spike runbook + record). The darwin-dev unwrapped path is the documented
+ * caveat above, not a retraction of the capability. Native skills ARE
+ * supported: the embedded server exposes opencode's `skill` tool over the
+ * agent's staged skills (see runtime/opencode/skills.ts).
  */
 export const OPENCODE_RUNTIME_CAPABILITIES: RuntimeCapabilities = {
-  osSandbox: false,
+  osSandbox: true,
   skills: true,
   // Available through the configured model (e.g. glm-5.2 has a 1M window) — a
   // model property, not something Archie toggles. Pick a 1M model for large
