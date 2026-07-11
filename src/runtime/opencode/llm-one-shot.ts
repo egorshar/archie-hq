@@ -55,7 +55,11 @@ function getOneShotClient(): Promise<OpencodeClient> {
       // P3b: minimal sandbox profile (no repo mounts — the one-shot never
       // touches a clone) + its own proxy credential + its own home dir.
       const proxy = await getEgressProxy();
-      const homeDir = join(root, 'home');
+      // homeDir is a SIBLING of root, not `<root>/home` — opencode snapshots its
+      // cwd (=root) every turn, so a store under root would be recursively
+      // snapshotted (the runaway-growth bug fixed in agentHomeDir). Kept under
+      // opencode-server/ so shutdown/cleanup still finds it.
+      const homeDir = join(WORKDIR, 'opencode-server', 'one-shot-home');
       await mkdir(homeDir, { recursive: true }); // must exist before the wrapped spawn (bind-source invariant)
       // Profile cwd == spawn cwd (`root`) — see buildOneShotSandboxProfile. The
       // credential is minted here; any throw after this point (wrapServeCommand,

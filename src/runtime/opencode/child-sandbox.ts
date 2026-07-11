@@ -163,7 +163,16 @@ export const PROVIDER_ENV_KEYS: Record<string, string[]> = {
 /** Per-agent HOME/XDG_DATA_HOME dir (session-store isolation). Lives under the
  * task serve root so P3a's evictTask rm's the store at task teardown. */
 export function agentHomeDir(taskId: string, agentId: string): string {
-  return join(WORKDIR, 'opencode-server', taskId, agentId, 'home');
+  // Under the task serve root (so evictTask's rm of it also cleans this) but
+  // OUTSIDE the agent's serve cwd. A synthetic-root agent's cwd IS
+  // `opencode-server/<taskId>/<agentId>`, and opencode git-snapshots its cwd on
+  // every turn; when the session store (this dir) lived at `<cwd>/home`,
+  // opencode recursively snapshotted its own growing store — a PM DM
+  // conversation ballooned `snapshot/` to >1GB and slowed to a crawl. Placing
+  // it in a sibling `_home/<agentId>` keeps it out of every serve cwd (repo
+  // agents' cwd is the clone, already a separate tree; `_home` is never itself
+  // a serve cwd — those are keyed by real agent ids).
+  return join(WORKDIR, 'opencode-server', taskId, '_home', agentId);
 }
 
 function providerHostsOrThrow(providerID: string): string[] {
@@ -300,13 +309,15 @@ export function buildOneShotSandboxProfile(args: { root: string; homeDir: string
   const proxyEnv = { url: args.proxy.url, noProxy: '127.0.0.1,localhost' };
   // Profile cwd MUST equal the process spawn cwd (llm-one-shot spawns `cwd: root`)
   // — otherwise the jail binds a dir the process never runs in, and the actual
-  // cwd (with its git-inited contents) is invisible. homeDir lives under root,
-  // so binding root rw covers it; HOME/XDG still point at homeDir.
+  // cwd (with its git-inited contents) is invisible. homeDir is a SIBLING of
+  // root (not under it), so opencode's per-turn cwd snapshot can't recursively
+  // include its own session store (same bug fixed in agentHomeDir); both are
+  // rw-bound, and HOME/XDG point at homeDir.
   return {
     cwd: args.root,
     homeDir: args.homeDir,
     roBinds: [],
-    rwBinds: [args.root],
+    rwBinds: [args.root, args.homeDir],
     denyWriteRoBinds: [],
     proxy: proxyEnv,
     allowlist,

@@ -58,6 +58,15 @@ describe('buildChildSandboxProfile env pruning', () => {
   });
 });
 
+describe('agentHomeDir placement (session-store must not sit inside the serve cwd)', () => {
+  it('is a sibling of the agent synthetic root, never a child of it (else opencode snapshots its own store)', () => {
+    const home = agentHomeDir('t1', 'pm-agent');
+    const syntheticRootCwd = '/wd/opencode-server/t1/pm-agent'; // = the clone-less agent's serve cwd
+    expect(home.startsWith(syntheticRootCwd + '/')).toBe(false);
+    expect(home).toBe('/wd/opencode-server/t1/_home/pm-agent'); // under the task dir (evictTask cleans it), outside the cwd
+  });
+});
+
 describe('mount derivation + one-shot', () => {
   it('derives ro/rw/deny binds from agent.sandbox and adds cwd/.opencode + home to rw', () => {
     const p = buildChildSandboxProfile({ agent: agent(), task, cwd: '/clone', editAllowed: true, proxy: fakeProxy() });
@@ -65,16 +74,19 @@ describe('mount derivation + one-shot', () => {
     expect(p.rwBinds).toEqual(expect.arrayContaining(['/clone', '/clone/.opencode', agentHomeDir('t1', 'backend')]));
     expect(p.denyWriteRoBinds).toContain('/clone/.git/HEAD');
   });
-  it('one-shot profile: provider-only allowlist, cwd == the serve root (== spawn cwd), home under root', () => {
+  it('one-shot profile: provider-only allowlist, cwd == the serve root (== spawn cwd), home is a SIBLING (not under cwd) and both are rw-bound', () => {
     const root = '/wd/opencode-server/one-shot';
-    const p = buildOneShotSandboxProfile({ root, homeDir: `${root}/home`, proxy: fakeProxy() });
+    const home = '/wd/opencode-server/one-shot-home';
+    const p = buildOneShotSandboxProfile({ root, homeDir: home, proxy: fakeProxy() });
     expect(p.allowlist).toEqual(PROVIDER_EGRESS_HOSTS['openrouter'] ?? expect.any(Array));
-    // I4: profile cwd MUST equal root (the process spawn cwd in llm-one-shot),
-    // and root is bound rw — homeDir lives under it, so it's covered.
+    // I4: profile cwd MUST equal root (the process spawn cwd in llm-one-shot).
+    // home is OUTSIDE root (so opencode's cwd snapshot can't include the store),
+    // so BOTH root and home must be rw-bound explicitly.
     expect(p.cwd).toBe(root);
-    expect(p.rwBinds).toEqual([root]);
-    expect(p.homeDir).toBe(`${root}/home`);
-    expect(p.env.HOME).toBe(`${root}/home`); // HOME/XDG still the home dir
+    expect(p.rwBinds).toEqual([root, home]);
+    expect(home.startsWith(`${root}/`)).toBe(false); // sibling, not a child of the snapshotted cwd
+    expect(p.homeDir).toBe(home);
+    expect(p.env.HOME).toBe(home); // HOME/XDG still the home dir
   });
 });
 

@@ -152,15 +152,17 @@ describe('OpencodeLlmOneShot.text', () => {
     expect(getEgressProxyMock).toHaveBeenCalledTimes(1);
     expect(buildOneShotSandboxProfileMock).toHaveBeenCalledTimes(1);
     const profileArgs = buildOneShotSandboxProfileMock.mock.calls[0][0];
-    expect(profileArgs.homeDir).toContain('opencode-server/one-shot/home');
+    expect(profileArgs.homeDir).toContain('opencode-server/one-shot-home');
 
     const opts = startEmbeddedServerMock.mock.calls[0][0];
     expect(opts.spawnOverride).toEqual({ command: 'bwrap', args: ['opencode', 'serve'] });
-    expect(opts.env).toEqual(expect.objectContaining({ HOME: expect.stringContaining('one-shot/home') }));
+    expect(opts.env).toEqual(expect.objectContaining({ HOME: expect.stringContaining('one-shot-home') }));
     // I4: the profile's cwd (root) MUST be the exact dir the process is spawned
     // in — otherwise the jail binds a dir the process never runs in.
     expect(profileArgs.root).toBe(opts.cwd);
-    expect(profileArgs.homeDir).toBe(`${opts.cwd}/home`);
+    // home is a SIBLING of root (not `<root>/home`) so opencode's cwd snapshot
+    // can't recursively include the one-shot's own session store.
+    expect(profileArgs.homeDir.startsWith(`${opts.cwd}/`)).toBe(false);
 
     // homeDir must exist on disk before the wrapped spawn (same invariant as
     // the per-agent pool — a nonexistent bind source is silently skipped).
