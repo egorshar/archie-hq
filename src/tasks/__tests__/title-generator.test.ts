@@ -86,6 +86,7 @@ function makeThread(overrides?: Partial<SlackThread>): SlackThread {
     channel: { id: 'D1', name: 'DM' },
     shared: false,
     currentMessageTs: '1.0',
+    rootAuthorWasBot: false,
     messages: [
       {
         ts: '1.0',

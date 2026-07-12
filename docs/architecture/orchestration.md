@@ -87,8 +87,8 @@ Slack webhook (POST /webhooks/slack)
         - fetchSlackThread() — full thread history with redaction
         - findTaskByThread(threadId):
             existing task -> Task.get() + append() new messages + sendMessage(pm-agent, existingTask)
-            no task, and (app_mention OR DM) -> Task.create() + append() + sendMessage(pm-agent, newTask)
-            no task, plain channel reply -> ignore (bot was never in this thread)
+            no task, and (app_mention OR DM OR rootAuthorWasBot) -> Task.create() + append() + sendMessage(pm-agent, newTask)
+            no task, reply in a human-started thread the bot didn't start -> ignore
         - shared-channel ephemeral warnings (per user, per thread)
         - fire-and-forget title generation (Haiku) on first message
 ```
@@ -250,16 +250,18 @@ Tools are defined in `src/agents/tools.ts` and exposed via MCP servers created p
 | Tool | Description |
 |---|---|
 | `send_message_to_agent` | Send a message to another agent (spawns target if needed) |
-| `post_to_user` | Post a message to the user — default channel, an existing linked thread, a new DM, or a new thread in a channel (`target.channel` / `target.new_dm` / `target.new_thread`). Default is where the task lives; `new_dm`/`new_thread` are reserved for explicit user requests or cases a loaded skill/workflow requires |
+| `post_to_user` | Post a message to the user — the default channel or an existing linked thread (`target.channel`). Default is where the task lives. The PM cannot open new DMs or new task-linked threads |
 | `post_files_to_user` | Upload one or more files as Slack attachments to an already-linked channel; does not open new threads |
 | `share_artifact` | Publish an immutable snapshot to `shared/artifacts/` for inter-agent file sharing (deduped by hash) |
-| `find_slack_user` / `find_slack_channel` | Look up Slack user/channel metadata (used before opening new DMs/threads) |
+| `find_slack_user` / `find_slack_channel` | Look up Slack user/channel metadata (e.g. a channel ID before reading or posting to it) |
+| `list_channels` | List channels readable for this task: public channels Archie's in (`users.conversations`) + this task's own channel if private/a DM; never other private channels/DMs |
+| `read_channel_history` / `read_thread` | Read a channel's recent messages or a thread — exploration, not linked to the task. Accessible-set gate (`assertAccessibleChannel`): any public channel + this task's own channel (even if private/DM); other private/DMs refused |
+| `post_to_channel` | Post into ANY channel Archie's a member of — public or private (escalation); 1:1 DMs and group DMs (mpims) refused via `assertPostableChannel` — NOT linked to the task and NOT accessible-set-gated (egress is intentional; prompt guardrail against leaking). A human reply to a new top-level post seeds its own fresh task |
 | `assign_task_owner` | Assign a repo/plugin agent as task owner |
 | `report_completion` | Optionally post a final message via `post_to_user`, then complete the task |
 | `request_edit_mode` | Post Approve/Deny buttons to the default channel and stop the task until the user responds |
 | `get_agents_status` | Return active/idle status of all spawned agents |
 | `mute_channel` | Stop processing a Slack channel/thread until the bot is @mentioned there again. Takes optional `channel` key; defaults to the task's `default_channel`. DM channels cannot be muted |
-| `launch_task` | Start a new background task (delegates to `src/tasks/launch.ts`). Reserved for explicit user requests or workflow-driven background work — follow-up work normally stays in the current task to preserve the trace |
 | `parse_datetime` / `set_reminder` / `cancel_reminder` | Schedule/cancel reactivation of the task at a future time (via `src/system/reminder-scheduler.ts`) |
 
 Outbound posting flow: PM-style tools (`post_to_user`, `post_files_to_user`,

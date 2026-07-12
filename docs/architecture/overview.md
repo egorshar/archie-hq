@@ -7,7 +7,7 @@ Archie (Autonomous Responsive and Collaborative Hyper Intelligent Employee) is a
 - **Human-like behavior**: To users, Archie presents as a single AI assistant. Internal agent coordination is never exposed. The PM agent writes as "I", not "my agent" or "the backend agent."
 - **Context-aware sessions**: Each task gets its own runtime with per-agent message delivery, metadata, and a shared `knowledge.log` that all agents read for context.
 - **Direct agent communication**: Agents communicate peer-to-peer via `send_message_to_agent`, with messages delivered through simple in-memory queues in the task runtime.
-- **Non-proactive**: Archie only acts in response to external events (Slack messages, GitHub webhooks). It never initiates work on its own.
+- **Mostly reactive, with triggers**: Archie acts in response to external events (Slack messages, GitHub webhooks). It can also act on **triggers** — persistent, user-approved "do Y when X happens" rules (a schedule, or a new channel message) that spawn a fresh task when they fire. Triggers are the one sanctioned form of self-initiated work; every trigger is created via an explicit Approve/Deny gate. See [triggers.md](./triggers.md).
 - **Interruptible**: Tasks can be stopped, resumed, and recovered. Edit mode requires explicit user approval via Slack buttons.
 
 ## System Architecture
@@ -132,9 +132,11 @@ See [plugin-system.md](plugin-system.md) for details.
    → findTaskByThread(threadId): if a task is already linked to this Slack
      thread, route to it (Task.get → task.append → task.sendMessage with
      AGENT_PROMPTS.existingTask)
-   → Otherwise, if it's an @mention or DM, start a new task
+   → Otherwise start a new task if it's an @mention, a DM, or a human reply to
+     a thread Archie itself started (rootAuthorWasBot — a post it made via the
+     post_to_channel explore tool)
      (Task.create → task.append → task.sendMessage with AGENT_PROMPTS.newTask)
-   → Plain replies in threads the bot was never part of are ignored
+   → Replies in human-started threads the bot didn't start are ignored
 
 4. PM Agent processes input:
    → Reads knowledge.log for context
@@ -236,6 +238,7 @@ prompts/                         # Repo-root: layered system prompts
 - [Slack Integration](slack-integration.md) -- Slack Bolt setup, event handling, interactive messages
 - [GitHub Integration](github-integration.md) -- webhooks, PR management, merge orchestrator
 - [Edit Mode](edit-mode.md) -- approval flow, shared clones, and git workflow
+- [Max Mode](max-mode.md) -- per-task, human-approved model/effort upgrade for coding agents
 - [Plugin System](plugin-system.md) -- plugin structure, loading, and agent registration
 - [Web Research](web-research.md) -- multi-agent research pipeline and defense layers
 - [Security](security.md) -- research budget, sandwich defense, prompt injection mitigations

@@ -40,6 +40,7 @@ import {
   postToUserHandler,
   reportCompletionHandler,
   requestEditModeHandler,
+  requestMaxModeHandler,
   createRepoToolHandlers,
   WRITE_REPO_TOOLS,
   REPO_TOOL_SPECS,
@@ -54,6 +55,7 @@ import {
   type PostToUserArgs,
   type ReportCompletionArgs,
   type RequestEditModeArgs,
+  type RequestMaxModeArgs,
   type ToolResult,
 } from '../../../agents/tools.js';
 import { createResearchToolHandler } from '../../../mcp/research-tools.js';
@@ -120,6 +122,7 @@ const TOOL_WHITELIST: Map<string, ToolHandler> = new Map([
   ['post_to_user', postToUserHandler as ToolHandler],
   ['report_completion', reportCompletionHandler as ToolHandler],
   ['request_edit_mode', requestEditModeHandler as ToolHandler],
+  ['request_max_mode', requestMaxModeHandler as ToolHandler],
 ]);
 
 // Required/optional shape mirrors the real zod schemas in src/agents/tools.ts
@@ -148,6 +151,14 @@ const TOOL_DESCRIPTORS: ToolDescriptor[] = [
       reason: { type: 'string' },
       channel: { type: 'string', optional: true },
     } satisfies Record<keyof RequestEditModeArgs, ArgSpec>,
+  },
+  {
+    name: 'request_max_mode',
+    description: 'Request permission to switch this task into max mode (more capable, more expensive coding agents).',
+    argsSchema: {
+      reason: { type: 'string' },
+      channel: { type: 'string', optional: true },
+    } satisfies Record<keyof RequestMaxModeArgs, ArgSpec>,
   },
   {
     name: 'web_research',
@@ -431,7 +442,7 @@ function buildSessionHandlers(session: BridgeSession): Map<string, BoundHandler>
   // PM-only tools. The `/tools` manifest (below) is NOT session-scoped, so it
   // advertises these to every session regardless of role — this dispatch map
   // is what actually enforces the PM-only restriction: a non-PM session's map
-  // never gets these keys, so a non-PM calling e.g. `launch_task` falls
+  // never gets these keys, so a non-PM calling e.g. `assign_task_owner` falls
   // through to the "unknown tool (not permitted)" rejection in
   // `handleToolRequest`, exactly like the RO write-rejection above.
   if (isPmAgent(session.agent.def)) {

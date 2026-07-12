@@ -76,6 +76,12 @@ function markdownBlock(text: string): unknown[] {
   return [{ type: 'markdown', text }];
 }
 
+/**
+ * Message element shape returned by conversations.history / conversations.replies.
+ * Derived from the WebClient method type to avoid importing a response type.
+ */
+type SlackHistoryMessage = NonNullable<Awaited<ReturnType<WebClient['conversations']['history']>>['messages']>[number];
+
 let slackClient: WebClient | null = null;
 let botUserId: string | null = null;
 let botId: string | null = null;
@@ -554,7 +560,22 @@ async function fetchThreadHistory(
     inclusive: oldest ? false : true,
   });
 
-  if (!result.messages) {
+  return resolveRawMessages(result.messages ?? [], channel);
+}
+
+/**
+ * Resolve raw Slack message elements (from conversations.replies OR
+ * conversations.history) into RawSlackMessage[]: extract text from
+ * blocks/files/attachments, resolve mentions, and surface bot identity +
+ * reactions. Author resolution into SlackAuthor happens later
+ * (resolveAuthorsAndMap / fetchSlackThread). Order is preserved, so the caller
+ * controls chronology (history is newest-first and must be reversed first).
+ */
+async function resolveRawMessages(
+  rawMessages: SlackHistoryMessage[],
+  channel: string,
+): Promise<RawSlackMessage[]> {
+  if (rawMessages.length === 0) {
     return [];
   }
 
@@ -566,7 +587,7 @@ async function fetchThreadHistory(
   // attachments. Each attachment carries its own text and the original
   // author's user ID when Slack provides one. Keeping author+text correlated
   // per attachment lets downstream code redact / label individual attachments.
-  const extractMessageParts = (msg: typeof result.messages[0]): {
+  const extractMessageParts = (msg: SlackHistoryMessage): {
     ownText: string;
     attachments: RawAttachment[];
   } => {
@@ -789,7 +810,7 @@ async function fetchThreadHistory(
   // Batch fetch user/group/channel info for all messages.
   // For mention extraction we just need every text segment we'll surface,
   // so concatenate ownText and all attachment texts into one blob.
-  const messages = result.messages.map((m) => {
+  const messages = rawMessages.map((m) => {
     const { ownText, attachments } = extractMessageParts(m);
     return {
       text: [ownText, ...attachments.map((a) => a.text)].filter(Boolean).join('\n'),
@@ -799,7 +820,7 @@ async function fetchThreadHistory(
   const { userInfoMap, groupInfoMap, channelInfoMap } = await fetchMentionInfo(messages, channelIds);
 
   // Extract files from a message (including from attachments/forwarded messages)
-  const extractFiles = (msg: typeof result.messages[0]): SlackFile[] | undefined => {
+  const extractFiles = (msg: SlackHistoryMessage): SlackFile[] | undefined => {
     const allFiles: SlackFile[] = [];
 
     // Helper to process a files array
@@ -860,7 +881,7 @@ async function fetchThreadHistory(
 
   // Extract emoji reactions Slack attaches to each message. Slack delivers them
   // as `{ name, count, users }`; we keep just name + count for the snapshot.
-  const extractReactions = (msg: typeof result.messages[0]): SlackReaction[] => {
+  const extractReactions = (msg: SlackHistoryMessage): SlackReaction[] => {
     const raw = (msg as { reactions?: Array<{ name?: string; count?: number }> }).reactions;
     if (!raw || !Array.isArray(raw)) return [];
     return raw
@@ -870,7 +891,7 @@ async function fetchThreadHistory(
 
   // Resolve attachment authors to SlackAuthor objects up-front so each
   // attachment carries its full author info (name, team, restriction flags).
-  const extractedPerMessage = result.messages.map((m) => extractMessageParts(m));
+  const extractedPerMessage = rawMessages.map((m) => extractMessageParts(m));
   const attachmentAuthorIds = new Set<string>();
   for (const { attachments } of extractedPerMessage) {
     for (const att of attachments) {
@@ -897,7 +918,7 @@ async function fetchThreadHistory(
   const authorMap = new Map(authorEntries);
 
   // Apply replacements to all messages
-  return result.messages.map((msg, i) => {
+  return rawMessages.map((msg, i) => {
     const files = extractFiles(msg);
     const { ownText, attachments } = extractedPerMessage[i];
     const resolvedAttachments: SlackAttachment[] = attachments.map((a) => {
@@ -928,6 +949,159 @@ async function fetchThreadHistory(
       ...(reactions.length > 0 ? { reactions } : {}),
     };
   });
+}
+
+/**
+ * Resolve top-level message authors and map RawSlackMessage[] into the public
+ * SlackThreadMessage[] shape. Does NOT filter anything — the caller decides
+ * which messages to pass in (fetchSlackThread filters bot chatter; explore
+ * reads pass everything).
+ */
+async function resolveAuthorsAndMap(messages: RawSlackMessage[]): Promise<SlackThreadMessage[]> {
+  const authorIds = new Set(messages.filter((m) => m.user).map((m) => m.user));
+  const userInfoEntries = await Promise.all(
+    Array.from(authorIds).map(async (uid): Promise<readonly [string, SlackAuthor]> => {
+      try {
+        const info = await getUserInfo(uid);
+        return [uid, {
+          id: uid,
+          username: info.name,
+          realName: info.realName,
+          teamId: info.teamId,
+          isRestricted: info.isRestricted,
+          isUltraRestricted: info.isUltraRestricted,
+        }];
+      } catch {
+        return [uid, { id: uid, username: uid, realName: uid }];
+      }
+    })
+  );
+  const userInfoMap = new Map(userInfoEntries);
+
+  return messages.map((msg) => {
+    const author: SlackAuthor = msg.user
+      ? userInfoMap.get(msg.user)!
+      : { id: msg.botId!, username: msg.botName || 'bot', realName: msg.botName || 'bot', teamId: msg.teamId };
+    return {
+      user: author,
+      text: msg.text,
+      ts: msg.ts,
+      ...(msg.files && msg.files.length > 0 ? { files: msg.files } : {}),
+      ...(msg.attachments && msg.attachments.length > 0 ? { attachments: msg.attachments } : {}),
+      ...(msg.reactions && msg.reactions.length > 0 ? { reactions: msg.reactions } : {}),
+    };
+  });
+}
+
+/** Result of an explore read — a channel's messages plus its resolved name. */
+export interface SlackChannelMessages {
+  channel: { id: string; name: string };
+  messages: SlackThreadMessage[];
+}
+
+/** Thrown when an explore read/search is pointed at a private channel, DM, or group DM. */
+export class PrivateChannelError extends Error {
+  readonly channelId: string;
+  constructor(channelId: string) {
+    super(`Channel ${channelId} is private`);
+    this.name = 'PrivateChannelError';
+    this.channelId = channelId;
+  }
+}
+
+/** Thrown when `post_to_channel` is aimed at a 1:1 DM or a group DM (mpim). */
+export class DmPostError extends Error {
+  readonly channelId: string;
+  constructor(channelId: string) {
+    super(`Channel ${channelId} is a DM or group DM`);
+    this.name = 'DmPostError';
+    this.channelId = channelId;
+  }
+}
+
+/**
+ * Resolve a channel's {id,name} for an explore READ, enforcing the accessible-set
+ * rule: a channel is readable iff it is PUBLIC, or it is one of `allowedIds` —
+ * the channels THIS task already lives in (its own origin, which may legitimately
+ * be a private channel or a DM). Any other private channel / DM / group-DM is
+ * refused (PrivateChannelError). So Archie reads public channels everywhere, plus
+ * its own current channel — never some other private channel or DM, not even from
+ * a public-channel request. (Task ingestion via fetchSlackThread is a separate,
+ * un-gated path — a task may legitimately live in a private channel.)
+ */
+async function assertAccessibleChannel(
+  channelId: string,
+  allowedIds: ReadonlySet<string> = new Set(),
+): Promise<{ id: string; name: string }> {
+  const client = getSlackClient();
+  const info = await client.conversations.info({ channel: channelId });
+  const ch = info.channel as
+    | { id?: string; name?: string; is_private?: boolean; is_im?: boolean; is_mpim?: boolean }
+    | undefined;
+  if (!ch) throw new Error('channel_not_found');
+  // The task's own channel is always readable, whatever its type.
+  if (allowedIds.has(channelId)) return { id: ch.id ?? channelId, name: ch.name ?? channelId };
+  // Otherwise fail CLOSED: only a channel Slack explicitly marks public passes.
+  if (ch.is_private !== false || ch.is_im || ch.is_mpim) throw new PrivateChannelError(channelId);
+  return { id: ch.id ?? channelId, name: ch.name ?? channelId };
+}
+
+/**
+ * Gate a `post_to_channel` target. Posting is intentionally broad — any PUBLIC or
+ * PRIVATE channel Archie belongs to is fine (e.g. escalating into a private
+ * management channel) — but 1:1 DMs and group DMs (mpims) are refused, so task
+ * content is never relayed into a small private audience. The `is_im`/`is_mpim`
+ * API flags are the only reliable signal: a `G…` id is ambiguous between a legacy
+ * private channel and a group DM, so we consult the API rather than the id shape
+ * (the `D…`/`U…`/`W…` prefix pre-check in the tool handles obvious 1:1 DMs without
+ * a round-trip; this catches the group-DM case it can't see).
+ */
+export async function assertPostableChannel(channelId: string): Promise<void> {
+  if (dryRun) return;
+  const client = getSlackClient();
+  const info = await client.conversations.info({ channel: channelId });
+  const ch = info.channel as { is_im?: boolean; is_mpim?: boolean } | undefined;
+  if (!ch) throw new Error('channel_not_found');
+  if (ch.is_im || ch.is_mpim) throw new DmPostError(channelId);
+}
+
+/**
+ * Read a channel's recent top-level messages for exploration (bot token; member
+ * channels only — `not_in_channel` otherwise). Allowed for any PUBLIC channel
+ * plus the channels in `allowedIds` (this task's own channel, even if private/DM);
+ * any other private channel / DM is refused. Returns chronological order (oldest
+ * first). Bot messages are NOT filtered — exploration shows everything.
+ */
+export async function fetchChannelHistory(
+  channelId: string,
+  limit = 30,
+  allowedIds?: ReadonlySet<string>,
+): Promise<SlackChannelMessages> {
+  const client = getSlackClient();
+  // Gate BEFORE fetching, so disallowed history is never read into memory.
+  const channelInfo = await assertAccessibleChannel(channelId, allowedIds);
+  const result = await client.conversations.history({ channel: channelId, limit });
+  // conversations.history returns newest-first; reverse to chronological.
+  const raw = await resolveRawMessages((result.messages ?? []).slice().reverse() as SlackHistoryMessage[], channelId);
+  return { channel: channelInfo, messages: await resolveAuthorsAndMap(raw) };
+}
+
+/**
+ * Read a specific thread for exploration (bot token; member channels only). Same
+ * accessible-set rule as fetchChannelHistory (public, or this task's own channel
+ * via `allowedIds`). Unlike fetchSlackThread (task ingestion), does NOT filter
+ * bot messages.
+ */
+export async function fetchExploreThread(
+  channelId: string,
+  threadTs: string,
+  allowedIds?: ReadonlySet<string>,
+): Promise<SlackChannelMessages> {
+  const client = getSlackClient();
+  const channelInfo = await assertAccessibleChannel(channelId, allowedIds);
+  const result = await client.conversations.replies({ channel: channelId, ts: threadTs });
+  const raw = await resolveRawMessages((result.messages ?? []) as SlackHistoryMessage[], channelId);
+  return { channel: channelInfo, messages: await resolveAuthorsAndMap(raw) };
 }
 
 /**
@@ -1076,27 +1250,51 @@ export async function postEphemeral(
 /**
  * Get channel info
  */
-export async function getChannelInfo(channelId: string): Promise<{ id: string; name: string }> {
+export async function getChannelInfo(
+  channelId: string,
+): Promise<{ id: string; name: string; isPrivate: boolean; isIm: boolean; imUserId?: string }> {
   const client = getSlackClient();
 
   try {
     const result = await client.conversations.info({ channel: channelId });
-    const channel = result.channel as { name?: string; is_im?: boolean; user?: string } | undefined;
+    const channel = result.channel as
+      | { name?: string; is_im?: boolean; is_private?: boolean; user?: string }
+      | undefined;
+
+    const isIm = channel?.is_im === true;
+    // DMs are inherently private; otherwise read the channel's is_private flag.
+    const isPrivate = isIm || channel?.is_private === true;
 
     // For DMs, resolve the other user's name instead of showing a raw ID
-    if (channel?.is_im && channel.user) {
+    if (isIm && channel?.user) {
       const userInfo = await getUserInfo(channel.user);
-      return { id: channelId, name: `DM with ${userInfo.realName}` };
+      return { id: channelId, name: `DM with ${userInfo.realName}`, isPrivate, isIm, imUserId: channel.user };
     }
 
     return {
       id: channelId,
       name: channel?.name || channelId,
+      isPrivate,
+      isIm,
     };
   } catch (error) {
     logger.warn('Slack', `Failed to get channel info for ${channelId}`);
-    return { id: channelId, name: channelId };
+    return { id: channelId, name: channelId, isPrivate: false, isIm: false };
   }
+}
+
+/**
+ * Resolve a channel's current privacy, **throwing** on any API error rather than
+ * swallowing it. Unlike `getChannelInfo` (which returns `isPrivate:false` on
+ * failure), this lets callers that must fail *closed* — e.g. trigger visibility,
+ * where an unresolvable channel must be treated as private, never public —
+ * distinguish a genuine public channel from an unreachable one. A DM is private.
+ */
+export async function fetchChannelIsPrivate(channelId: string): Promise<boolean> {
+  const client = getSlackClient();
+  const result = await client.conversations.info({ channel: channelId });
+  const channel = result.channel as { is_im?: boolean; is_private?: boolean } | undefined;
+  return channel?.is_im === true || channel?.is_private === true;
 }
 
 // ---- Channel canvas tabs + file reads (project-context canvases) ----------
@@ -1219,6 +1417,29 @@ export async function fetchSlackFileBody(fileUrl: string): Promise<string> {
   return await response.text();
 }
 
+/**
+ * Probe whether a channel can currently receive a post from the bot. Returns
+ * false when the channel no longer exists or is archived (e.g. deleted, or the
+ * bot was removed and the channel archived). A successful `conversations.info`
+ * on a live, non-archived channel returns true. Note: a public channel returns
+ * true even if the bot isn't a member (Slack allows posting), so this primarily
+ * catches the deleted/archived cases — the strongest signal available without
+ * actually posting.
+ */
+export async function isChannelReachable(channelId: string): Promise<boolean> {
+  try {
+    // getSlackClient() is inside the try on purpose: if the client isn't
+    // initialized it throws, and this probe must return false (→ fireTrigger
+    // pauses the trigger) rather than propagate and error-loop every tick.
+    const client = getSlackClient();
+    const result = await client.conversations.info({ channel: channelId });
+    const channel = result.channel as { is_archived?: boolean } | undefined;
+    return channel ? channel.is_archived !== true : false;
+  } catch {
+    return false;
+  }
+}
+
 
 /**
  * Post a question to a thread and wait for a response
@@ -1335,19 +1556,27 @@ export async function fetchSlackThread(
     isChannelShared(channelId),
   ]);
 
-  // Skip:
-  //  - our own bot's messages (botUserId)
-  //  - external bots (bot messages whose team_id differs from our home team).
-  // Keep:
-  //  - real users (msg.user set)
-  //  - internal bots (e.g. bug-tracker integrations posting to channels) so
-  //    their thread starters survive into the knowledge log.
-  const visibleMessages = rawMessages.filter((msg) => {
+  // Detect whether OUR bot authored the thread root, computed BEFORE filtering.
+  // This is the signal the router uses to seed a task when a human replies to a
+  // thread Archie itself started (see handleSlackEvent).
+  const root = rawMessages[0];
+  const rootAuthorWasBot =
+    !!root && ((!!root.user && root.user === botUserId) || (!!root.botId && root.botId === botId));
+
+  // Filter rules:
+  //  - drop our own bot's messages — EXCEPT the thread root, so a task seeded
+  //    from a bot-started thread still carries Archie's originating post.
+  //  - drop external bots (messages from another workspace).
+  // Keep: real users, and internal bots (e.g. bug-tracker integrations) so their
+  // thread starters survive into the knowledge log.
+  const visibleMessages = rawMessages.filter((msg, i) => {
+    const isRoot = i === 0;
     if (msg.user) {
-      return msg.user !== botUserId;
+      if (msg.user === botUserId) return isRoot; // our own bot — keep only at root
+      return true;
     }
     if (msg.botId) {
-      if (msg.botId === botId) return false; // our own bot
+      if (msg.botId === botId) return isRoot; // our own bot — keep only at root
       if (homeTeamId && msg.teamId && msg.teamId !== homeTeamId) return false; // external bot
       return true;
     }
@@ -1355,44 +1584,7 @@ export async function fetchSlackThread(
     return false;
   });
 
-  // Resolve top-level message authors for human messages. Attachment authors are
-  // already resolved on each msg.attachments[].author by fetchThreadHistory.
-  // Bot messages synthesize an author from bot_profile.
-  const authorIds = new Set(visibleMessages.filter((m) => m.user).map((m) => m.user));
-  const userInfoEntries = await Promise.all(
-    Array.from(authorIds).map(async (uid): Promise<readonly [string, SlackAuthor]> => {
-      try {
-        const info = await getUserInfo(uid);
-        return [uid, {
-          id: uid,
-          username: info.name,
-          realName: info.realName,
-          teamId: info.teamId,
-          isRestricted: info.isRestricted,
-          isUltraRestricted: info.isUltraRestricted,
-        }];
-      } catch {
-        return [uid, { id: uid, username: uid, realName: uid }];
-      }
-    })
-  );
-  const userInfoMap = new Map(userInfoEntries);
-
-  // Surface structured pieces (text, attachments, files) and let consumers
-  // decide redaction / labeling using `thread.shared` + `isExternalUser`.
-  const messages: SlackThreadMessage[] = visibleMessages.map((msg) => {
-    const author: SlackAuthor = msg.user
-      ? userInfoMap.get(msg.user)!
-      : { id: msg.botId!, username: msg.botName || 'bot', realName: msg.botName || 'bot', teamId: msg.teamId };
-    return {
-      user: author,
-      text: msg.text,
-      ts: msg.ts,
-      ...(msg.files && msg.files.length > 0 ? { files: msg.files } : {}),
-      ...(msg.attachments && msg.attachments.length > 0 ? { attachments: msg.attachments } : {}),
-      ...(msg.reactions && msg.reactions.length > 0 ? { reactions: msg.reactions } : {}),
-    };
-  });
+  const messages = await resolveAuthorsAndMap(visibleMessages);
 
   return {
     threadId: threadTs,
@@ -1400,6 +1592,7 @@ export async function fetchSlackThread(
     shared,
     messages,
     currentMessageTs,
+    rootAuthorWasBot,
   };
 }
 
@@ -1553,7 +1746,7 @@ export async function listWorkspaceChannels(): Promise<SlackChannelInfo[]> {
         name: ch.name ?? ch.id!,
         topic: (ch.topic as { value?: string })?.value ?? '',
         purpose: (ch.purpose as { value?: string })?.value ?? '',
-        memberCount: ch.num_members ?? 0,
+        memberCount: (ch as { num_members?: number }).num_members ?? 0,
         isPrivate: ch.is_private ?? false,
         isArchived: ch.is_archived ?? false,
       });
@@ -1564,6 +1757,47 @@ export async function listWorkspaceChannels(): Promise<SlackChannelInfo[]> {
   channelCache = channels;
   channelCacheTimestamp = Date.now();
   logger.slack(`Cached ${channels.length} workspace channels`);
+  return channels;
+}
+
+/**
+ * List the channels the bot is actually a MEMBER of — i.e. the channels the
+ * explore/post tools can act on. Uses `users.conversations` (membership of the
+ * calling token), so it never includes channels the bot was not invited to.
+ * Archived excluded; not cached (membership changes when the bot is
+ * invited/removed, and freshness matters right after an invite).
+ *
+ * PUBLIC channels only — never enumerates private channels. The task's own
+ * private channel / DM, when relevant, is appended by the `list_channels` tool
+ * from task metadata, so a public-channel or DM requester never learns that
+ * other private channels exist.
+ */
+export async function listBotChannels(): Promise<SlackChannelInfo[]> {
+  const client = getSlackClient();
+  const channels: SlackChannelInfo[] = [];
+  let cursor: string | undefined;
+
+  do {
+    const result = await client.users.conversations({
+      cursor,
+      limit: 200,
+      exclude_archived: true,
+      types: 'public_channel',
+    });
+    for (const ch of result.channels ?? []) {
+      channels.push({
+        id: ch.id!,
+        name: ch.name ?? ch.id!,
+        topic: (ch.topic as { value?: string })?.value ?? '',
+        purpose: (ch.purpose as { value?: string })?.value ?? '',
+        memberCount: (ch as { num_members?: number }).num_members ?? 0,
+        isPrivate: ch.is_private ?? false,
+        isArchived: ch.is_archived ?? false,
+      });
+    }
+    cursor = result.response_metadata?.next_cursor || undefined;
+  } while (cursor);
+
   return channels;
 }
 
@@ -1588,23 +1822,5 @@ export async function findSlackChannels(query: string): Promise<SlackChannelInfo
     c.topic.toLowerCase().includes(q) ||
     c.purpose.toLowerCase().includes(q)
   );
-}
-
-// ============================================================================
-// DM & Channel Messaging
-// ============================================================================
-
-/**
- * Open (or get existing) DM channel with a user.
- * Returns the DM channel ID (e.g., "D1234567").
- */
-export async function openDMChannel(userId: string): Promise<string> {
-  if (dryRun) {
-    logger.system(`[DRY RUN] openDMChannel for user ${userId}`);
-    return `D_DRYRUN_${userId}`;
-  }
-  const client = getSlackClient();
-  const result = await client.conversations.open({ users: userId });
-  return result.channel!.id!;
 }
 

@@ -521,7 +521,7 @@ describe('OpencodeRuntime footer model tokens', () => {
 
   it('footerModelToken returns the agent route, provider-wrapper trimmed for a claude id', () => {
     // PM (opus) → ARCHIE_OPENCODE_MODEL_OPUS, trimmed to begin at anthropic/claude-.
-    expect(runtime.footerModelToken({ id: 'pm-agent', isPm: true } as any)).toBe('anthropic/claude-opus-4-8');
+    expect(runtime.footerModelToken({ id: 'pm-agent', isPm: true } as any, false)).toBe('anthropic/claude-opus-4-8');
   });
 
   it('footerModelDefaultToken returns the server-default route (non-claude passes through)', () => {
@@ -531,7 +531,7 @@ describe('OpencodeRuntime footer model tokens', () => {
   it('both are null (never throw) when the route env is unset', () => {
     delete process.env.ARCHIE_OPENCODE_MODEL_OPUS;
     delete process.env.ARCHIE_OPENCODE_MODEL_DEFAULT;
-    expect(runtime.footerModelToken({ id: 'pm-agent', isPm: true } as any)).toBeNull();
+    expect(runtime.footerModelToken({ id: 'pm-agent', isPm: true } as any, false)).toBeNull();
     expect(runtime.footerModelDefaultToken()).toBeNull();
   });
 });

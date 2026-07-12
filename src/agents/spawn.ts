@@ -18,7 +18,7 @@ import type { Agent } from './agent.js';
 import type { Task } from '../tasks/task.js';
 import { isRepoAgent, isPmAgent } from '../types/agent.js';
 import { buildCommitAuthorEnv } from './commit-author.js';
-import { resolveAgentModel } from './model-label.js';
+import { resolveAgentModel, resolveAgentEffort } from './model-label.js';
 import { linkAgentSkills } from './skill-linking.js';
 import {
   createBaseAgentMcpServer,
@@ -284,8 +284,7 @@ export async function prepareAgentContext(
     ];
     if (channelEntries.length === 0) {
       contextLines.push(
-        'Channel(s): none — to reply you must first open a destination via ' +
-        'post_to_user(target.new_dm <userId>) or post_to_user(target.new_thread <channelId>)'
+        'Channel(s): none — there is nowhere to reply in this task; finish with report_completion() (no message).'
       );
     } else {
       contextLines.push(`Channel(s): ${channelEntries.map(([id, ch]) => renderChannel(id, ch)).join(', ')}`);
@@ -299,6 +298,9 @@ export async function prepareAgentContext(
     );
     if (metadata.reminder) {
       contextLines.push(`Reminder: ${metadata.reminder.trigger_at} — ${metadata.reminder.reason}`);
+    }
+    if (metadata.triggered_by) {
+      contextLines.push(`Spawned by trigger: ${metadata.triggered_by} (this is a fresh, trigger-initiated task — deliver the result as instructed in the first message)`);
     }
     // Surface the live plugins-repo version so the PM can tell users when the
     // plugins/agents were last updated. Refreshed on every task start/load.
@@ -543,7 +545,13 @@ export async function spawnAgent(agent: Agent, task: Task): Promise<void> {
   // `context-1m-2025-08-07` beta); plain `sonnet` caps at 200K and overflows
   // on the large injected system prompt. Opus is 1M natively, no suffix needed.
   // (Resolution shared with the footer via resolveAgentModel.)
-  const model = resolveAgentModel(def);
+  // "Max mode": a task-lifetime, human-approved upgrade (see request_max_mode /
+  // handleMaxModeApproval). When on, resolveAgentModel/Effort apply the agent's
+  // maxMode overrides — repo/dynamic agents default to max effort; a model swap
+  // (e.g. Fable) is a per-agent frontmatter opt-in.
+  const maxMode = task.metadata.max_mode === true;
+  const model = resolveAgentModel(def, maxMode);
+  const effort = resolveAgentEffort(def, maxMode);
   const tools = def.tools;
 
   const researchServer = createResearchMcpServer({
@@ -694,7 +702,7 @@ export async function spawnAgent(agent: Agent, task: Task): Promise<void> {
     resume: sessionId,
     abortController,
     maxTurns: def.maxTurns ?? 100,
-    ...(def.effort ? { effort: def.effort } : {}),
+    ...(effort ? { effort } : {}),
     permissionMode: 'bypassPermissions' as const,
     allowDangerouslySkipPermissions: true,
     sandbox: buildSandboxConfig(sandboxOpts),

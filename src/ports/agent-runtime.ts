@@ -17,11 +17,14 @@ export interface AgentRuntime {
    * Pre-beautify footer label token for a single agent — the message footer
    * runs each token through `modelDisplayLabel`. Claude returns the resolved
    * alias (`opus` / `sonnet[1m]`); opencode returns the agent's route trimmed to
-   * a beautify-ready id, or null when unresolved. Keeps the footer's runtime
-   * branch out of the Task class (the model label is the runtime's concern, so
-   * `task.ts` never imports a runtime module). Best-effort — must not throw.
+   * a beautify-ready id, or null when unresolved. `maxMode` is the task's
+   * max-mode upgrade flag so the label reflects any max-mode model swap (Claude
+   * honours it; opencode ignores it — no max-mode route). Keeps the footer's
+   * runtime branch out of the Task class (the model label is the runtime's
+   * concern, so `task.ts` never imports a runtime module). Best-effort — must
+   * not throw.
    */
-  footerModelToken(def: AgentDef): string | null;
+  footerModelToken(def: AgentDef, maxMode: boolean): string | null;
   /**
    * Fallback footer token when no agent resolved one (e.g. before any agent
    * spawns). Claude → `'opus'`; opencode → the server-default route, or null.

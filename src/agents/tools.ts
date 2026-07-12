@@ -13,7 +13,7 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import { tool, createSdkMcpServer } from '../runtime/claude/sdk.js';
 import { z } from 'zod';
-import type { AgentName, FindingType, AttachedRepo } from '../types/task.js';
+import type { AgentName, FindingType, AttachedRepo, SlackThreadMessage } from '../types/task.js';
 import type { Task } from '../tasks/task.js';
 import type { Agent } from './agent.js';
 import { getVisiblePeerIdsForSender, findAgentDefsContainingRepo, synthesizeDynamicAgentDef, isAutoMergeRepo } from './registry.js';
@@ -25,28 +25,100 @@ import { hydrateBranchState, findBranchStateByPR, assignPrNumber } from '../conn
 import { taskBranchName } from '../connectors/github/branch-naming.js';
 import { appendAgentFinding, appendArtifactShared } from '../tasks/persistence.js';
 import { copyArtifactToShared, assertReadable } from './artifacts.js';
-import { launchTask } from '../tasks/launch.js';
 import { logger } from '../system/logger.js';
-import { SLACK_MARKDOWN_LIMIT, SlackMarkdownLimitError } from '../connectors/slack/client.js';
-
-function formatSlackSendError(err: unknown): string {
-  if (err instanceof SlackMarkdownLimitError) {
-    return (
-      `Slack rejected the message: ${err.actualLength} chars exceeds the ${SLACK_MARKDOWN_LIMIT}-char per-message limit. ` +
-      `Nothing was delivered or logged. Split the content into multiple messages under the limit, ` +
-      `breaking on paragraphs and keeping code blocks/tables whole.`
-    );
-  }
-  const reason = err instanceof Error ? err.message : String(err);
-  return `Failed to post message: ${reason}`;
-}
-import { findSlackUsers, findSlackChannels, getSlackFileInfo, downloadSlackFile } from '../connectors/slack/client.js';
+import {
+  findSlackUsers,
+  findSlackChannels,
+  listBotChannels,
+  getSlackFileInfo,
+  downloadSlackFile,
+  fetchChannelHistory,
+  fetchExploreThread,
+  postSlackMessage,
+  assertPostableChannel,
+  getChannelInfo,
+  getUserInfo,
+  listWorkspaceChannels,
+  fetchChannelIsPrivate,
+} from '../connectors/slack/client.js';
 import { readCanvas } from '../connectors/slack/canvas-read.js';
 import { collectCanvasFileAllowlist } from '../connectors/slack/channel-canvas.js';
+import { isDmOrUserId } from '../connectors/slack/channel-ids.js';
+import {
+  formatSlackSendError,
+  formatSlackPostError,
+  formatSlackReadError,
+} from '../connectors/slack/format-errors.js';
+
+/**
+ * Reject DM targets for the explore/post tools. These tools are channel-only;
+ * 1:1 DM channel ids start with 'D', and a user id ('U'/'W') passed as a channel
+ * would be coerced into a DM by Slack — block both. (Other private channels /
+ * group DMs are caught at the API layer via assertAccessibleChannel.)
+ */
+function rejectDmTarget(channel: string): string | null {
+  if (isDmOrUserId(channel)) {
+    return 'This tool is channel-only and never touches DMs. Pass a channel ID (e.g. "C…"), not a DM or user ID.';
+  }
+  return null;
+}
+
+/**
+ * The Slack channel ids THIS task is linked to (its own origin channel(s)).
+ * Explore reads treat these as accessible regardless of type — so the PM can read
+ * the private channel or DM the task itself lives in, but no other private/DM.
+ */
+function taskSlackChannelIds(task: Task): Set<string> {
+  const ids = new Set<string>();
+  for (const ch of Object.values(task.metadata.channels)) {
+    if (ch.type === 'slack') ids.add(ch.channel_id);
+  }
+  return ids;
+}
+
+/** Render explore messages in the same `@<id:name> | msg:ts` shape the PM sees elsewhere. */
+function formatExploreMessages(messages: SlackThreadMessage[]): string {
+  return messages
+    .map((m) => {
+      const who = m.user.realName || m.user.username;
+      const files = m.files?.length ? `\n  [files: ${m.files.map((f) => f.name).join(', ')}]` : '';
+      const reactions = m.reactions?.length
+        ? `\n  [reactions: ${m.reactions.map((r) => `:${r.name}:×${r.count}`).join(' ')}]`
+        : '';
+      return `@<${m.user.id}:${who}> | msg:${m.ts}\n${m.text}${files}${reactions}`;
+    })
+    .join('\n\n');
+}
 import { scheduleReminder, cancelReminder } from '../system/reminder-scheduler.js';
 import * as chrono from 'chrono-node';
 import { writeFile } from 'fs/promises';
 import { join } from 'path';
+import type { Trigger, TriggerBinding, TriggerCondition } from '../types/trigger.js';
+import {
+  generateTriggerId,
+  saveTrigger,
+  loadTrigger,
+  listTriggers,
+  deleteTrigger,
+  countActiveTriggers,
+} from '../system/trigger-store.js';
+import {
+  computeNextRun,
+  validateRecurringInterval,
+  planStatusChange,
+  indexTrigger,
+  deindexTrigger,
+  announceTriggerChange,
+  describeTrigger,
+  triggerWhat,
+  triggerWhen,
+  triggerWhere,
+  triggersEnabled,
+  MAX_TRIGGERS_PER_USER,
+  MAX_TRIGGERS_PER_CHANNEL,
+} from '../system/trigger-scheduler.js';
+import { emitEvent } from '../system/event-bus.js';
+import { triggerVisibleFrom, type TriggerOrigin } from '../system/trigger-visibility.js';
 
 // Re-export branch state helpers for consumers that import from tools.ts
 export { hydrateBranchState, findBranchStateByPR };
@@ -346,13 +418,10 @@ export async function postToUserHandler(agent: Agent, task: Task, args: PostToUs
 function createPostToUserTool(agent: Agent, task: Task) {
   return tool(
     'post_to_user',
-    'Send a message to the user. Without target, posts to the default channel — wherever this task already lives. ' +
-    'Use that default almost always; use target.channel to reach another already-linked thread. ' +
-    'target.new_dm (user ID) and target.new_thread (channel ID) OPEN A NEW conversation and link it to this task — ' +
-    'use them ONLY when the user explicitly asks you to reach someone elsewhere, or a loaded skill/workflow requires it. ' +
-    'If this task lives in a channel thread, bring someone in by @mentioning them in that thread, not by DMing them. ' +
-    'If it lives in a DM, you are 1:1 with that user — keep it private and don\'t pull others in. ' +
-    'When creating new DMs/threads, returns the channel key for future use. ' +
+    'Send a message to the user in this task. Without target, posts to the default channel — wherever this task already lives (use that almost always). ' +
+    'Use target.channel only to reach another thread ALREADY linked to this task. ' +
+    'If this task lives in a channel thread, bring someone in by @mentioning them in that thread. ' +
+    'To say something in a channel that is NOT part of this task (exploration/outreach), use `post_to_channel` — it deliberately does not link to this task. ' +
     'To attach files, send the message first, then call `post_files_to_user` with the same target.',
     postToUserArgsSchema,
     async (args) => postToUserHandler(agent, task, args),
@@ -476,6 +545,41 @@ async function assignTaskOwnerHandler(agent: Agent, task: Task, args: z.infer<z.
  * body and runtime validation against the live team, so behavior (including
  * the live candidate check) is identical either way.
  */
+const listChannelsDescription =
+  "List the channels you can read for THIS task — every PUBLIC channel Archie has been added to, plus this task's own channel if it happens to be a private channel or DM. " +
+  'Use this to discover where you can explore instead of guessing channel names. It never lists other private channels or DMs. ' +
+  '(Posting is broader — see post_to_channel — but reading is limited to this list.)';
+
+const listChannelsArgsSchema = {};
+
+async function listChannelsHandler(_agent: Agent, task: Task, _args: z.infer<z.ZodObject<typeof listChannelsArgsSchema>>): Promise<ToolResult> {
+  try {
+    const publicChannels = await listBotChannels();
+    // Append this task's OWN channels that aren't already public (its private
+    // channel / DM origin) — accessible because the task lives there. Other
+    // private channels / DMs are never enumerated.
+    const seen = new Set(publicChannels.map((c) => c.id));
+    const own: { name: string; id: string }[] = [];
+    for (const ch of Object.values(task.metadata.channels)) {
+      if (ch.type === 'slack' && !seen.has(ch.channel_id)) {
+        seen.add(ch.channel_id);
+        own.push({ name: ch.channel_name || ch.channel_id, id: ch.channel_id });
+      }
+    }
+    if (publicChannels.length === 0 && own.length === 0) {
+      return ok("Archie isn't a member of any channels you can use yet. Invite it to a channel (`/invite @Archie`) to explore there.");
+    }
+    const lines = [
+      ...publicChannels.map((ch) => `- #${ch.name} — ID: ${ch.id}${ch.topic ? ` — ${ch.topic}` : ''}`),
+      ...own.map((ch) => `- #${ch.name} — ID: ${ch.id} (this task's own channel)`),
+    ];
+    return ok(`Channels you can read${own.length ? " (public channels Archie's in, plus this task's own channel)" : ''}:\n${lines.join('\n')}`);
+  } catch (e) {
+    const reason = e instanceof Error ? e.message : String(e);
+    return ok(`Couldn't list channels: ${reason}`);
+  }
+}
+
 function createAssignTaskOwnerTool(agent: Agent, task: Task) {
   return tool(
     'assign_task_owner',
@@ -643,6 +747,94 @@ export async function reportCompletionHandler(agent: Agent, task: Task, args: Re
   );
 }
 
+const requestMaxModeArgsSchema = {
+  reason: z.string().describe('Brief explanation of why max mode is warranted for this task'),
+  channel: z.string().optional().describe('Channel key of an existing linked thread to post the request to (e.g., "slack:C123:456.789"). Omit to use the task\'s default channel.'),
+};
+export type RequestMaxModeArgs = z.infer<z.ZodObject<typeof requestMaxModeArgsSchema>>;
+
+export async function requestMaxModeHandler(agent: Agent, task: Task, args: RequestMaxModeArgs): Promise<ToolResult> {
+  const agentName = agent.def.id as AgentName;
+
+  // Idempotency: max mode is a task-lifetime grant. If it is already active,
+  // don't post another approval prompt or pause the task — just tell the
+  // caller it's already granted so it proceeds instead of waiting on a user
+  // who has nothing to approve.
+  if (task.metadata.max_mode === true) {
+    return ok('Max mode is already approved for this task and persists for its lifetime — no need to request it again. Continue the work.');
+  }
+
+  // Already pausing this turn — the spawn loop tears the task down at turn
+  // end. Skip a duplicate approval post if the tool fires twice.
+  if (agent.pendingTeardown) {
+    return ok('Max mode request already sent — task is pausing pending user approval.');
+  }
+
+  // Validate an explicit target before posting so a bad key surfaces as
+  // actionable feedback instead of silently dropping to the CLI log. The
+  // task is left running so the agent can retry with a valid channel.
+  if (args.channel) {
+    const ch = task.metadata.channels[args.channel];
+    if (!ch) {
+      return ok(`Channel ${args.channel} is not linked to this task. Open one with post_to_user(target.new_thread/new_dm), or omit channel to use the default.`);
+    }
+    if (ch.type !== 'slack') {
+      return ok(`Channel ${args.channel} is not a Slack channel (type: ${ch.type}).`);
+    }
+  }
+
+  logger.agentAction(agentName, 'Requesting max mode', args.reason);
+  task.touch();
+
+  await appendAgentFinding(task.taskId, 'system', `Max mode requested: ${args.reason}`, 'decision');
+
+  const blocks = [
+    {
+      type: 'section',
+      text: { type: 'mrkdwn', text: `*Max mode request:* ${args.reason}` },
+    },
+    {
+      type: 'actions',
+      elements: [
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: 'Approve' },
+          action_id: 'approve_max_mode',
+          value: task.taskId,
+          style: 'primary',
+        },
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: 'Deny' },
+          action_id: 'deny_max_mode',
+          value: task.taskId,
+          style: 'danger',
+        },
+      ],
+    },
+  ];
+  await task.postInteractiveToUser(`Max mode request: ${args.reason}`, blocks, 'max_mode', args.channel);
+
+  // Task is now paused pending approval — freeze the status so the wind-down
+  // doesn't resurface a "working…" indicator.
+  task.suspendStatus();
+  // Defer the pause to turn-end (see report_completion) so stopping the queue
+  // doesn't close the input stream under an in-flight hook ("stream closed").
+  agent.deferTeardown(() => task.stop());
+  return { content: [{ type: 'text' as const, text: 'Max mode request sent. Task paused pending user approval.' }] };
+}
+
+function createRequestMaxModeTool(agent: Agent, task: Task) {
+  return tool(
+    'request_max_mode',
+    'Request permission to switch this task into "max mode" — an upgrade that runs the coding agents with more capability (maximum reasoning effort, plus a premium model such as Fable for agents configured to swap). Call this AFTER explaining to the user why the extra cost is worth it (max mode is more expensive). Task will pause until the user approves or denies. ' +
+    'Max mode is a task-LIFETIME grant: once approved it stays in effect for the rest of the task, so you only ever need to request it once. If it is already approved this call is a no-op — it will not prompt the user again, it just confirms the grant. ' +
+    'Without `channel`, the request posts to the task\'s default channel. Pass `channel` (a channel key like "slack:C123:456.789") to post it to a specific linked thread — useful when the task has no default channel yet or you opened a new thread to talk to the user.',
+    requestMaxModeArgsSchema,
+    async (args) => requestMaxModeHandler(agent, task, args),
+  );
+}
+
 function createReportCompletionTool(agent: Agent, task: Task) {
   return tool(
     'report_completion',
@@ -774,31 +966,87 @@ const getMessageReactionsDescription =
   'the snapshot in the knowledge log). Pass the `message_id` (`msg:<ts>` id). ' +
   'Returns each reaction\'s emoji shortcode, how many users reacted, and who they were.';
 
-const launchTaskArgsSchema = {
-  prompt: z.string().describe('The task prompt for the launched PM agent'),
-  reason: z.string().describe('Why this task is being launched (shown to the new PM and in the notification)'),
+const readChannelHistoryDescription =
+  "Read a channel's recent messages to understand what's happening there — exploration only, NOT linked to this task. " +
+  'Pass a channel ID (use list_channels or find_slack_channel). Returns messages oldest→newest, including Archie\'s own and other bots\' posts. ' +
+  "Reading never creates or joins a task. Allowed for any PUBLIC channel Archie's in, plus this task's own channel if it is private or a DM — other private channels and DMs are off-limits.";
+
+const readChannelHistoryArgsSchema = {
+  channel: z.string().describe('Slack channel ID (e.g. "C1234567")'),
+  limit: z.number().int().min(1).max(100).optional().describe('How many recent messages to read (default 30, max 100)'),
 };
 
-async function launchTaskHandler(_agent: Agent, task: Task, args: z.infer<z.ZodObject<typeof launchTaskArgsSchema>>): Promise<ToolResult> {
+async function readChannelHistoryHandler(_agent: Agent, task: Task, args: z.infer<z.ZodObject<typeof readChannelHistoryArgsSchema>>): Promise<ToolResult> {
+  const allowed = taskSlackChannelIds(task);
+  if (!allowed.has(args.channel)) {
+    const dm = rejectDmTarget(args.channel);
+    if (dm) return ok(dm);
+  }
   try {
-    const { newTaskId, notifiedInChannel } = await launchTask(task, args.prompt, args.reason);
-    return ok(
-      notifiedInChannel
-        ? `Task ${newTaskId} launched. User was already notified in the current channel — do not repost.`
-        : `Task ${newTaskId} launched. No channel notified.`
-    );
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    return ok(`Failed to launch task: ${msg}`);
+    const { channel, messages } = await fetchChannelHistory(args.channel, args.limit ?? 30, allowed);
+    if (messages.length === 0) return ok(`#${channel.name} has no readable recent messages.`);
+    return ok(`#${channel.name} — last ${messages.length} message(s):\n\n${formatExploreMessages(messages)}`);
+  } catch (e) {
+    return ok(formatSlackReadError(e, args.channel));
   }
 }
 
-const launchTaskDescription =
-  'Launch a SEPARATE, independent background task with NO link back to this one — its origin is invisible to whoever picks it up. ' +
-  'Keep follow-up work inside the current task by delegating to an agent here, so everything stays on one traceable thread. ' +
-  'Use this ONLY when the user explicitly asks for separate/background work, or a loaded skill/workflow requires it. ' +
-  'The launched task starts with no channel — its own PM decides whether to reach someone or complete silently. ' +
-  'Cannot be called from a task that has no channel of its own.';
+const readThreadDescription =
+  'Read a specific thread (parent message + all replies) — exploration only, NOT linked to this task. ' +
+  'Pass the channel ID and the parent message ts (from read_channel_history). Includes Archie\'s own and other bots\' messages. ' +
+  "Allowed for any PUBLIC channel Archie's in, plus this task's own channel if it is private or a DM — other private channels and DMs are off-limits.";
+
+const readThreadArgsSchema = {
+  channel: z.string().describe('Slack channel ID (e.g. "C1234567")'),
+  thread_ts: z.string().describe('Parent message ts of the thread (e.g. "1716998400.123456")'),
+};
+
+async function readThreadHandler(_agent: Agent, task: Task, args: z.infer<z.ZodObject<typeof readThreadArgsSchema>>): Promise<ToolResult> {
+  const allowed = taskSlackChannelIds(task);
+  if (!allowed.has(args.channel)) {
+    const dm = rejectDmTarget(args.channel);
+    if (dm) return ok(dm);
+  }
+  try {
+    const { channel, messages } = await fetchExploreThread(args.channel, args.thread_ts, allowed);
+    if (messages.length === 0) return ok(`No messages found in that thread.`);
+    return ok(`#${channel.name} thread ${args.thread_ts} — ${messages.length} message(s):\n\n${formatExploreMessages(messages)}`);
+  } catch (e) {
+    return ok(formatSlackReadError(e, args.channel));
+  }
+}
+
+const postToChannelDescription =
+  'Post a message into any channel Archie is a member of, WITHOUT linking it to this task — for chiming in while exploring, or escalating somewhere (e.g. a private management channel). ' +
+  "Works in PUBLIC and PRIVATE channels Archie has been invited to (DMs are not allowed). Unlike reading, posting is NOT limited to this task's channel — escalating outward is a valid use. " +
+  'Fire-and-forget: it does not become a touchpoint of this task, and any reply is invisible to you here. If a human replies to a NEW top-level message you post, that reply starts its OWN fresh task; a reply inside someone else\'s existing thread never does. ' +
+  "GUARDRAIL: match what you post to the destination's audience — never relay private or sensitive task content into a broader or unrelated channel. " +
+  'Pass a channel ID; optionally `thread_ts` to reply in an existing thread. To talk to the user about THIS task, use post_to_user instead.';
+
+const postToChannelArgsSchema = {
+  channel: z.string().describe('Slack channel ID (e.g. "C1234567")'),
+  message: z.string().describe('The message to post'),
+  thread_ts: z.string().optional().describe('Parent message ts to reply inside an existing thread; omit to post a new top-level message'),
+};
+
+async function postToChannelHandler(_agent: Agent, task: Task, args: z.infer<z.ZodObject<typeof postToChannelArgsSchema>>): Promise<ToolResult> {
+  const dm = rejectDmTarget(args.channel);
+  if (dm) return ok(dm);
+  task.touch();
+  try {
+    // The prefix check above rejects 1:1 DMs/user ids; this rejects group DMs
+    // (mpims), which share the ambiguous `G…` prefix with private channels.
+    await assertPostableChannel(args.channel);
+    const ts = await postSlackMessage({ channel: args.channel, text: args.message, threadTs: args.thread_ts });
+    return ok(
+      ts
+        ? `Message posted to ${args.channel}${args.thread_ts ? ` (in thread ${args.thread_ts})` : ` (new thread ts: ${ts})`}. Not linked to this task.`
+        : 'Message posted (dry-run).',
+    );
+  } catch (e) {
+    return ok(formatSlackPostError(e, args.channel));
+  }
+}
 
 const getAgentsStatusArgsSchema = {};
 
@@ -1753,6 +2001,336 @@ const fetchSlackReferenceDescription =
   'Fetch a file referenced in the channel\'s project-context canvas and save it into your workspace so you can read it. ' +
   'Pass the reference exactly as it appears in the canvas — a Slack file link or a file id. ' +
   'Documents and images are saved in their original form; a referenced canvas is saved as readable markdown.';
+// ============================================================================
+// Trigger tools (PM-only) — propose / list / update / delete persistent triggers
+// ============================================================================
+
+/** Zod shape for one tool-supplied trigger condition (shared by propose/update). */
+const triggerConditionObject = z.object({
+  type: z.enum(['schedule', 'channel_message']),
+  cron: z.string().optional().describe('5-field cron expression for a RECURRING schedule (e.g. "0 9 * * 1-5"). Must fire at most once per hour. Omit for one-off.'),
+  run_at: z.string().optional().describe('ISO 8601 datetime for a ONE-OFF schedule (use parse_datetime). Omit for recurring.'),
+  tz: z.string().optional().describe('IANA timezone, e.g. "America/New_York". Defaults to the requesting user\'s timezone.'),
+  channel_id: z.string().optional().describe('Channel to watch (required for channel_message).'),
+  contains: z.string().optional().describe('Only fire when the new message contains this substring (channel_message).'),
+  from_user: z.string().optional().describe('Only fire for messages from this Slack user ID (channel_message).'),
+});
+
+type RawCondition = z.infer<typeof triggerConditionObject>;
+
+/**
+ * Resolve the task's originating context for trigger visibility. A Slack non-DM
+ * channel → channel origin; a Slack DM → dm origin (with the partner's user id);
+ * a CLI/absent default → operator (full visibility, matching the CLI surface).
+ */
+async function resolveTriggerOrigin(task: Task): Promise<TriggerOrigin> {
+  const key = task.metadata.default_channel;
+  const ch = key ? task.metadata.channels[key] : null;
+  if (!ch || ch.type !== 'slack') return { kind: 'operator' };
+  try {
+    const info = await getChannelInfo(ch.channel_id);
+    if (info.isIm) return { kind: 'dm', userId: info.imUserId };
+    return { kind: 'channel', channelId: ch.channel_id };
+  } catch {
+    // Fail closed: a Slack lookup failure must not widen visibility. Treat the
+    // origin as this exact channel (sees public + its own triggers only), never
+    // operator. A DM misclassified this way under-permits, which is the safe way.
+    return { kind: 'channel', channelId: ch.channel_id };
+  }
+}
+
+/** Memoized live channel-privacy resolver for one list/visibility pass. */
+function makePrivacyResolver(): (channelId: string) => Promise<boolean> {
+  const cache = new Map<string, Promise<boolean>>();
+  // Built once per resolver: the workspace channel map (id → isPrivate), served
+  // from listWorkspaceChannels()'s 10-min process-wide cache. The common case is
+  // then an O(1) lookup with zero per-channel Slack calls. On a workspace-list
+  // failure the map is empty and every channel falls through to the live path.
+  let mapPromise: Promise<Map<string, boolean>> | undefined;
+  const workspaceMap = () => {
+    if (!mapPromise) {
+      mapPromise = listWorkspaceChannels()
+        .then((channels) => new Map(channels.map((c) => [c.id, c.isPrivate])))
+        .catch(() => new Map<string, boolean>());
+    }
+    return mapPromise;
+  };
+  return (channelId: string) => {
+    let p = cache.get(channelId);
+    if (!p) {
+      p = workspaceMap().then((map) => {
+        if (map.has(channelId)) return map.get(channelId)!;
+        // Miss — a brand-new, just-converted, or (crucially) a private channel
+        // the bot was removed from and so dropped out of the workspace cache.
+        // Resolve it live via the STRICT lookup that throws on error, and fail
+        // closed on any error (treat as private) so a private channel is never
+        // leaked into a public/DM listing. getChannelInfo can't be used here —
+        // it swallows errors and returns isPrivate:false (i.e. fails open).
+        return fetchChannelIsPrivate(channelId).catch(() => true);
+      });
+      cache.set(channelId, p);
+    }
+    return p;
+  };
+}
+
+/** Best-effort Slack user id of whoever is asking (only known in a DM). */
+async function resolveRequester(task: Task): Promise<string | undefined> {
+  const origin = await resolveTriggerOrigin(task);
+  return origin.kind === 'dm' ? origin.userId : undefined;
+}
+
+/**
+ * Validate + normalize tool-supplied conditions into stored TriggerConditions.
+ * Recurring schedules are interval-checked (≥1h) and get an initial next_run_at;
+ * one-offs parse run_at and must be in the future.
+ */
+function buildConditions(raw: RawCondition[], defaultTz: string): { conditions: TriggerCondition[] } | { error: string } {
+  const conditions: TriggerCondition[] = [];
+  for (const c of raw) {
+    if (c.type === 'schedule') {
+      const tz = c.tz || defaultTz;
+      if (c.cron) {
+        const v = validateRecurringInterval(c.cron, tz);
+        if (!v.ok) return { error: v.error };
+        const next = computeNextRun(c.cron, tz);
+        if (!next) return { error: `Could not compute the next run for cron "${c.cron}".` };
+        conditions.push({ type: 'schedule', tz, cron: c.cron, next_run_at: next.toISOString() });
+      } else if (c.run_at) {
+        const when = new Date(c.run_at);
+        if (isNaN(when.getTime())) return { error: `Invalid run_at "${c.run_at}" — use parse_datetime for an ISO 8601 value.` };
+        if (when.getTime() <= Date.now()) return { error: 'A one-off schedule must be in the future.' };
+        conditions.push({ type: 'schedule', tz, next_run_at: when.toISOString() });
+      } else {
+        return { error: 'A schedule condition needs either `cron` (recurring) or `run_at` (one-off).' };
+      }
+    } else if (c.type === 'channel_message') {
+      if (!c.channel_id) return { error: 'A channel_message condition needs `channel_id`.' };
+      const match: { contains?: string; from_user?: string } = {};
+      if (c.contains) match.contains = c.contains;
+      if (c.from_user) match.from_user = c.from_user;
+      conditions.push({ type: 'channel_message', channel_id: c.channel_id, ...(Object.keys(match).length ? { match } : {}) });
+    } else {
+      return { error: `Unknown condition type "${(c as { type: string }).type}".` };
+    }
+  }
+  if (conditions.length === 0) return { error: 'At least one condition is required.' };
+  return { conditions };
+}
+
+const proposeTriggerDescription =
+  'Propose a persistent trigger ("do Y when X happens") for the user to approve. The trigger is created in a pending state and an Approve/Deny prompt is posted — it will NOT run until the user approves. Use this after you and the user have agreed on the cadence (or channel to watch), what to do, and which channel to deliver to. Results are delivered to a channel; delivery to a user DM is not supported yet. You do not need to pause the task.';
+
+const proposeTriggerArgsSchema = {
+  binding: z.object({
+    type: z.enum(['channel']),
+    channel_id: z.string().describe('Slack channel ID where fired results are delivered.'),
+    channel_name: z.string().describe('Channel name without the leading #.'),
+  }).describe('Where fired results are delivered — a channel (DM delivery is not supported yet).'),
+  conditions: z.array(triggerConditionObject).min(1).describe('One or more conditions; any match fires the trigger.'),
+  action_prompt: z.string().describe('The full internal instruction seeded to the task when the trigger fires — detailed and imperative. NOT shown to the user.'),
+  summary: z.string().describe('A short, friendly one-liner describing what this does, shown to the user in the approval prompt and announcements, e.g. "Daily summary of #bot-test" or "Reply to messages mentioning Archie". Keep it under ~60 chars; do not restate the schedule (that is rendered automatically).'),
+};
+
+async function proposeTriggerHandler(_agent: Agent, task: Task, args: z.infer<z.ZodObject<typeof proposeTriggerArgsSchema>>): Promise<ToolResult> {
+      if (!triggersEnabled()) return ok('Triggers are currently disabled on this instance (ARCHIE_TRIGGERS_ENABLED=false).');
+
+      const b = args.binding;
+      if (!b.channel_id || !b.channel_name) return ok('A trigger needs both channel_id and channel_name for delivery.');
+      const binding: TriggerBinding = { type: 'channel', channel_id: b.channel_id, channel_name: b.channel_name };
+
+      // Best-effort creator id (only known in a DM) — used for cap accounting and
+      // failure notices, not for delivery. Triggers deliver to a channel in v1.
+      const createdBy = await resolveRequester(task);
+      let defaultTz = 'UTC';
+      if (createdBy) {
+        try { defaultTz = (await getUserInfo(createdBy)).tz || 'UTC'; } catch { /* keep UTC */ }
+      }
+
+      const built = buildConditions(args.conditions, defaultTz);
+      if ('error' in built) return ok(`Could not create the trigger: ${built.error}`);
+
+      if (binding.type === 'channel') {
+        const channelId = binding.channel_id;
+        const perChannel = await countActiveTriggers((t) => t.binding.type === 'channel' && t.binding.channel_id === channelId);
+        if (perChannel >= MAX_TRIGGERS_PER_CHANNEL) {
+          return ok(`This channel already has the maximum of ${MAX_TRIGGERS_PER_CHANNEL} active triggers. Remove one first.`);
+        }
+      }
+      if (createdBy) {
+        const perUser = await countActiveTriggers((t) => t.created_by === createdBy);
+        if (perUser >= MAX_TRIGGERS_PER_USER) {
+          return ok(`You already have the maximum of ${MAX_TRIGGERS_PER_USER} active triggers. Remove one first.`);
+        }
+      }
+
+      const trigger: Trigger = {
+        id: generateTriggerId(),
+        status: 'pending',
+        created_by: createdBy || 'unknown',
+        created_at: new Date().toISOString(),
+        binding,
+        conditions: built.conditions,
+        action: { prompt: args.action_prompt },
+        summary: args.summary,
+      };
+      await saveTrigger(trigger);
+      task.metadata.pending_trigger_id = trigger.id;
+      task.debouncedSave();
+      await appendAgentFinding(task.taskId, 'system', `Trigger proposed: ${describeTrigger(trigger)}`, 'decision');
+
+      // Scannable approval card: what / when / where as separate fields instead
+      // of dumping the raw cron + internal prompt.
+      const what = triggerWhat(trigger);
+      const when = triggerWhen(trigger);
+      const where = triggerWhere(trigger);
+      const blocks = [
+        { type: 'section', text: { type: 'mrkdwn', text: '*Set up this automation?*' } },
+        {
+          type: 'section',
+          fields: [
+            { type: 'mrkdwn', text: `*What*\n${what}` },
+            { type: 'mrkdwn', text: `*When*\n${when}` },
+            { type: 'mrkdwn', text: `*Where*\n${where}` },
+          ],
+        },
+        {
+          type: 'actions',
+          elements: [
+            { type: 'button', text: { type: 'plain_text', text: 'Approve' }, action_id: 'approve_trigger', value: trigger.id, style: 'primary' },
+            { type: 'button', text: { type: 'plain_text', text: 'Deny' }, action_id: 'deny_trigger', value: trigger.id, style: 'danger' },
+          ],
+        },
+      ];
+      await task.postInteractiveToUser(`Set up this automation? ${what} · ${when} · ${where}`, blocks, 'trigger', undefined, undefined, trigger.id);
+      return ok('Trigger proposed and posted for approval. It will not run until the user approves (or types y in the CLI). No need to pause — continue if there is other work.');
+}
+
+const listTriggersDescription =
+  'List the triggers visible from this conversation (per privacy rules). Returns everything visible — filter or narrow it yourself when the user asks for "the ones in this channel", "just the schedules", etc.';
+
+const listTriggersArgsSchema = {};
+
+async function listTriggersHandler(_agent: Agent, task: Task, _args: z.infer<z.ZodObject<typeof listTriggersArgsSchema>>): Promise<ToolResult> {
+      const all = (await listTriggers()).filter((t) => t.status !== 'pending');
+      const origin = await resolveTriggerOrigin(task);
+      const resolvePrivacy = makePrivacyResolver();
+      const visible: Trigger[] = [];
+      for (const t of all) {
+        if (await triggerVisibleFrom(t, origin, resolvePrivacy)) visible.push(t);
+      }
+      if (visible.length === 0) return ok('There are no triggers set up that are visible from here.');
+      const lines = visible.map((t) => {
+        const where = t.binding.type === 'channel' ? `#${t.binding.channel_name}` : 'a DM';
+        const last = t.last_fired_at ? `; last fired ${t.last_fired_at}` : '';
+        return `• [${t.id}] (${t.status}) ${describeTrigger(t)} — delivers to ${where}${last}`;
+      });
+      return ok(`Triggers visible here (${visible.length}):\n${lines.join('\n')}`);
+}
+
+const updateTriggerDescription =
+  'Pause, resume, or edit an existing trigger. You can only manage triggers visible from this conversation. Posts a one-line change notice to the trigger\'s bound channel.';
+
+const updateTriggerArgsSchema = {
+  id: z.string().describe('Trigger ID (from list_triggers).'),
+  status: z.enum(['paused', 'enabled']).optional().describe('"paused" to pause, "enabled" to resume.'),
+  action_prompt: z.string().optional().describe('Replace the internal instruction run when the trigger fires (not shown to the user).'),
+  summary: z.string().optional().describe('Replace the short, friendly user-facing name. Update this whenever you change action_prompt so the notices stay accurate.'),
+  conditions: z.array(triggerConditionObject).optional().describe('Replace the conditions entirely (same shape as propose_trigger).'),
+};
+
+async function updateTriggerHandler(_agent: Agent, task: Task, args: z.infer<z.ZodObject<typeof updateTriggerArgsSchema>>): Promise<ToolResult> {
+      const trigger = await loadTrigger(args.id);
+      if (!trigger || trigger.status === 'pending') return ok(`No trigger ${args.id} found.`);
+      const origin = await resolveTriggerOrigin(task);
+      if (!(await triggerVisibleFrom(trigger, origin, makePrivacyResolver()))) {
+        return ok(`Trigger ${args.id} isn't visible from here, so it can't be managed from this conversation.`);
+      }
+
+      const editedContent = Boolean(args.action_prompt || args.conditions || args.summary);
+      let statusChange: 'paused' | 'resumed' | null = null;
+
+      if (args.action_prompt) trigger.action.prompt = args.action_prompt;
+      if (args.summary) trigger.summary = args.summary;
+      if (args.conditions) {
+        const defaultTz = trigger.conditions.find((c): c is Extract<TriggerCondition, { type: 'schedule' }> => c.type === 'schedule')?.tz || 'UTC';
+        const built = buildConditions(args.conditions, defaultTz);
+        if ('error' in built) return ok(`Could not update the trigger: ${built.error}`);
+        trigger.conditions = built.conditions;
+      }
+      // Decide the target state (auto-resume a rescheduled paused trigger, etc.)
+      // via the pure planner, then apply the cap check for any (re-)enable.
+      const plan = planStatusChange({
+        currentStatus: trigger.status as 'enabled' | 'paused',
+        hasNewConditions: !!args.conditions,
+        requestedStatus: args.status,
+      });
+      const autoResume = plan.autoResume;
+      if (plan.target === 'enabled') {
+        // Re-check caps when (re-)enabling, so pausing to slip under a cap and
+        // then resuming can't exceed it. (Counts exclude this paused trigger.)
+        if (trigger.binding.type === 'channel') {
+          const channelId = trigger.binding.channel_id;
+          const perChannel = await countActiveTriggers((t) => t.binding.type === 'channel' && t.binding.channel_id === channelId);
+          if (perChannel >= MAX_TRIGGERS_PER_CHANNEL) return ok(`Can't enable — this channel is already at the maximum of ${MAX_TRIGGERS_PER_CHANNEL} active triggers.`);
+        }
+        if (trigger.created_by && trigger.created_by !== 'unknown') {
+          const perUser = await countActiveTriggers((t) => t.created_by === trigger.created_by);
+          if (perUser >= MAX_TRIGGERS_PER_USER) return ok(`Can't enable — you're already at the maximum of ${MAX_TRIGGERS_PER_USER} active triggers.`);
+        }
+      }
+      if (plan.target !== 'unchanged') {
+        trigger.status = plan.target;
+        statusChange = plan.statusChange;
+      }
+
+      if (!editedContent && !statusChange) return ok('Nothing to update — pass status, action_prompt, summary, or conditions.');
+
+      await saveTrigger(trigger);
+      if (trigger.status === 'enabled') indexTrigger(trigger);
+      else deindexTrigger(trigger.id);
+
+      if (statusChange === 'paused') emitEvent('trigger:paused', task.taskId, { trigger_id: trigger.id });
+      else if (statusChange === 'resumed') emitEvent('trigger:resumed', task.taskId, { trigger_id: trigger.id });
+
+      await announceTriggerChange(trigger, editedContent ? 'edited' : statusChange!);
+
+      // Report state back so the PM can relay it — especially the auto-resume,
+      // which the user didn't explicitly ask for and should be told about.
+      const verb = editedContent ? 'updated' : (statusChange === 'paused' ? 'paused' : 'resumed');
+      let msg = `Trigger ${trigger.id} ${verb}.`;
+      if (statusChange === 'resumed') {
+        msg += autoResume
+          ? ` It had been paused, so I re-enabled it — it's now active and will run ${triggerWhen(trigger)}.`
+          : ` It's now active and will run ${triggerWhen(trigger)}.`;
+      } else if (trigger.status === 'enabled' && editedContent) {
+        msg += ` It's active and will run ${triggerWhen(trigger)}.`;
+      } else if (trigger.status === 'paused') {
+        msg += ` It's paused and won't run until it's resumed.`;
+      }
+      return ok(msg);
+}
+
+const deleteTriggerDescription =
+  'Delete a trigger permanently. You can only delete triggers visible from this conversation. Posts a one-line notice to the bound channel.';
+
+const deleteTriggerArgsSchema = {
+  id: z.string().describe('Trigger ID (from list_triggers).'),
+};
+
+async function deleteTriggerHandler(_agent: Agent, task: Task, args: z.infer<z.ZodObject<typeof deleteTriggerArgsSchema>>): Promise<ToolResult> {
+      const trigger = await loadTrigger(args.id);
+      if (!trigger) return ok(`No trigger ${args.id} found.`);
+      const origin = await resolveTriggerOrigin(task);
+      if (trigger.status !== 'pending' && !(await triggerVisibleFrom(trigger, origin, makePrivacyResolver()))) {
+        return ok(`Trigger ${args.id} isn't visible from here, so it can't be deleted from this conversation.`);
+      }
+      deindexTrigger(trigger.id);
+      await deleteTrigger(trigger.id);
+      emitEvent('trigger:deleted', task.taskId, { trigger_id: trigger.id });
+      if (trigger.status !== 'pending') await announceTriggerChange(trigger, 'deleted');
+      return ok(`Trigger ${trigger.id} deleted.`);
+}
 
 // ---- MCP Server creation ----
 
@@ -1794,6 +2372,11 @@ export const COMMS_TOOL_SPECS: readonly CommsToolSpec[] = [
   { name: 'unreact_from_message', description: unreactFromMessageDescription, schema: unreactFromMessageArgsSchema, handler: unreactFromMessageHandler },
   { name: 'get_message_reactions', description: getMessageReactionsDescription, schema: getMessageReactionsArgsSchema, handler: getMessageReactionsHandler },
   { name: 'fetch_slack_reference', description: fetchSlackReferenceDescription, schema: fetchSlackReferenceArgsSchema, handler: fetchSlackReferenceHandler },
+  // Slack exploration (upstream PM-permissions rework).
+  { name: 'list_channels', description: listChannelsDescription, schema: listChannelsArgsSchema, handler: listChannelsHandler },
+  { name: 'read_channel_history', description: readChannelHistoryDescription, schema: readChannelHistoryArgsSchema, handler: readChannelHistoryHandler },
+  { name: 'read_thread', description: readThreadDescription, schema: readThreadArgsSchema, handler: readThreadHandler },
+  { name: 'post_to_channel', description: postToChannelDescription, schema: postToChannelArgsSchema, handler: postToChannelHandler },
 ];
 
 /** User-facing communication (Slack messaging, lookups, channel control, reactions). */
@@ -1964,10 +2547,11 @@ const spawnRepoAgentDescription = [
  * above — single source of truth for `createOrchestrationMcpServer` (Claude
  * SDK path) and `createOrchestrationHandlers` (opencode bridge path).
  *
- * `report_completion` and `request_edit_mode` are deliberately EXCLUDED: both
- * are control tools already bridged directly via the fixed whitelist in
- * `bridge/server.ts` (`reportCompletionHandler`/`requestEditModeHandler` +
- * `TOOL_WHITELIST`) — including them here would double-register them.
+ * `report_completion`, `request_edit_mode`, and `request_max_mode` are
+ * deliberately EXCLUDED: all three are control tools already bridged directly
+ * via the fixed whitelist in `bridge/server.ts` (`reportCompletionHandler` /
+ * `requestEditModeHandler` / `requestMaxModeHandler` + `TOOL_WHITELIST`) —
+ * including them here would double-register them.
  *
  * `assign_task_owner` IS included (it is not a control tool), but its Claude
  * SDK tool is still built separately via `createAssignTaskOwnerTool` (not
@@ -1993,9 +2577,13 @@ export const ORCHESTRATION_TOOL_SPECS: readonly OrchestrationToolSpec[] = [
     handler: assignTaskOwnerHandler,
   },
   { name: 'get_agents_status', description: getAgentsStatusDescription, schema: getAgentsStatusArgsSchema, handler: getAgentsStatusHandler },
-  { name: 'launch_task', description: launchTaskDescription, schema: launchTaskArgsSchema, handler: launchTaskHandler },
   { name: 'list_available_repos', description: listAvailableReposDescription, schema: listAvailableReposArgsSchema, handler: listAvailableReposHandler },
   { name: 'spawn_repo_agent', description: spawnRepoAgentDescription, schema: spawnRepoAgentArgsSchema, handler: spawnRepoAgentHandler },
+  // Triggers (upstream PM-permissions rework).
+  { name: 'propose_trigger', description: proposeTriggerDescription, schema: proposeTriggerArgsSchema, handler: proposeTriggerHandler },
+  { name: 'list_triggers', description: listTriggersDescription, schema: listTriggersArgsSchema, handler: listTriggersHandler },
+  { name: 'update_trigger', description: updateTriggerDescription, schema: updateTriggerArgsSchema, handler: updateTriggerHandler },
+  { name: 'delete_trigger', description: deleteTriggerDescription, schema: deleteTriggerArgsSchema, handler: deleteTriggerHandler },
 ];
 
 /** Task orchestration (ownership, completion, edit mode, team status, repo-agent spawning). */
@@ -2007,6 +2595,7 @@ export function createOrchestrationMcpServer(agent: Agent, task: Task) {
       createAssignTaskOwnerTool(agent, task),
       createReportCompletionTool(agent, task),
       createRequestEditModeTool(agent, task),
+      createRequestMaxModeTool(agent, task),
       // assign_task_owner already has a bespoke Claude-path tool above (live
       // candidate list in its description) — skip it here to avoid
       // registering it twice.

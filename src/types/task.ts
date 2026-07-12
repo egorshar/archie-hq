@@ -74,8 +74,14 @@ export interface SlackThread {
   threadId: string;
   channel: { id: string; name: string };
   shared: boolean;
-  messages: SlackThreadMessage[];  // full thread, bot messages excluded
+  messages: SlackThreadMessage[];  // bot messages excluded, EXCEPT the root when our bot started the thread
   currentMessageTs: string;
+  /**
+   * True when OUR bot authored the thread's root message. The router uses this
+   * to seed a task when a human replies to a thread Archie itself started
+   * (a post made via the task-decoupled `post_to_channel` explore tool).
+   */
+  rootAuthorWasBot: boolean;
 }
 
 // ---- Channel types (replace slack_threads) ----
@@ -294,6 +300,7 @@ export interface TaskMetadata {
   dynamic_agents?: DynamicAgentSpec[];
   status: TaskStatus;
   edit_allowed?: boolean;     // Has user approved edit mode for this task?
+  max_mode?: boolean;         // Has user approved "max mode" (per-task model/effort upgrade) for this task?
   /**
    * The human who approved edit mode. Used as the git *author* on every commit
    * the repo agents make for this task (the committer stays the GitHub App bot),
@@ -321,6 +328,8 @@ export interface TaskMetadata {
     trigger_at: string;              // ISO 8601 datetime when the task should be reactivated
     reason: string;                  // Why — shown to agent when woken
   };
+  triggered_by?: string;             // Trigger ID that spawned this task (set by fireTrigger). Blocks the task from creating triggers.
+  pending_trigger_id?: string;       // Trigger ID proposed by this task, awaiting approve/deny (read by handleTriggerApproval/Denial)
   created_at: string;
   updated_at: string;
 }

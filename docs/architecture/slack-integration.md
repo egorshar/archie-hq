@@ -78,7 +78,7 @@ When a user edits a message, Slack delivers a `message` event with subtype `mess
 
 - **The text actually changed.** Slack fires `message_changed` for link unfurls and attachment re-renders too, where `message.text === previous_message.text`. These are dropped up front — they're the dominant source of edit-event noise.
 - **The edit is not bot-authored.** Edits carrying a `bot_id`, a `bot_message` subtype, or authored by Archie's own user are skipped.
-- **A task already follows the thread.** Resolved via `findTaskByThread(message.thread_ts || message.ts)`; edits in threads the bot was never part of are ignored, mirroring plain-reply handling.
+- **A task already follows the thread.** Resolved via `findTaskByThread(message.thread_ts || message.ts)`; an edit only wakes a thread that already has a task — an edit never *creates* one (unlike a fresh reply, which can seed a task for an @mention, a DM, or a bot-started thread).
 - **The editor is internal.** The same external/guest bail-out (`isExternalUser`) used by `handleSlackEvent` applies, and a muted channel is not woken.
 
 When they hold, mentions in the new text are resolved to the `@<ID:Name>` form (`cleanSlackText`) and `task.appendSlackEdit` writes a **fresh** knowledge-log entry — the log is append-only, so edits are never mutations of the original line. The entry reuses the original message's `msg:<ts>` id and its body, built by the pure `renderEditForContext`, is just the new text tagged as an edit:
@@ -104,15 +104,18 @@ The Haiku-based triage agent in `src/system/triage.ts` is **currently disabled**
 Slack webhook
   -> routeSlackEvent()                       [drop own bot's messages]
   -> External-author bail-out                [resolve user, skip if external/guest]
-  -> Eyes reaction (ack)                     [add to current msg, remove from prev]
-  -> fetchSlackThread()                      [history + author resolution + shared flag]
+  -> Eyes reaction (ack)                     [@mention/DM: add to current msg, remove from prev]
+  -> fetchSlackThread()                      [history + author resolution + shared flag + rootAuthorWasBot]
   -> findTaskByThread(threadId):
        found    -> Task.get() -> task.append(thread)
                    -> task.sendMessage(AGENT_PROMPTS.existingTask)
-       not found, app_mention OR DM -> Task.create() -> task.append(thread)
-                                       -> task.sendMessage(AGENT_PROMPTS.newTask)
-       not found, plain thread reply -> ignore (bot was never invited)
+       not found, app_mention OR DM OR rootAuthorWasBot -> Task.create() -> task.append(thread)
+                   (a reply to a bot-started thread is acked here, post-fetch)
+                   -> task.sendMessage(AGENT_PROMPTS.newTask)
+       not found, reply in a thread the bot didn't start -> ignore
 ```
+
+`rootAuthorWasBot` (computed by `fetchSlackThread` from the raw root message, before bot-message filtering) is true when the thread's root was posted by Archie itself — i.e. a top-level message it made via the task-decoupled `post_to_channel` explore tool. A human reply to such a thread seeds a new task (and the bot's root message is kept in the thread so the task has context); a reply in a thread Archie merely posted into, or never touched, has a non-bot root and is ignored.
 
 A muted thread (`SlackChannel.muted = true`, set by the PM's `mute_channel` tool) is unmuted by an `@mention` and otherwise skipped. In DM channels, any inbound message also unmutes — there is no `@mention` path in a DM, so a DM message is treated as the equivalent. `mute_channel` mutes a single channel — the one the PM names, or the task's `default_channel` if omitted; it refuses to mute DM channels (channel IDs starting with `D`) up front, but the DM-as-unmute rule above is the backstop that recovers any legacy task whose DM channel was muted before this restriction existed. Title generation runs as a fire-and-forget Haiku call after the first append; for DM-rooted tasks the resulting title is pushed to Slack via `assistant.threads.setTitle` (see `src/connectors/slack/title.ts`). External users (different `team_id`, or `is_restricted` / `is_ultra_restricted` guests) are filtered out before any work is spawned; their messages are still re-read on later events because `fetchSlackThread` refreshes full history each time.
 
@@ -135,7 +138,7 @@ interface SlackChannel {
 }
 ```
 
-New Slack destinations are linked when the PM calls `post_to_user` with `target.new_dm <userId>` or `target.new_thread <channelId>`; both flows post the message via `postSlackMessage`, register the new thread on `metadata.channels`, and return the channel key so the PM can reuse it later (notably with `post_files_to_user`). The first linked channel is also recorded as `default_channel`, which is the implicit destination when `post_to_user` is called without a target.
+A task's Slack channels are linked by `task.append(thread)` as inbound events arrive (the originating @mention/DM/bot-started thread, plus any thread the bot is later drawn into). The first linked channel is recorded as `default_channel`, the implicit destination when `post_to_user` is called without a target. The PM cannot open new DMs or new task-linked threads; to reach a channel that is NOT part of the task it uses the task-decoupled explore/post tools (`read_channel_history`, `read_thread`, `post_to_channel`), which never register a channel on `metadata.channels`.
 
 ## Message Deduplication
 
@@ -149,8 +152,6 @@ There is no `post_to_slack` MCP tool and no event-bus subscription that ferries 
 2. The tool handler invokes `task.postToUser(message, agentName, target)` in `src/tasks/task.ts`, which routes by target:
    - no target → post to `default_channel` (Slack or CLI)
    - `target.channel <key>` → post to a specific already-linked thread
-   - `target.new_dm <userId>` → `openDMChannel` then post + register
-   - `target.new_thread <channelId>` → post a top-level message + register
 3. Each branch ultimately calls `postSlackMessage()` in `src/connectors/slack/client.ts`, which renders the text as a single Block Kit `markdown` block (`{ type: 'markdown', text }`). Slack renders that natively as CommonMark — headings, tables, fenced code blocks, lists, blockquotes, task lists, and links — without manual conversion. See [Markdown block reference](https://docs.slack.dev/reference/block-kit/blocks/markdown-block/). Per-message payload is capped at 12,000 characters (`SLACK_MARKDOWN_LIMIT`); the function asserts the limit and throws `SlackMarkdownLimitError` on overflow.
 4. On success, `Task.logOutgoingMessage` writes the message to the task's `knowledge.log`, emits a `message` event on the in-process event bus (consumed only by the SSE/CLI streaming endpoint — see `src/system/event-bus.ts`), and logs via the unified logger. On failure, nothing is logged or emitted; the tool returns split-and-retry guidance to the agent via `formatSlackSendError`.
 
@@ -183,8 +184,8 @@ The status is derived **automatically** from agent activity — no agent prompt 
 - **Capture.** The per-agent SDK loop in `src/agents/spawn.ts` calls `task.noteActivityFromEvent(agentId, event)` on every event, alongside the existing logging hook. `deriveActivity` (`src/agents/activity.ts`) maps each `tool_use` block (`block.name`, `block.input`) to a short first-person fragment:
   A specialist's fragments always name **where** (its domain), so a single active specialist is never vague; only the PM (no domain) and genuinely domain-agnostic actions stay generic.
   - **work** — `Read`/`Grep` → "digging into the backend"; `Edit`/`Write` → "making changes to the backend"; `Bash` → "running some checks on the backend"; `Skill` → "getting up to speed on the backend"; `create_pull_request` → "opening a backend pull request"; `push_branch` → "pushing the backend changes"; external MCP → "checking Rollbar" / "updating Monday.com" (metadata-derived). `web_research` stays "researching" (external info, not the codebase domain).
-  - **coordination & PM steps**, phrased in the single voice so no agent is ever named — `send_message_to_agent` → "looking into the backend" (resolved from the **target's** domain, so a delegation reads as Archie turning to that area) or "coordinating" (to the coordinator / unknown); `log_finding` → "making a note on the backend"; `share_artifact` → "writing up the backend"; `find_slack_user`/`find_slack_channel` → "looking someone up"/"finding the right channel"; `get_agents_status` → "checking on progress"; `launch_task` → "kicking off a task"; `set_reminder` → "setting a reminder". (The PM has no domain, so its steps stay generic.)
-  - **plumbing** maps to `null` and never surfaces — `post_to_user` (clear-on-post path), `assign_task_owner`, `report_completion`, `request_edit_mode`, `parse_datetime`, reactions/mute.
+  - **coordination & PM steps**, phrased in the single voice so no agent is ever named — `send_message_to_agent` → "looking into the backend" (resolved from the **target's** domain, so a delegation reads as Archie turning to that area) or "coordinating" (to the coordinator / unknown); `log_finding` → "making a note on the backend"; `share_artifact` → "writing up the backend"; `find_slack_user`/`find_slack_channel` → "looking someone up"/"finding the right channel"; `read_channel_history`/`read_thread` → "catching up on a channel"/"reading a thread"; `get_agents_status` → "checking on progress"; `set_reminder` → "setting a reminder". (The PM has no domain, so its steps stay generic.)
+  - **plumbing** maps to `null` and never surfaces — `post_to_user`/`post_to_channel` (clear-on-post path), `assign_task_owner`, `report_completion`, `request_edit_mode`, `parse_datetime`, reactions/mute.
 
   Agent active/idle transitions flow through `Task.updateAgentState`, which already knows who is mid-turn.
 - **Render.** `TaskStatusController` (`src/tasks/status.ts`) composes **one** line from the whole team with a fixed precedence: if the **PM** is active it speaks ("is putting this together…"); else if exactly **one specialist** is active it shows that specialist's specific action ("is working on the mobile app…"); else it **aggregates the domains** of the several active specialists ("is checking mobile and backend…"). It is always first person and never names an agent — specialists appear only by their **domain noun**, resolved by `agentDomainLabel` from the optional `metadata.archie.statusLabel` frontmatter, falling back to the agent key (engineering: `mobile`, `backend`) or a cleaned plugin name. This composes naturally with the PM's stop-and-wait flow: after delegating, the PM goes idle and specialist statuses show through; when it wakes to synthesise, its own status returns.

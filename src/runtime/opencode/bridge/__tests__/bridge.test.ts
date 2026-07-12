@@ -298,7 +298,7 @@ describe('bridge server', () => {
       },
     );
 
-    it.each(['launch_task', 'set_reminder', 'find_slack_user'])(
+    it.each(['set_reminder', 'find_slack_user'])(
       'dispatches %s for a PM session (reaches the real handler)',
       async (toolName) => {
         const { task, agent } = fakePmSession();
@@ -317,7 +317,7 @@ describe('bridge server', () => {
     it('includes PM-only tool names in the /tools manifest even though it is not session-scoped', async () => {
       const res = await fetch(`${handle.url}/tools`, { headers: { authorization: `Bearer ${handle.token}` } });
       const body: any = await res.json();
-      expect(body.some((t: any) => t.name === 'launch_task')).toBe(true);
+      expect(body.some((t: any) => t.name === 'propose_trigger')).toBe(true);
       expect(body.some((t: any) => t.name === 'set_reminder')).toBe(true);
       expect(body.some((t: any) => t.name === 'find_slack_user')).toBe(true);
     });

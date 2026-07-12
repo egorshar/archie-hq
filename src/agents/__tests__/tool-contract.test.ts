@@ -124,6 +124,10 @@ const PM_COMMS_TOOLS = [
   'mcp__comms-tools__post_files_to_user',
   'mcp__comms-tools__find_slack_user',
   'mcp__comms-tools__find_slack_channel',
+  'mcp__comms-tools__list_channels',
+  'mcp__comms-tools__read_channel_history',
+  'mcp__comms-tools__read_thread',
+  'mcp__comms-tools__post_to_channel',
   'mcp__comms-tools__mute_channel',
   'mcp__comms-tools__react_to_message',
   'mcp__comms-tools__unreact_from_message',
@@ -135,10 +139,14 @@ const PM_ORCHESTRATION_TOOLS = [
   'mcp__orchestration-tools__assign_task_owner',
   'mcp__orchestration-tools__report_completion',
   'mcp__orchestration-tools__request_edit_mode',
+  'mcp__orchestration-tools__request_max_mode',
   'mcp__orchestration-tools__get_agents_status',
-  'mcp__orchestration-tools__launch_task',
   'mcp__orchestration-tools__list_available_repos',
   'mcp__orchestration-tools__spawn_repo_agent',
+  'mcp__orchestration-tools__propose_trigger',
+  'mcp__orchestration-tools__list_triggers',
+  'mcp__orchestration-tools__update_trigger',
+  'mcp__orchestration-tools__delete_trigger',
 ];
 
 const PM_SCHEDULING_TOOLS = [
@@ -225,7 +233,7 @@ describe('PM MCP server contracts', () => {
 // `name -> (args) => Promise<ToolResult>` map instead of an MCP server. Each
 // factory's key set must match its SDK server's tool set MINUS the control
 // tools bridged separately (`post_to_user`, `report_completion`,
-// `request_edit_mode` — see `TOOL_WHITELIST` in
+// `request_edit_mode`, `request_max_mode` — see `TOOL_WHITELIST` in
 // `src/runtime/opencode/bridge/server.ts`), so there is no double-registration.
 
 const BRIDGED_COMMS_TOOLS = PM_COMMS_TOOLS
@@ -234,7 +242,7 @@ const BRIDGED_COMMS_TOOLS = PM_COMMS_TOOLS
 
 const BRIDGED_ORCHESTRATION_TOOLS = PM_ORCHESTRATION_TOOLS
   .map((n) => n.replace('mcp__orchestration-tools__', ''))
-  .filter((n) => n !== 'report_completion' && n !== 'request_edit_mode');
+  .filter((n) => n !== 'report_completion' && n !== 'request_edit_mode' && n !== 'request_max_mode');
 
 const BRIDGED_SCHEDULING_TOOLS = PM_SCHEDULING_TOOLS
   .map((n) => n.replace('mcp__scheduling-tools__', ''));

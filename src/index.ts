@@ -42,6 +42,7 @@ import { configureGitIdentity } from './connectors/github/client.js';
 import { recoverActiveTasks } from './tasks/recovery.js';
 import { initEventPersistence } from './tasks/persistence.js';
 import { initReminderScheduler } from './system/reminder-scheduler.js';
+import { initTriggerScheduler } from './system/trigger-scheduler.js';
 import { initMemory } from './memory/index.js';
 import { assertBackendConfig, getBackendMatrix, resolveRepoHostKind, getGitLabHost, getAgentRuntime } from './system/backends.js';
 
@@ -277,6 +278,7 @@ async function main(): Promise<void> {
 
     await recoverActiveTasks();
     await initReminderScheduler();
+    await initTriggerScheduler();
 
     // Now accept events: start the HTTP server and open the Socket Mode WebSocket.
     await new Promise<void>((resolve) => server.listen(config.port, resolve));

@@ -2,9 +2,18 @@
 
 Archie ships continuously, so changes are grouped by the **date they landed** on `main` rather than by version. Each entry leads with the **value** it delivers, then adds **technical detail**; pure plumbing stays technical. The [starting-point snapshot](#before-this-log--the-starting-point) at the bottom is where Archie stood before the first entry.
 
+<!-- This file is generated automatically — do NOT edit it by hand. The `.github/workflows/daily-changelog.yml` workflow summarizes each day's merged PRs into a dated entry and commits it to `main` on its own. To shape how a change reads here, write a clear PR description — that is the source the automation reads. Quiet days with nothing merged are intentionally skipped (no entry), so gaps between dates are expected. Hand edits drift from the automation and may be overwritten; the only reason to touch this file directly is to repair a mistake the automation made. -->
+
 ## [Unreleased]
 
-_Changes on `main` that haven't been summarized into a dated entry yet._
+- **Tasks can be upgraded to "max mode" on request, with human approval.** A user can ask Archie to "use Fable" / "activate max mode"; the PM requests it via `request_max_mode`, the user approves with a Slack (or CLI) button, and from then on the coding agents run with more capability for the rest of the task — mirroring the edit-mode gate, applied to model/effort instead of write access. By default repo agents jump to maximum reasoning effort; the engineering repo agents (backend, mobile, infrastructure) and the `archie` agent additionally swap to **Fable** (`claude-fable-5`). Per-agent behaviour is set in the plugins repo via `metadata.archie.maxMode`; `ARCHIE_MAX_MODE_MODEL` / `ARCHIE_MAX_MODE_EFFORT` cover runtime-spawned dynamic agents. _Technical: `max_mode` flag on `TaskMetadata`; `resolveAgentModel`/`resolveAgentEffort` gained a `maxMode` argument and a `MaxModeSpec` frontmatter field; `request_max_mode` on the PM `orchestration-tools` server with `approve_max_mode`/`deny_max_mode` handlers across Slack and the API/CLI; `handleMaxModeApproval` resets the in-memory SDK session of any agent whose model changes so the swap actually takes effect on resume. Independent of edit mode. See docs/architecture/max-mode.md._
+
+## 2026-07-10
+
+- **Archie can now act on its own, but only through rules you approve first.** New "triggers" let you tell Archie to do something when a condition fires — on a schedule ("every weekday at 9am, post the deploy queue") or when a new message lands in a watched channel — the one sanctioned form of self-initiated work, gated behind an explicit Approve/Deny before anything is created. _Technical: firing loop mirrors the reminder scheduler's index-and-tick pattern, with `croner` doing DST-correct cron math kept entirely internal; creation reuses the edit-mode approval mechanism (`propose_trigger`/`list_triggers`/`update_trigger`/`delete_trigger`); visibility scoped by channel privacy tier with a fail-closed lookup on a cache miss; per-user/per-channel active-trigger caps and a per-account daily fire cap; `ARCHIE_TRIGGERS_ENABLED` kill switch; CLI trigger-list view. PR #206._
+- **Tasks can be upgraded to "max mode" on request, with human approval.** A user can ask Archie to "use Fable" / "activate max mode"; the PM requests it via `request_max_mode`, the user approves with a Slack (or CLI) button, and the coding agents run with more capability for the rest of the task — mirroring the edit-mode gate, applied to model/effort instead of write access. _Technical: `max_mode` flag on `TaskMetadata`; `resolveAgentModel`/`resolveAgentEffort` gained a `maxMode` argument and `MaxModeSpec` frontmatter field; `request_max_mode`/`approve_max_mode`/`deny_max_mode` wired across Slack and the API/CLI; `handleMaxModeApproval` forces a fresh SDK session for any model-changing agent since the approval runs on a reloaded task, sourced from the task team and persisted `agent_sessions`. PR #169 (closes #142)._
+- **When Archie posts into a channel outside the current task, it now says who asked for it.** Escalating or cross-posting used to land with no context for readers who weren't part of the original conversation; the PM now names the requester and links back to the source thread. _Technical: one-line prompt guidance added to the `post_to_channel` bullet in `prompts/pm-agent.md` — guidance only, no engine enforcement. PR #205._
+- _Technical: fixed the daily-changelog automation writing empty "no changes" entries on quiet days — the bail-out check counted the automation's own prior commit even though that commit is filtered out of the model's context, so on a quiet day the model saw empty context and dutifully drafted an empty entry; the bail-out now applies the same filter, and `changelog-insert.mjs` additionally refuses to insert a heading with no bullets as defense in depth. PR #207._
 
 ## 2026-07-08
 
@@ -40,14 +49,6 @@ _Changes on `main` that haven't been summarized into a dated entry yet._
 ## 2026-07-04
 
 - **Operators now have a repeatable, adversarially-verified loop — Forge — for taking any idea, GitHub issue, or existing PR to a tested, verified pull request.** The `/forge` command walks through inception (testable acceptance criteria with named verification methods: `unit`/`integration`/`live-e2e`/`manual`/`deploy-only`), fact-checked research, critic-hardened planning, adversarial implementation review, and black-box QA against a live instance via the `archie-debug` MCP; `live-e2e` ACs that need infrastructure not yet built are waived with a named post-merge step rather than silently skipped. Operation is local and operator-driven — one run at a time, two human gates (inception sign-off and merge decision), no Archie runtime change. _Technical: ships as `.claude/skills/forge/` (orchestrator `SKILL.md` + six self-contained stage files carrying verbatim role prompts) and `.claude/commands/forge.md`; run state in `forge.yaml` on a `forge/*` branch; entry points: idea, issue, pr (finish-mode), resume, abandon; `docs/proposals/forge.md` contains the full design rationale; Stage 1 machinery dry-run verified on a real target (30 cited claims, 29 confirmed, 0 wrong); a consistency review caught 3 blocking gaps — all fixed before merge (PR #174)._
-
-## 2026-07-03
-
-_No changes landed on `main` this day._
-
-## 2026-07-02
-
-_No changes landed on `main` this day._
 
 ## 2026-07-01
 

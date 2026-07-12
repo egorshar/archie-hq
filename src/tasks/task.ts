@@ -10,7 +10,7 @@ import type { AgentName, SlackAuthor, SlackChannel, SlackThread, SlackReaction, 
 import { CLI_CHANNEL_KEY } from '../types/task.js';
 import type { AgentDef } from '../types/agent.js';
 import { isPmAgent, isRepoAgent } from '../types/agent.js';
-import { modelDisplayLabel } from '../agents/model-label.js';
+import { modelDisplayLabel, modelChangingAgentIds } from '../agents/model-label.js';
 import { getAgentRuntime } from '../system/backends.js';
 import { prCardFingerprint, prCardTitlePlain } from '../system/pr-card-format.js';
 import { getGitHubClient } from '../connectors/github/client.js';
@@ -22,10 +22,6 @@ import { createKeyedLock } from '../system/keyed-lock.js';
 export interface PostTarget {
   /** Post to an existing linked thread (channel key, e.g., "slack:C123:456.789") */
   channel?: string;
-  /** Start a new DM with a user (Slack user ID). Reuses existing DM thread if one is linked. */
-  new_dm?: string;
-  /** Start a new thread in a channel (Slack channel ID). */
-  new_thread?: string;
 }
 
 /**
@@ -62,7 +58,7 @@ import { scheduleIdleCheck } from './recovery.js';
 import { scanAgentDefs, getAgentDef, getVisiblePeerIdsForSender, synthesizeDynamicAgentDef } from '../agents/registry.js';
 import type { AttachedRepo } from '../types/task.js';
 import { syncPlugins } from '../system/plugin-sync.js';
-import { postSlackMessage, postSlackFiles, postInteractiveToThread, postInteractiveToThreads, updateMessage, deleteMessage, buildPrCardBlocks, addReaction, removeReaction, getMessageReactions, buildThreadUrl, openDMChannel, getChannelInfo, getUserInfo, isExternalUser, formatSlackChannelRef, formatSlackChannelDisplay } from '../connectors/slack/client.js';
+import { postSlackMessage, postSlackFiles, postInteractiveToThread, postInteractiveToThreads, updateMessage, deleteMessage, buildPrCardBlocks, addReaction, removeReaction, getMessageReactions, buildThreadUrl, isExternalUser, formatSlackChannelRef, formatSlackChannelDisplay } from '../connectors/slack/client.js';
 import { basename } from 'path';
 import { AGENT_PROMPTS } from '../agents/prompts.js';
 import { logger } from '../system/logger.js';
@@ -425,10 +421,11 @@ export class Task {
    * Targeting modes:
    * - No target: post to default_channel only
    * - target.channel: post to a specific already-linked thread
-   * - target.new_dm: open DM with user, post message, link thread (reuses existing DM if found)
-   * - target.new_thread: post top-level message in channel, link thread
    *
-   * Returns the channel key when a new channel is created/reused, null otherwise.
+   * Opening new DMs/threads is intentionally not supported — the PM reaches
+   * other channels via the task-decoupled `post_to_channel` explore tool, which
+   * deliberately does NOT link them to this task. Always returns null (the
+   * return type is kept for call-site compatibility).
    */
   async postToUser(message: string, agentName?: string, target?: PostTarget): Promise<string | null> {
     const sender = agentName || 'system';
@@ -436,42 +433,6 @@ export class Task {
     // a Slack `context` block, and the same string on the `message` event so the
     // CLI can render it dimmed (see logOutgoingMessage / TaskDetail).
     const footer = this.buildUserFooter();
-
-    // New DM — open DM channel, reuse existing thread or create new
-    if (target?.new_dm) {
-      const dmChannelId = await openDMChannel(target.new_dm);
-      const existing = this.findChannelBySlackId(dmChannelId);
-      if (existing) {
-        await postSlackMessage({
-          channel: existing.channel.channel_id,
-          threadTs: existing.channel.thread_id,
-          text: message,
-          footer,
-        });
-        this.logOutgoingMessage(sender, message, Task.formatSlackDest(existing.channel).display, existing.channel, footer);
-        return existing.key;
-      } else {
-        const userInfo = await getUserInfo(target.new_dm);
-        const channelName = `DM with ${userInfo.realName}`;
-        const ts = await postSlackMessage({ channel: dmChannelId, text: message, footer });
-        if (!ts) return null; // dry-run
-        const key = this.registerSlackChannel(dmChannelId, ts, channelName);
-        const ch = this.metadata.channels[key] as SlackChannel;
-        this.logOutgoingMessage(sender, message, Task.formatSlackDest(ch).display, ch, footer);
-        return key;
-      }
-    }
-
-    // New thread in a channel
-    if (target?.new_thread) {
-      const channelInfo = await getChannelInfo(target.new_thread);
-      const ts = await postSlackMessage({ channel: target.new_thread, text: message, footer });
-      if (!ts) return null; // dry-run
-      const key = this.registerSlackChannel(target.new_thread, ts, channelInfo.name);
-      const ch = this.metadata.channels[key] as SlackChannel;
-      this.logOutgoingMessage(sender, message, Task.formatSlackDest(ch).display, ch, footer);
-      return key;
-    }
 
     // Specific existing channel
     if (target?.channel) {
@@ -586,17 +547,21 @@ export class Task {
   async postInteractiveToUser(
     text: string,
     blocks: unknown[],
-    approvalType: 'edit_mode' | 'research_budget' | 'merge',
+    approvalType: 'edit_mode' | 'research_budget' | 'merge' | 'trigger' | 'max_mode',
     channelKey?: string,
     context?: { github: string; pr_number: number },
+    ref?: string,
   ): Promise<void> {
     // Merge approvals carry the PR identity so CLI/SSE consumers can echo it
     // back on resolution (the API route requires github+pr_number for
-    // type:'merge'); other approval types omit it (backward compatible).
+    // type:'merge'). `ref` is an opaque id the approval applies to (e.g. a
+    // trigger id), echoed so the CLI can resolve the exact item when several
+    // approvals of the same type are outstanding. Other types omit both.
     emitEvent('approval:requested', this.taskId, {
       text,
       approvalType,
       ...(context ? { github: context.github, pr_number: context.pr_number } : {}),
+      ...(ref ? { ref } : {}),
     });
 
     const ch = this.resolveSlackChannel(channelKey);
@@ -678,11 +643,14 @@ export class Task {
     // the active runtime's pre-beautify footer token (skipping unresolved ones)
     // and deduping in order. The runtime owns HOW a model is labelled (Claude
     // alias vs opencode route) — this method never imports a runtime module.
+    // maxMode (the task-lifetime upgrade) is threaded through so the footer
+    // reflects any max-mode model swap.
+    const maxMode = this.metadata.max_mode === true;
     const runtime = getAgentRuntime();
     const raw: string[] = [];
     const pmDef = this.team.find((d) => isPmAgent(d));
-    if (pmDef) { const t = runtime.footerModelToken(pmDef); if (t) raw.push(t); }
-    for (const a of this.agentProcesses.values()) { const t = runtime.footerModelToken(a.def); if (t) raw.push(t); }
+    if (pmDef) { const t = runtime.footerModelToken(pmDef, maxMode); if (t) raw.push(t); }
+    for (const a of this.agentProcesses.values()) { const t = runtime.footerModelToken(a.def, maxMode); if (t) raw.push(t); }
     const seen = new Set<string>();
     const out: string[] = [];
     for (const m of raw) { if (seen.has(m)) continue; seen.add(m); out.push(m); }
@@ -932,36 +900,24 @@ export class Task {
   }
 
   /**
-   * Find an existing channel entry by Slack channel ID.
-   * Used for DM reuse — conversations.open returns the same channel ID for a given user.
+   * Link an existing Slack thread to this task and promote it to the default
+   * channel. Posts nothing — used by `fireTrigger` for channel-message triggers
+   * so the spawned PM replies in the triggering thread rather than opening a new
+   * one. Idempotent; mirrors the channel-registration shape used by `append`.
+   * Returns the channel key.
    */
-  private findChannelBySlackId(slackChannelId: string): { key: string; channel: SlackChannel } | null {
-    for (const [key, ch] of Object.entries(this.metadata.channels)) {
-      if (ch.type === 'slack' && ch.channel_id === slackChannelId) return { key, channel: ch };
-    }
-    return null;
-  }
-
-  /**
-   * Register a new Slack channel/thread in the task metadata.
-   *
-   * Promotes the channel to `default_channel` when the task has none yet. This
-   * matters for self-launched tasks, which start with zero channels (and a null
-   * default): the first channel the PM opens via `post_to_user(new_thread/new_dm)`
-   * becomes the default so subsequent default-routed messages — including
-   * interactive approval prompts like edit-mode requests — reach Slack instead of
-   * being dropped to the CLI log.
-   */
-  private registerSlackChannel(channelId: string, threadTs: string, channelName: string): string {
+  linkSlackThread(channelId: string, threadTs: string, channelName: string): string {
     const key = `slack:${channelId}:${threadTs}`;
-    this.metadata.channels[key] = {
-      type: 'slack',
-      thread_id: threadTs,
-      channel_id: channelId,
-      channel_name: channelName,
-      last_processed_ts: threadTs,
-      url: buildThreadUrl(channelId, threadTs) ?? undefined,
-    };
+    if (!this.metadata.channels[key]) {
+      this.metadata.channels[key] = {
+        type: 'slack',
+        thread_id: threadTs,
+        channel_id: channelId,
+        channel_name: channelName,
+        last_processed_ts: threadTs,
+        url: buildThreadUrl(channelId, threadTs) ?? undefined,
+      };
+    }
     this.metadata.default_channel ??= key;
     this.debouncedSave();
     return key;
@@ -1476,6 +1432,52 @@ export class Task {
     return 'resolved';
   }
 
+  async handleMaxModeApproval(approverName?: string): Promise<void> {
+    // Idempotency: max mode is a one-way, task-lifetime grant. A repeat approval
+    // (e.g. a duplicate API POST) must not re-run the session reset below and
+    // clear a freshly-spawned upgraded session mid-work. The Slack path is
+    // guarded by the button-strip; the API path is not, so guard here.
+    if (this.metadata.max_mode === true) return;
+
+    // Cancel any park armed by request_max_mode on the PM this turn — same race
+    // as edit mode (see handleEditModeApproval): approval means "continue", so
+    // drop the deferred stop before it fires and tears down the task we just
+    // approved.
+    this.agentProcesses.get('pm-agent')?.clearPendingTeardown();
+    this.metadata.max_mode = true;
+
+    // Force a fresh SDK session for every non-PM agent whose resolved MODEL
+    // changes under max mode (e.g. a repo agent that opts into Fable via
+    // maxMode.model). A resumed session can pin its original model, which would
+    // make the swap a silent no-op; a fresh session guarantees the new model
+    // takes effect. Effort-only upgrades don't change the model, so they need no
+    // reset (a raised effort is a per-turn query() option the next turn uses).
+    //
+    // Source the set from the TEAM, not live handles: request_max_mode paused
+    // and evicted the task, so the instance handling this approval was reloaded
+    // via Task.get and its `agentProcesses` is empty. Clearing the PERSISTED
+    // `agent_sessions` entry is what survives to disk — save() only re-syncs
+    // sessions for agents still in `agentProcesses` (none here), so the cleared
+    // entry sticks and the agent's next spawn restores no session_id → resumes
+    // nothing → runs on the new model. Context survives via knowledge.log, which
+    // the fresh spawn re-reads. Also null a live handle if approval landed before
+    // the pause fired (same-instance race).
+    for (const id of modelChangingAgentIds(this.team)) {
+      if (this.metadata.agent_sessions[id]) this.metadata.agent_sessions[id] = { active: false };
+      const live = this.agentProcesses.get(id as AgentName);
+      if (live) live.session.session_id = undefined;
+    }
+
+    this.debouncedSave();
+    await appendAgentFinding(this.taskId, 'system', `Max mode approved by ${approverName || 'user'}`, 'decision');
+    await this.sendMessage(AGENT_PROMPTS.existingTask, 'pm-agent');
+  }
+
+  async handleMaxModeDenial(): Promise<void> {
+    await appendAgentFinding(this.taskId, 'system', 'Max mode denied by user', 'decision');
+    await this.sendMessage(AGENT_PROMPTS.existingTask, 'pm-agent');
+  }
+
   async handleResearchBudgetApproval(): Promise<void> {
     this.metadata.research_budget_extra = (this.metadata.research_budget_extra ?? 0) + 5;
     this.budgets.researchRequestLimit = 5 + (this.metadata.research_budget_extra ?? 0);
@@ -1492,6 +1494,65 @@ export class Task {
   async handleResearchBudgetDenial(): Promise<void> {
     await appendAgentFinding(this.taskId, 'system', 'Additional research denied by user', 'decision');
     await this.sendMessage(AGENT_PROMPTS.existingTask, 'pm-agent');
+  }
+
+  /**
+   * Approve the trigger this task proposed (read from `metadata.pending_trigger_id`).
+   * Flips it to `enabled`, indexes the scheduler, and announces to the bound
+   * channel. Shared by the Slack `approve_trigger` button and the CLI
+   * `/tasks/:id/approve` endpoint. Returns the enabled trigger (or null if the
+   * pending proposal is gone). Dynamic imports avoid a static task↔scheduler cycle.
+   */
+  async handleTriggerApproval(approverId: string, triggerId?: string): Promise<import('../types/trigger.js').Trigger | null> {
+    const id = triggerId ?? this.metadata.pending_trigger_id;
+    if (!id) {
+      logger.warn('task', `handleTriggerApproval on ${this.taskId} with no trigger id`);
+      return null;
+    }
+    const { loadTrigger, enableProposedTrigger, deleteTrigger, countActiveTriggers } = await import('../system/trigger-store.js');
+    const { indexTrigger, announceTriggerChange, MAX_TRIGGERS_PER_USER, MAX_TRIGGERS_PER_CHANNEL } = await import('../system/trigger-scheduler.js');
+
+    // Re-check caps at approval: pending proposals don't count toward the caps,
+    // so approving several proposed while under the limit could otherwise blow
+    // past it. Refuse (delete the pending file) if enabling would exceed a cap.
+    const pending = await loadTrigger(id);
+    if (pending && pending.status === 'pending') {
+      const overChannel = pending.binding.type === 'channel'
+        && (await countActiveTriggers((t) => t.binding.type === 'channel' && t.binding.channel_id === (pending.binding as { channel_id: string }).channel_id)) >= MAX_TRIGGERS_PER_CHANNEL;
+      const overUser = pending.created_by && pending.created_by !== 'unknown'
+        && (await countActiveTriggers((t) => t.created_by === pending.created_by)) >= MAX_TRIGGERS_PER_USER;
+      if (overChannel || overUser) {
+        await deleteTrigger(id);
+        if (this.metadata.pending_trigger_id === id) this.metadata.pending_trigger_id = undefined;
+        this.debouncedSave();
+        await appendAgentFinding(this.taskId, 'system', `Trigger ${id} not enabled — active-trigger cap reached`, 'decision');
+        return null;
+      }
+    }
+
+    const trigger = await enableProposedTrigger(id, approverId);
+    if (this.metadata.pending_trigger_id === id) this.metadata.pending_trigger_id = undefined;
+    this.debouncedSave();
+    if (!trigger) return null;
+    indexTrigger(trigger);
+    await appendAgentFinding(this.taskId, 'system', `Trigger ${id} approved by user`, 'decision');
+    emitEvent('trigger:created', this.taskId, { trigger_id: id });
+    await announceTriggerChange(trigger, 'enabled');
+    return trigger;
+  }
+
+  /**
+   * Deny the trigger this task proposed — delete the pending file. Shared by the
+   * Slack `deny_trigger` button and the CLI `/approve` endpoint.
+   */
+  async handleTriggerDenial(triggerId?: string): Promise<void> {
+    const id = triggerId ?? this.metadata.pending_trigger_id;
+    if (this.metadata.pending_trigger_id === id) this.metadata.pending_trigger_id = undefined;
+    this.debouncedSave();
+    if (!id) return;
+    const { deleteTrigger } = await import('../system/trigger-store.js');
+    await deleteTrigger(id);
+    await appendAgentFinding(this.taskId, 'system', `Trigger ${id} denied by user`, 'decision');
   }
 
   // ---- Internal methods ----

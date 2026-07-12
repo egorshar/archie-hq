@@ -154,8 +154,9 @@ export class OpencodeRuntime implements AgentRuntime {
     return OPENCODE_RUNTIME_CAPABILITIES;
   }
 
-  /** The agent's opencode route as a beautify-ready id, or null when unresolved. */
-  footerModelToken(def: AgentDef): string | null {
+  /** The agent's opencode route as a beautify-ready id, or null when unresolved.
+   * opencode model routing has no max-mode swap, so `maxMode` is ignored. */
+  footerModelToken(def: AgentDef, _maxMode: boolean): string | null {
     return opencodeAgentRoute(def);
   }
 

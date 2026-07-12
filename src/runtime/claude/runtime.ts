@@ -21,9 +21,10 @@ export class ClaudeSdkRuntime implements AgentRuntime {
     return CLAUDE_RUNTIME_CAPABILITIES;
   }
 
-  /** The resolved alias (`opus` / `sonnet[1m]` / `def.model`) — never null. */
-  footerModelToken(def: AgentDef): string | null {
-    return resolveAgentModel(def);
+  /** The resolved alias (`opus` / `sonnet[1m]` / `def.model`) — never null.
+   * Honours the task's max-mode upgrade so the footer reflects any model swap. */
+  footerModelToken(def: AgentDef, maxMode: boolean): string | null {
+    return resolveAgentModel(def, maxMode);
   }
 
   /** Mirrors spawn's PM default when no agent has resolved a token yet. */
