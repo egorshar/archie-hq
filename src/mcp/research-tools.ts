@@ -18,6 +18,7 @@ import { query, tool, createSdkMcpServer } from '../runtime/claude/sdk.js';
 import type { HookCallbackMatcher, HookJSONOutput } from '../runtime/claude/sdk.js';
 import { z, toJSONSchema } from 'zod';
 import { logger } from '../system/logger.js';
+import { claudeCredentialEnv } from '../system/claude-credential.js';
 import { appendAgentFinding, getTaskPath, getSharedPath } from '../tasks/persistence.js';
 import type { Task } from '../tasks/task.js';
 import type { Agent } from '../agents/agent.js';
@@ -110,7 +111,7 @@ Respond with JSON only.`;
         executable: 'node',
         env: {
           NODE_ENV: process.env.NODE_ENV || 'development',
-          ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
+          ...claudeCredentialEnv(),
           // Forward CA-trust to the spawned CLI (TLS-intercepting proxy); no-op when unset.
           ...(process.env.NODE_USE_SYSTEM_CA ? { NODE_USE_SYSTEM_CA: process.env.NODE_USE_SYSTEM_CA } : {}),
           ...(process.env.NODE_EXTRA_CA_CERTS ? { NODE_EXTRA_CA_CERTS: process.env.NODE_EXTRA_CA_CERTS } : {}),

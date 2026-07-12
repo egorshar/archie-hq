@@ -130,7 +130,19 @@ export async function cloneRepos(
   for (const { github, baseBranch } of repos) {
     const repoPath = getBaseCachePath(github);
     const repoUrl = repoCloneUrl(github);
-    await cloneOrFetch(repoUrl, repoPath, github, baseBranch);
+    // Best-effort at startup: a repo the bot can't clone yet (e.g. missing token
+    // access) must NOT crash boot. Skip it with a warning; the agent lazy-clones
+    // it on first spawn once access is in place (see setupSharedClone).
+    try {
+      await cloneOrFetch(repoUrl, repoPath, github, baseBranch);
+    } catch (err) {
+      logger.warn(
+        'workdir',
+        `Startup clone/fetch of "${github}" failed — skipping (its agent will lazy-clone on first spawn once access is restored): ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
   }
 }
 

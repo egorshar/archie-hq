@@ -18,6 +18,7 @@ import 'dotenv/config';
 import { createRequire } from 'module';
 import http from 'node:http';
 import { readdirSync } from 'fs';
+import { cloneExists } from './connectors/github/repo-clone.js';
 const require = createRequire(import.meta.url);
 const express = require('express');
 
@@ -36,6 +37,8 @@ import { join } from 'path';
 import { validateMasterKey } from './system/secrets-vault.js';
 import { initPlugins, getPlugins } from './system/plugin-loader.js';
 import { startContextProbe } from './system/context-probe.js';
+import { assertClaudeCredentialAvailable } from './system/claude-credential.js';
+import { StartupError } from './system/startup-error.js';
 import { initRegistry, getAllAgentDefs } from './agents/registry.js';
 import { isRepoAgent, isPmAgent } from './types/agent.js';
 import { configureGitIdentity } from './connectors/github/client.js';
@@ -69,9 +72,7 @@ function loadConfig(): AppConfig {
   const githubWebhookSecret = process.env.GITHUB_WEBHOOK_SECRET;
   const gitlabWebhookSecret = process.env.GITLAB_WEBHOOK_SECRET;
 
-  if (!process.env.ANTHROPIC_API_KEY) {
-    throw new Error('ANTHROPIC_API_KEY environment variable is required');
-  }
+  assertClaudeCredentialAvailable();
 
   return {
     slackBotToken,
@@ -127,19 +128,27 @@ async function main(): Promise<void> {
     // be before any agent spawns so getProbeBaseUrl() is live at spawn time.
     startContextProbe();
 
-    // Clone repos declared by plugins (every entry across every repo agent,
-    // deduplicated by github identifier).
     const agentDefs = getAllAgentDefs();
     const repoDefs = agentDefs.filter(isRepoAgent);
-    const byGithub = new Map<string, { github: string; baseBranch: string }>();
-    for (const def of repoDefs) {
-      for (const entry of def.repo!.repos) {
-        if (!byGithub.has(entry.github)) {
-          byGithub.set(entry.github, { github: entry.github, baseBranch: entry.baseBranch });
+
+    // Repos may be cloned LAZILY on first agent spawn (setupSharedClone →
+    // ensureBaseCache).
+    // Set ARCHIE_EAGER_CLONE=false to not pre-warm every declared
+    // repo at startup.
+    if (process.env.ARCHIE_EAGER_CLONE !== 'false') {
+      const byGithub = new Map<string, { github: string; baseBranch: string }>();
+      for (const def of agentDefs.filter(isRepoAgent)) {
+        for (const entry of def.repo!.repos) {
+          if (!byGithub.has(entry.github)) {
+            byGithub.set(entry.github, { github: entry.github, baseBranch: entry.baseBranch });
+          }
         }
       }
+      logger.system(`Eager clone: pre-warming ${byGithub.size} declared repo(s)`);
+      await cloneRepos([...byGithub.values()]);
+    } else {
+      logger.system('Repos clone lazily on first agent spawn (set ARCHIE_EAGER_CLONE=true to pre-warm at startup)');
     }
-    await cloneRepos([...byGithub.values()]);
 
     // Log loaded plugins and agents
     const plugins = getPlugins();
@@ -176,8 +185,11 @@ async function main(): Promise<void> {
       logger.plain(`  [${def.pluginName}] ${def.id} (${def.visibility}) — ${def.role}`);
       const primary = def.repo!.primary;
       const primaryPath = join(REPOS_DIR, primary);
-      const gitName = await configureGitIdentity(primaryPath);
-      logger.plain(`    primary: ${primary} (${primaryPath})`);
+      // With lazy cloning the base repo may not exist yet — only configure the
+      // git identity if it's already cloned; otherwise it's set at spawn time.
+      const cloned = await cloneExists(primaryPath);
+      const gitName = cloned ? await configureGitIdentity(primaryPath) : null;
+      logger.plain(`    primary: ${primary} (${primaryPath})${cloned ? '' : ' [not cloned yet — lazy]'}`);
       if (gitName) {
         logger.plain(`    git: ${gitName}`);
       }
@@ -316,6 +328,16 @@ async function main(): Promise<void> {
     process.on('SIGINT', () => shutdown('SIGINT'));
     process.on('SIGTERM', () => shutdown('SIGTERM'));
   } catch (error) {
+    if (error instanceof StartupError) {
+      // Known, operator-fixable misconfiguration — show a clean, actionable
+      // message with no JS stack trace (the stack is noise here).
+      logger.error('startup', error.message);
+      for (const line of error.details) {
+        logger.plain(`  ${line}`);
+      }
+      logger.plain('');
+      process.exit(1);
+    }
     logger.error('index', 'Failed to start server', error);
     process.exit(1);
   }

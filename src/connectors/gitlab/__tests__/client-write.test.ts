@@ -298,3 +298,77 @@ describe('GitLabHost.getCodeScanningAlert', () => {
     expect(alert.mostRecentInstance?.state).toBe('open');
   });
 });
+
+describe('GitLabHost.dispatchWorkflow', () => {
+  it('POSTs a pipeline with ref + array-form variables and returns id + url', async () => {
+    setEnv();
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ id: 2009999, web_url: 'https://gl.example/g/p/-/pipelines/2009999' }), { status: 201 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const host = new GitLabHost();
+    const res = await host.dispatchWorkflow('flant/infra/review', 'ci-bot/us-trigger', {
+      inputs: { WERF_NEW_NAMESPACE: 'feature-sweed-123', REVIEW_SERVER_BRANCH: 'feature/SWEED-123', US_BOT: 'true' },
+    });
+    expect(res).toEqual({ id: 2009999, url: 'https://gl.example/g/p/-/pipelines/2009999' });
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toContain('/projects/flant%2Finfra%2Freview/pipeline');
+    expect(init.method).toBe('POST');
+    const body = JSON.parse(init.body);
+    expect(body.ref).toBe('ci-bot/us-trigger');
+    // variables must be the array form GitLab requires
+    expect(body.variables).toEqual(expect.arrayContaining([
+      { key: 'WERF_NEW_NAMESPACE', value: 'feature-sweed-123' },
+      { key: 'REVIEW_SERVER_BRANCH', value: 'feature/SWEED-123' },
+      { key: 'US_BOT', value: 'true' },
+    ]));
+  });
+
+  it('sends an empty variables array when no inputs given', async () => {
+    setEnv();
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ id: 1, web_url: 'u' }), { status: 201 }));
+    vi.stubGlobal('fetch', fetchMock);
+    await new GitLabHost().dispatchWorkflow('g/p', 'main');
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).variables).toEqual([]);
+  });
+});
+
+describe('GitLabHost.runManualJob', () => {
+  it('finds the named manual job in the MR pipeline and plays it', async () => {
+    setEnv();
+    const fetchMock = vi.fn()
+      // 1) GET merge_requests/:iid -> head_pipeline
+      .mockResolvedValueOnce(new Response(JSON.stringify({ sha: 'abc', head_pipeline: { id: 777 } }), { status: 200 }))
+      // 2) GET pipelines/:id/jobs -> jobs list
+      .mockResolvedValueOnce(new Response(JSON.stringify([
+        { id: 11, name: 'build', status: 'success', web_url: 'u/11' },
+        { id: 12, name: 'Ready to prod', status: 'manual', web_url: 'u/12' },
+      ]), { status: 200 }))
+      // 3) POST jobs/:id/play -> played job
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: 12, status: 'pending', web_url: 'u/12' }), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const res = await new GitLabHost().runManualJob('walli/sweed/web-ui-cashier-ci', 1667, 'Ready to prod');
+    expect(res).toEqual({ id: 12, url: 'u/12', status: 'pending' });
+
+    // the third call is the play POST on the found job id
+    const [url, init] = fetchMock.mock.calls[2];
+    expect(String(url)).toContain('/projects/walli%2Fsweed%2Fweb-ui-cashier-ci/jobs/12/play');
+    expect(init.method).toBe('POST');
+  });
+
+  it('throws when the named job is absent from the pipeline', async () => {
+    setEnv();
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ sha: 'abc', head_pipeline: { id: 777 } }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify([{ id: 11, name: 'build', status: 'success', web_url: 'u/11' }]), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(new GitLabHost().runManualJob('g/p', 5, 'Ready to prod')).rejects.toThrow(/Ready to prod/);
+  });
+
+  it('throws when the MR has no pipeline', async () => {
+    setEnv();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ sha: 'abc' }), { status: 200 })));
+    await expect(new GitLabHost().runManualJob('g/p', 5, 'Ready to prod')).rejects.toThrow(/no pipeline/i);
+  });
+});

@@ -8,6 +8,7 @@ import { readFile } from 'fs/promises';
 import { join } from 'path';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
+import { botName } from '../system/bot-name.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -37,8 +38,10 @@ export async function loadPrompt(
   const templatePath = join(PROMPTS_DIR, `${templateName}.md`);
   let template = await readFile(templatePath, 'utf-8');
 
-  // Replace all {{VAR}} patterns with their values
-  for (const [key, value] of Object.entries(variables)) {
+  // BOT_NAME is always available to every template (env-driven, default "Archie");
+  // an explicit caller value wins.
+  const merged: Record<string, string> = { BOT_NAME: botName(), ...variables };
+  for (const [key, value] of Object.entries(merged)) {
     const pattern = new RegExp(`{{${key}}}`, 'g');
     template = template.replace(pattern, value);
   }
@@ -59,7 +62,8 @@ export async function loadPromptFromPath(
 ): Promise<string> {
   let template = await readFile(absolutePath, 'utf-8');
 
-  for (const [key, value] of Object.entries(variables)) {
+  const merged: Record<string, string> = { BOT_NAME: botName(), ...variables };
+  for (const [key, value] of Object.entries(merged)) {
     const pattern = new RegExp(`{{${key}}}`, 'g');
     template = template.replace(pattern, value);
   }
