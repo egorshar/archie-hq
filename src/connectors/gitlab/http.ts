@@ -48,7 +48,11 @@ export async function glRequest<T = unknown>(opts: GlRequestOptions): Promise<T>
 
   if (!res.ok) {
     const text = await res.text().catch(() => '');
-    logger.warn('gitlab', `${opts.method ?? 'GET'} ${opts.path} → ${res.status}`);
+    // Include the response body (truncated) — GitLab's error bodies carry the
+    // actionable reason (e.g. `{"message":{"base":["No stages / jobs..."]}}` or a
+    // 403 scope hint). Logging only the status hid the real cause of the FPP-516
+    // pipeline 400s. GitLab 4xx/5xx bodies do not contain credentials.
+    logger.warn('gitlab', `${opts.method ?? 'GET'} ${opts.path} → ${res.status} ${text.slice(0, 200)}`);
     throw new Error(`GitLab ${opts.method ?? 'GET'} ${opts.path} failed: ${res.status} ${text.slice(0, 300)}`);
   }
 

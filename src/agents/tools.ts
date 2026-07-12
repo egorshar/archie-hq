@@ -1418,6 +1418,40 @@ async function getCodeScanningAlertHandler(agent: Agent, task: Task, args: z.inf
   return ok(lines.join('\n'));
 }
 
+/**
+ * Normalize `dispatch_workflow` inputs to a flat string→string map.
+ *
+ * A caller can deliver `inputs` as a JSON STRING rather than an object — notably
+ * the opencode bridge, which advertises the `z.record` as a free-form `any` and
+ * lets a weaker model fill it with a *stringified* object. Feeding that straight
+ * to `Object.entries` yields per-character garbage variables, so the pipeline's
+ * US_BOT / REVIEW_*_BRANCH variables silently vanish and GitLab rejects it with
+ * `400 workflow:rules` (the FPP-516 failure). Accept either an object or a
+ * JSON-string object; coerce values to strings. Returns undefined when there is
+ * nothing to send.
+ */
+export function normalizeWorkflowInputs(raw: unknown): Record<string, string> | undefined {
+  if (raw == null) return undefined;
+  let obj: unknown = raw;
+  if (typeof raw === 'string') {
+    const s = raw.trim();
+    if (s === '') return undefined;
+    try {
+      obj = JSON.parse(s);
+    } catch {
+      throw new Error('`inputs` must be a JSON object of string key→value pairs (received an unparseable string).');
+    }
+  }
+  if (typeof obj !== 'object' || obj === null || Array.isArray(obj)) {
+    throw new Error('`inputs` must be a flat object of string key→value pairs.');
+  }
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
+    if (v != null) out[k] = String(v);
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
 const dispatchWorkflowArgsSchema = {
   // Deliberately NOT resolveGithub(agent, args.github): this tool dispatches on an arbitrary
   // target repo (e.g. a central CI/infra repo) that the calling agent is not bound to, so the
@@ -1440,10 +1474,16 @@ async function dispatchWorkflowHandler(_agent: Agent, _task: Task, args: z.infer
   if (!client.capabilities().workflowDispatch) {
     return err(`Workflow dispatch is not available on this repo host (${client.kind}).`);
   }
+  let inputs: Record<string, string> | undefined;
+  try {
+    inputs = normalizeWorkflowInputs(args.inputs);
+  } catch (e) {
+    return err(e instanceof Error ? e.message : String(e));
+  }
   let res;
   try {
     res = await client.dispatchWorkflow(args.repo, args.ref, {
-      ...(args.inputs ? { inputs: args.inputs } : {}),
+      ...(inputs ? { inputs } : {}),
       ...(args.workflow ? { workflow: args.workflow } : {}),
     });
   } catch (e) {
