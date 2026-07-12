@@ -1337,6 +1337,40 @@ function createListCodeScanningAlertsTool(agent: Agent, task: Task) {
   );
 }
 
+/**
+ * Normalize `dispatch_workflow` inputs to a flat string→string map.
+ *
+ * A caller can deliver `inputs` as a JSON STRING rather than an object — e.g. a
+ * tool transport that types the `z.record` loosely (as a free-form `any`), where
+ * the model then fills it with a *stringified* object. Feeding that straight to
+ * `Object.entries` yields per-character garbage variables, so the pipeline's
+ * US_BOT / REVIEW_*_BRANCH variables silently vanish and GitLab rejects it with
+ * `400 workflow:rules` (the FPP-516 failure). Accept either an object or a
+ * JSON-string object; coerce values to strings. Returns undefined when there is
+ * nothing to send.
+ */
+export function normalizeWorkflowInputs(raw: unknown): Record<string, string> | undefined {
+  if (raw == null) return undefined;
+  let obj: unknown = raw;
+  if (typeof raw === 'string') {
+    const s = raw.trim();
+    if (s === '') return undefined;
+    try {
+      obj = JSON.parse(s);
+    } catch {
+      throw new Error('`inputs` must be a JSON object of string key→value pairs (received an unparseable string).');
+    }
+  }
+  if (typeof obj !== 'object' || obj === null || Array.isArray(obj)) {
+    throw new Error('`inputs` must be a flat object of string key→value pairs.');
+  }
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
+    if (v != null) out[k] = String(v);
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
 function createDispatchWorkflowTool(agent: Agent, task: Task) {
   return tool(
     'dispatch_workflow',
@@ -1359,10 +1393,16 @@ function createDispatchWorkflowTool(agent: Agent, task: Task) {
       if (!client.capabilities().workflowDispatch) {
         return err(`Workflow dispatch is not available on this repo host (${client.kind}).`);
       }
+      let inputs: Record<string, string> | undefined;
+      try {
+        inputs = normalizeWorkflowInputs(args.inputs);
+      } catch (e) {
+        return err(e instanceof Error ? e.message : String(e));
+      }
       let res;
       try {
         res = await client.dispatchWorkflow(args.repo, args.ref, {
-          ...(args.inputs ? { inputs: args.inputs } : {}),
+          ...(inputs ? { inputs } : {}),
           ...(args.workflow ? { workflow: args.workflow } : {}),
         });
       } catch (e) {
