@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { GITHUB_CAPABILITIES, CLAUDE_RUNTIME_CAPABILITIES } from '../capabilities.js';
+import { GITHUB_CAPABILITIES, GITLAB_CAPABILITIES_DEFAULT, CLAUDE_RUNTIME_CAPABILITIES } from '../capabilities.js';
 
 describe('capability descriptors', () => {
   it('github advertises reviews, security alerts, re-review; no native auto-merge', () => {
@@ -7,6 +7,16 @@ describe('capability descriptors', () => {
     expect(GITHUB_CAPABILITIES.securityAlerts).toBe(true);
     expect(GITHUB_CAPABILITIES.reReviewRequest).toBe(true);
     expect(GITHUB_CAPABILITIES.nativeAutoMerge).toBe(false);
+    expect(GITHUB_CAPABILITIES.workflowDispatch).toBe(false);
+    expect(GITHUB_CAPABILITIES.manualJobs).toBe(false);
+  });
+
+  it('gitlab defaults advertise workflowDispatch', () => {
+    expect(GITLAB_CAPABILITIES_DEFAULT.workflowDispatch).toBe(true);
+  });
+
+  it('gitlab defaults advertise manualJobs', () => {
+    expect(GITLAB_CAPABILITIES_DEFAULT.manualJobs).toBe(true);
   });
 
   it('claude runtime advertises all five capabilities', () => {

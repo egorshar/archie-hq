@@ -14,6 +14,7 @@ import {
   createOrchestrationMcpServer,
   createSchedulingMcpServer,
 } from '../tools.js';
+import { REPO_TOOLS_REQUIRING_EDIT_MODE } from '../spawn.js';
 import type { Agent } from '../agent.js';
 import type { Task } from '../../tasks/task.js';
 import type { AgentDef } from '../../types/agent.js';
@@ -169,6 +170,9 @@ const SPAWN_REPO_TOOLS = [
   // Security / code scanning
   'mcp__repo-tools__list_code_scanning_alerts',
   'mcp__repo-tools__get_code_scanning_alert',
+  // CI dispatch
+  'mcp__repo-tools__dispatch_workflow',
+  'mcp__repo-tools__run_manual_job',
   // PR write
   'mcp__repo-tools__push_branch',
   'mcp__repo-tools__create_pull_request',
@@ -218,5 +222,30 @@ describe('PM MCP server contracts', () => {
     const server = createSchedulingMcpServer(pmAgent(), makeTask());
     const registered = getRegisteredToolNames(server).map((n) => `mcp__scheduling-tools__${n}`);
     expect(registered.sort()).toEqual(PM_SCHEDULING_TOOLS.sort());
+  });
+});
+
+describe('read-only edit-mode gate', () => {
+  it('denies every state-mutating repo tool, including CI dispatch, until edit mode is granted', () => {
+    // Guards against a state-mutating repo-tool (e.g. dispatch_workflow, which
+    // triggers a real CI pipeline/deploy) shipping without being added to the
+    // read-only denylist in spawn.ts.
+    expect(REPO_TOOLS_REQUIRING_EDIT_MODE.sort()).toEqual(
+      [
+        'mcp__repo-tools__dispatch_workflow',
+        'mcp__repo-tools__run_manual_job',
+        'mcp__repo-tools__push_branch',
+        'mcp__repo-tools__create_pull_request',
+        'mcp__repo-tools__update_pr',
+        'mcp__repo-tools__add_pr_comment',
+        'mcp__repo-tools__add_review_comment',
+        'mcp__repo-tools__reply_to_review_comment',
+        'mcp__repo-tools__resolve_review_thread',
+        'mcp__repo-tools__request_re_review',
+        'mcp__repo-tools__merge_pull_request',
+        'mcp__repo-tools__close_pull_request',
+        'mcp__repo-tools__create_branch',
+      ].sort()
+    );
   });
 });

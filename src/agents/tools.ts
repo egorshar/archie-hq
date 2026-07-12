@@ -1337,6 +1337,115 @@ function createListCodeScanningAlertsTool(agent: Agent, task: Task) {
   );
 }
 
+/**
+ * Normalize `dispatch_workflow` inputs to a flat string→string map.
+ *
+ * A caller can deliver `inputs` as a JSON STRING rather than an object — e.g. a
+ * tool transport that types the `z.record` loosely (as a free-form `any`), where
+ * the model then fills it with a *stringified* object. Feeding that straight to
+ * `Object.entries` yields per-character garbage variables, so the pipeline's
+ * US_BOT / REVIEW_*_BRANCH variables silently vanish and GitLab rejects it with
+ * `400 workflow:rules` (the FPP-516 failure). Accept either an object or a
+ * JSON-string object; coerce values to strings. Returns undefined when there is
+ * nothing to send.
+ */
+export function normalizeWorkflowInputs(raw: unknown): Record<string, string> | undefined {
+  if (raw == null) return undefined;
+  let obj: unknown = raw;
+  if (typeof raw === 'string') {
+    const s = raw.trim();
+    if (s === '') return undefined;
+    try {
+      obj = JSON.parse(s);
+    } catch {
+      throw new Error('`inputs` must be a JSON object of string key→value pairs (received an unparseable string).');
+    }
+  }
+  if (typeof obj !== 'object' || obj === null || Array.isArray(obj)) {
+    throw new Error('`inputs` must be a flat object of string key→value pairs.');
+  }
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
+    if (v != null) out[k] = String(v);
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+function createDispatchWorkflowTool(agent: Agent, task: Task) {
+  return tool(
+    'dispatch_workflow',
+    'Trigger a CI workflow run on a ref (GitHub workflow_dispatch; GitLab pipeline). ' +
+    'Use for actions like deploying a feature stand via a central pipeline. Pass the repo, the ref/branch to run, ' +
+    'and inputs as a flat string map (they map to GitLab pipeline variables / GitHub workflow inputs). ' +
+    'Returns the run/pipeline id and URL to watch.',
+    {
+      // Deliberately NOT resolveGithub(agent, args.github): this tool dispatches on an arbitrary
+      // target repo (e.g. a central CI/infra repo) that the calling agent is not bound to, so the
+      // caller must pass the target repo directly rather than resolving against its own bound repos.
+      repo: z.string().describe('Repo "group/project" (GitLab) or "owner/name" (GitHub) to run the workflow in.'),
+      ref: z.string().describe('Branch/ref to run the workflow on, e.g. "ci-bot/us-trigger".'),
+      inputs: z.record(z.string(), z.string()).optional().describe('Flat key→value params (GitLab pipeline variables / GitHub workflow inputs).'),
+      workflow: z.string().optional().describe('GitHub only: the workflow file/id to dispatch. Ignored by GitLab.'),
+    },
+    async (args) => {
+      const client = getRepoHost();
+      if (!client) throw new Error('Repo host not configured');
+      if (!client.capabilities().workflowDispatch) {
+        return err(`Workflow dispatch is not available on this repo host (${client.kind}).`);
+      }
+      let inputs: Record<string, string> | undefined;
+      try {
+        inputs = normalizeWorkflowInputs(args.inputs);
+      } catch (e) {
+        return err(e instanceof Error ? e.message : String(e));
+      }
+      let res;
+      try {
+        res = await client.dispatchWorkflow(args.repo, args.ref, {
+          ...(inputs ? { inputs } : {}),
+          ...(args.workflow ? { workflow: args.workflow } : {}),
+        });
+      } catch (e) {
+        return err(e instanceof Error ? e.message : String(e));
+      }
+      return ok(`Dispatched workflow on ${args.repo}@${args.ref}` + (res.url ? ` — ${res.url}` : res.id != null ? ` (id ${res.id})` : ''));
+    },
+  );
+}
+
+function createRunManualJobTool(agent: Agent, task: Task) {
+  return tool(
+    'run_manual_job',
+    'Play a manual (gated) CI job by name in a merge/pull request\'s pipeline — e.g. a "Ready to prod" release-deploy job. ' +
+    'Pass the repo, the MR/PR number, and the exact job name. Runs in-process (no token in the agent). ' +
+    'Returns the played job\'s id, url, and status.',
+    {
+      // Free target repo (not resolveGithub): the caller plays a job on an arbitrary repo's MR,
+      // not necessarily its own bound repo — same rationale as dispatch_workflow.
+      repo: z.string().describe('Repo "group/project" (GitLab) or "owner/name" (GitHub) whose MR pipeline holds the job.'),
+      pr_number: z.number().describe('The merge/pull request number whose pipeline holds the manual job.'),
+      job_name: z.string().describe('Exact name of the manual job to play, e.g. "Ready to prod".'),
+    },
+    async (args) => {
+      const client = getRepoHost();
+      if (!client) throw new Error('Repo host not configured');
+      if (!client.capabilities().manualJobs) {
+        return err(`Running manual jobs is not available on this repo host (${client.kind}).`);
+      }
+      let res;
+      try {
+        res = await client.runManualJob(args.repo, args.pr_number, args.job_name);
+      } catch (e) {
+        return err(e instanceof Error ? e.message : String(e));
+      }
+      return ok(
+        `Played "${args.job_name}" on ${args.repo} !${args.pr_number}` +
+        (res.url ? ` — ${res.url}` : '') + (res.status ? ` (${res.status})` : ''),
+      );
+    },
+  );
+}
+
 function createGetCodeScanningAlertTool(agent: Agent, task: Task) {
   return tool(
     'get_code_scanning_alert',
@@ -2645,6 +2754,9 @@ export function createRepoToolsMcpServer(agent: Agent, task: Task) {
       // Security / code scanning
       createListCodeScanningAlertsTool(agent, task),
       createGetCodeScanningAlertTool(agent, task),
+      // CI dispatch
+      createDispatchWorkflowTool(agent, task),
+      createRunManualJobTool(agent, task),
       // PR write
       createPushBranchTool(agent, task),
       createPullRequestTool(agent, task),

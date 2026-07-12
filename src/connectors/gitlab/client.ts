@@ -10,7 +10,7 @@ import { GITLAB_CAPABILITIES_DEFAULT } from '../../ports/capabilities.js';
 import type {
   PRStatus, PRReview, ReviewThread, PRComment, PRChecksReport,
   CreatePRResult, PRDetails, PRListItem, PRListFilters,
-  CheckRunReport, WorkflowRunReport, CodeScanningAlert, CodeScanningAlertFilters,
+  CheckRunReport, WorkflowRunReport, WorkflowDispatchResult, ManualJobResult, CodeScanningAlert, CodeScanningAlertFilters,
 } from '../../ports/repo-host-types.js';
 import type { PrCardData } from '../../types/task.js';
 import { logger } from '../../system/logger.js';
@@ -295,6 +295,44 @@ export class GitLabHost implements RepoHost {
       jobs: jobEntries,
     };
   }
+
+  async dispatchWorkflow(repo: string, ref: string, opts: { workflow?: string; inputs?: Record<string, string> } = {}): Promise<WorkflowDispatchResult> {
+    // GitLab triggers a pipeline on `ref`; opts.inputs → the pipeline's `variables`,
+    // which GitLab requires in array form [{key,value}] with a JSON content-type.
+    const variables = Object.entries(opts.inputs ?? {}).map(([key, value]) => ({ key, value }));
+    const pipeline = await glRequest<{ id: number; web_url: string | null }>({
+      method: 'POST',
+      path: `/projects/${this.projectId(repo)}/pipeline`,
+      body: { ref, variables },
+    });
+    logger.system(`GitLab: dispatched pipeline ${pipeline.id} on ${repo}@${ref} (${variables.length} vars)`);
+    return { id: pipeline.id, url: pipeline.web_url };
+  }
+
+  async runManualJob(repo: string, prNumber: number, jobName: string): Promise<ManualJobResult> {
+    const id = this.projectId(repo);
+    // Resolve the MR's head pipeline, find the manual job by name, and play it.
+    const mr = await glRequest<{ head_pipeline?: { id: number } }>({
+      path: `/projects/${id}/merge_requests/${prNumber}`,
+    });
+    if (!mr.head_pipeline) {
+      throw new Error(`MR !${prNumber} in ${repo} has no pipeline to run "${jobName}" on`);
+    }
+    const jobs = await glRequestAll<{ id: number; name: string; status: string; web_url: string | null }>({
+      path: `/projects/${id}/pipelines/${mr.head_pipeline.id}/jobs`,
+    });
+    const job = jobs.find((j) => j.name === jobName);
+    if (!job) {
+      throw new Error(`No job named "${jobName}" in MR !${prNumber}'s pipeline (${repo})`);
+    }
+    const played = await glRequest<{ id: number; status: string; web_url: string | null }>({
+      method: 'POST',
+      path: `/projects/${id}/jobs/${job.id}/play`,
+    });
+    logger.system(`GitLab: played manual job "${jobName}" (${played.id}) on ${repo} MR !${prNumber} → ${played.status}`);
+    return { id: played.id, url: played.web_url, status: played.status };
+  }
+
   async listAccessibleRepos(): Promise<Array<{ github: string; default_branch: string; description?: string }>> {
     const projects = await glRequestAll<{ path_with_namespace: string; default_branch: string | null; description: string | null }>({
       path: '/projects', query: { membership: true, order_by: 'last_activity_at', sort: 'desc' },

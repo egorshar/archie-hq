@@ -29,6 +29,7 @@ import {
 } from './client.js';
 import { ensureChannelCanvas } from './channel-canvas.js';
 import { shouldCreateNewTask } from './task-routing.js';
+import { botName } from '../../system/bot-name.js';
 import { Task } from '../../tasks/task.js';
 import { AGENT_PROMPTS } from '../../agents/prompts.js';
 import { logger } from '../../system/logger.js';
@@ -913,13 +914,13 @@ async function handleSlackEdit(event: any): Promise<void> {
 
 const SHARED_CHANNEL_WARNING_TEXT =
   ':warning: *Heads up:* this thread is in a Slack channel shared with an external organisation. ' +
-  'Archie filters messages from external participants — if you need Archie to see something an ' +
-  'external person said, re-say it yourself. Also be aware that anything Archie posts here ' +
-  '(including on your behalf) is visible to the external org, so mind what you ask Archie to share.';
+  `${botName()} filters messages from external participants — if you need ${botName()} to see something an ` +
+  `external person said, re-say it yourself. Also be aware that anything ${botName()} posts here ` +
+  '(including on your behalf) is visible to the external org, so mind what you ask it to share.';
 
 const FORWARD_NOTICE_TEXT =
   ':information_source: You forwarded a message originally authored by an external user. ' +
-  'Archie will process its contents — just making sure you are aware.';
+  `${botName()} will process its contents — just making sure you are aware.`;
 
 /**
  * Persist isShared and post ephemeral warnings to internal users in the thread.
