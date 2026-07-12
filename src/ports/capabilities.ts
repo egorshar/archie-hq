@@ -66,9 +66,9 @@ export const CLAUDE_RUNTIME_CAPABILITIES: RuntimeCapabilities = {
  * (Linux) posture — verified live in the container smoke: both the read-only
  * and edit-mode clone profiles jail correctly (clone RO with a `.opencode` rw
  * carve-out; clone RW with `.git/HEAD` denied), `/app` and out-of-mount writes
- * are denied in-jail, and the child env carries no orchestrator secrets (P3b
- * spike runbook + record). The darwin-dev unwrapped path is the documented
- * caveat above, not a retraction of the capability. Native skills ARE
+ * are denied in-jail, and the child env carries no orchestrator secrets. The
+ * darwin-dev unwrapped path is the documented caveat above, not a retraction of
+ * the capability. Native skills ARE
  * supported: the embedded server exposes opencode's `skill` tool over the
  * agent's staged skills (see runtime/opencode/skills.ts).
  */

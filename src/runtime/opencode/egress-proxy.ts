@@ -113,7 +113,7 @@ function startProxy(): Promise<EgressProxyHandle> {
   return new Promise((resolve, reject) => {
     const server = createServer((req: IncomingMessage, res: ServerResponse) => {
       // Guard against a peer reset firing 'error' with no listener attached
-      // (would otherwise crash the process — see Task 1 spike finding).
+      // (an unhandled 'error' on these sockets would otherwise crash the process).
       let up: ReturnType<typeof httpRequest> | null = null;
       req.on('error', () => up?.destroy());
       res.on('error', () => up?.destroy());
@@ -143,8 +143,8 @@ function startProxy(): Promise<EgressProxyHandle> {
     // CONNECT (HTTPS tunneling) — allowlist by target host, no TLS interception.
     server.on('connect', (req: IncomingMessage, clientSock: Socket, head: Buffer) => {
       // Attach before any write so a peer reset during the handshake (even on
-      // the 407/403 denial paths) never crashes the process (see Task 1 spike
-      // finding: an unhandled ECONNRESET on this socket took the process down).
+      // the 407/403 denial paths) never crashes the process: an unhandled
+      // ECONNRESET on this socket would otherwise take the process down.
       let upstream: Socket | null = null;
       clientSock.on('error', () => upstream?.destroy());
       const entry = authorize(req.headers['proxy-authorization']);
