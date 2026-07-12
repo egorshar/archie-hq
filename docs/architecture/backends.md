@@ -1,6 +1,6 @@
 # Backend Abstraction (Repo Host / Agent Runtime)
 
-Archie's engineering path depends on two external backends: a repo host (where pull/merge requests, reviews, and CI live) and an agent runtime (what actually executes the coding agent process). Phase 0 introduced a seam between Archie's business logic and both backends so that a second repo host or a second agent runtime could be added later without touching call sites. Phase 1 landed that second repo host: GitLab (self-hosted, Premium tier) is now a real, fully wired `RepoHost` alongside GitHub. The agent runtime seam still has only one concrete implementation (the Claude Agent SDK); a resolver in `src/system/backends.ts` is the single place that picks between backends on each seam.
+Archie's engineering path depends on two external backends: a repo host (where pull/merge requests, reviews, and CI live) and an agent runtime (what actually executes the coding agent process). Phase 0 introduced a seam between Archie's business logic and both backends so that a second repo host or a second agent runtime could be added later without touching call sites. Phase 1 landed that second repo host: GitLab (self-hosted, Premium tier) is now a real, fully wired `RepoHost` alongside GitHub. The agent runtime seam now has a second concrete implementation too: `opencode` (`AGENT_RUNTIME=opencode`) is a full runtime alongside the Claude Agent SDK — see `docs/architecture/opencode-runtime.md`. A resolver in `src/system/backends.ts` is the single place that picks between backends on each seam.
 
 ## Overview
 
@@ -15,13 +15,11 @@ Two ports, one resolver:
          RepoHost port                   AgentRuntime port
       (src/ports/repo-host.ts)        (src/ports/agent-runtime.ts)
                 |                               |
-        +-------+-------+                       |
-        |               |                       |
-   GitHubHost       GitLabHost             ClaudeSdkRuntime
- (GitHubClient,   (src/connectors/     (src/runtime/claude/runtime.ts)
-  connectors/       gitlab/)
-    github/)             |
-                Phase 2: OpencodeRuntime
+        +-------+-------+              +---------+---------+
+        |               |             |                   |
+   GitHubHost       GitLabHost   ClaudeSdkRuntime    OpencodeRuntime
+   (connectors/     (connectors/  (src/runtime/       (src/runtime/
+     github/)          gitlab/)      claude/)            opencode/)
 ```
 
 Callers never import `GitHubClient` or the Claude SDK directly to reach these capabilities -- they call `getRepoHost()` / `getAgentRuntime()` / `getLlmOneShot()` from `src/system/backends.ts` and get back a port-typed object. A related but separate seam, `RepoHostEventSource`, normalizes inbound webhook events so the routing logic that decides "wake the PM" vs "run a merge check" is host-agnostic (see `src/connectors/shared/cr-router.ts`).
@@ -43,17 +41,17 @@ All four interfaces (plus the shared domain types) live under `src/ports/` and a
 Two environment variables select the active backend per seam:
 
 - `REPO_HOST` -- defaults to `github` when unset. Supported values: `github`, `gitlab` (Phase 1).
-- `AGENT_RUNTIME` -- defaults to `claude` when unset. Supported values: `claude` only; `opencode` remains Phase 2.
+- `AGENT_RUNTIME` -- defaults to `claude` when unset. Supported values: `claude` (default) and `opencode` (the full opencode runtime -- see `docs/architecture/opencode-runtime.md`; requires an `ARCHIE_OPENCODE_MODEL_*` route).
 
-`resolveRepoHostKind()` and `resolveAgentRuntimeKind()` read and normalize (trim + lowercase) those variables. `assertBackendConfig()` validates the resolved values against the supported lists and throws an actionable error if either is unsupported -- it distinguishes a genuinely unknown value ("is invalid") from a value that is a real backend but not available yet ("is not available in this build yet", still the case for `AGENT_RUNTIME=opencode`). When `REPO_HOST=gitlab`, `assertBackendConfig()` additionally requires `GITLAB_BASE_URL`, `GITLAB_TOKEN`, and `GITLAB_WEBHOOK_SECRET` to be set, and throws naming whichever are missing. `src/index.ts` calls `assertBackendConfig()` early in boot, before workdir bootstrap, so a misconfigured deployment fails fast instead of erroring deep inside agent-spawn or webhook handling.
+`resolveRepoHostKind()` and `resolveAgentRuntimeKind()` read and normalize (trim + lowercase) those variables. `assertBackendConfig()` validates the resolved values against the supported lists and throws an actionable error if either is unsupported -- it distinguishes a genuinely unknown value ("is invalid") from a value that is a real backend but not available yet ("is not available in this build yet"). When `AGENT_RUNTIME=opencode`, it additionally requires an `ARCHIE_OPENCODE_MODEL_*` route to be set. When `REPO_HOST=gitlab`, `assertBackendConfig()` additionally requires `GITLAB_BASE_URL`, `GITLAB_TOKEN`, and `GITLAB_WEBHOOK_SECRET` to be set, and throws naming whichever are missing. `src/index.ts` calls `assertBackendConfig()` early in boot, before workdir bootstrap, so a misconfigured deployment fails fast instead of erroring deep inside agent-spawn or webhook handling.
 
 `getBackendMatrix()` returns `{ repoHost, runtime }` for the resolved kinds. It backs both the boot-time log line (`Backends: repoHost=github runtime=claude`, or `repoHost=gitlab` when selected) and the `backends` field on the `GET /health` response, so the active configuration is observable at runtime without reading environment variables directly. When `REPO_HOST=gitlab`, boot also calls `getGitLabHost().probeCapabilities()`, which hits `GET /license` and raises `securityAlerts` to `true` only on an Ultimate-licensed instance (see "Capability descriptors" below); the result is logged (`GitLab: license plan=... → securityAlerts=...`).
 
 Three factory functions hand callers a concrete, port-typed backend:
 
 - `getRepoHost(): RepoHost | null` -- returns the `GitHubClient` singleton (via `getGitHubClient()`) when `REPO_HOST=github`, or the `GitLabHost` singleton (via `getGitLabHost()`) when `REPO_HOST=gitlab`. GitHub returns `null` when its App environment is not configured (mirroring pre-Phase-0 behavior; callers already handle a null host by disabling PR tools). Unsupported hosts return `null` defensively and log a warning, but in practice `assertBackendConfig()` has already rejected them at boot.
-- `getAgentRuntime(): AgentRuntime` -- returns the `claudeSdkRuntime` singleton for `AGENT_RUNTIME=claude`.
-- `getLlmOneShot(): LlmOneShot` -- returns the `claudeLlmOneShot` singleton. There is still only one LLM provider, so this is unconditional today; it is tied to the runtime selection conceptually even though it does not yet switch on `AGENT_RUNTIME` (Phase 2).
+- `getAgentRuntime(): AgentRuntime` -- returns the `claudeSdkRuntime` singleton for `AGENT_RUNTIME=claude`, or the `opencodeRuntime` singleton for `AGENT_RUNTIME=opencode`. Unsupported runtimes default to claude defensively and log a warning (already rejected at boot by `assertBackendConfig()`).
+- `getLlmOneShot(): LlmOneShot` -- switches on the runtime: `claudeLlmOneShot` for `claude`, `opencodeLlmOneShot` for `opencode` (a tiny utility serve outside the per-agent pool — see `docs/architecture/opencode-runtime.md`).
 
 Call sites that previously imported `getGitHubClient()` or `createGitHubClient()` directly (`src/agents/tools.ts`, `src/connectors/github/merge.ts`) now go through `getRepoHost()` instead, and the four one-shot LLM call sites (title generation, memory extractor, memory housekeeping, triage) go through `getLlmOneShot()`.
 

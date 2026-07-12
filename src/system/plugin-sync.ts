@@ -13,6 +13,7 @@
 
 import { refreshPlugins } from './workdir.js';
 import { initRegistry } from '../agents/registry.js';
+import { getAgentRuntime } from './backends.js';
 
 /**
  * Pick up plugin repo changes for the current request.
@@ -38,4 +39,17 @@ export async function syncPlugins(): Promise<void> {
   // Rebuild the cached registry so getAllAgentDefs()/getAgentDefByGithubRepo()
   // and other lookups reflect the freshly-scanned plugins.
   initRegistry();
+
+  // Let the active runtime refresh any process-global state it derived from the
+  // agent set at boot — done HERE, after initRegistry(), because staging reads
+  // getAllAgentDefs() and must see the new plugins (refreshPlugins() alone only
+  // re-scans plugin definitions; the registry rebuild is this initRegistry()).
+  // Routed through the AgentRuntime port (mirrors the shutdown?() precedent) so
+  // this module imports zero runtime/opencode code: for AGENT_RUNTIME=opencode
+  // the runtime re-stages the embedded server's skills dir; the claude runtime
+  // omits the method, so `?.()` is a no-op and no opencode code is touched.
+  // Best-effort by contract — the runtime hook never throws. Reached only when
+  // `changed` (the ls-remote no-op path returned early above), so an unchanged
+  // repo never re-stages.
+  await getAgentRuntime().onPluginsRefreshed?.();
 }

@@ -44,7 +44,7 @@ import { initEventPersistence } from './tasks/persistence.js';
 import { initReminderScheduler } from './system/reminder-scheduler.js';
 import { initTriggerScheduler } from './system/trigger-scheduler.js';
 import { initMemory } from './memory/index.js';
-import { assertBackendConfig, getBackendMatrix, resolveRepoHostKind, getGitLabHost } from './system/backends.js';
+import { assertBackendConfig, getBackendMatrix, resolveRepoHostKind, getGitLabHost, getAgentRuntime } from './system/backends.js';
 
 /**
  * Application configuration
@@ -300,6 +300,15 @@ async function main(): Promise<void> {
         }
       }
       server.close();
+      // Release runtime-held resources via the AgentRuntime seam, so index.ts
+      // stays runtime-agnostic. The opencode runtime tears down its embedded
+      // serve child + bridge (no-op if never booted); the Claude runtime has no
+      // shutdown hook (optional method → undefined).
+      try {
+        await getAgentRuntime().shutdown?.();
+      } catch (err) {
+        logger.error('index', 'Error during runtime shutdown', err);
+      }
       logger.plain('Server closed');
       process.exit(0);
     };
