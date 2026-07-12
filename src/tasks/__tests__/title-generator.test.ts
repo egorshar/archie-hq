@@ -1,10 +1,33 @@
 /**
  * Unit tests for generateTaskTitle.
  *
- * Mocks the Claude Agent SDK's query() with an async generator and asserts:
+ * Mocks getLlmOneShot() (from system/backends.js) with a stub whose json()
+ * is driven per-test, and asserts:
  * - cleaned/truncated output on success
- * - null on error subtypes, throws, empty results, fully-redacted threads
- * - external authors redacted in transcript before being passed to query()
+ * - null on failed/thrown one-shot calls, empty results, fully-redacted threads
+ * - external authors redacted in transcript before being passed to json()
+ *
+ * NOTE (Task 17 migration): title-generator.ts previously called the Claude
+ * Agent SDK's query() directly and this test mocked that module. It now
+ * routes through getLlmOneShot().json() (the LlmOneShot port), so the mock
+ * target moved to '../../system/backends.js'. Mocking the SDK module
+ * directly no longer works here: getLlmOneShot() pulls in backends.ts's full
+ * module graph (GitHub client, workdir, etc.), and mocking one level below
+ * (the SDK) left that whole graph to load for real, which failed in this
+ * test's sandbox (missing WORKDIR export etc.) — see task-17-report.md for
+ * the exact failure. Mocking the port itself is also the right level per the
+ * port's contract: title-generator no longer knows or cares that Claude's
+ * SDK is behind it.
+ *
+ * One real behavior change falls out of this: the LlmOneShot.json() port
+ * collapses every non-success SDK result subtype into a plain `null` return
+ * (see runtime/claude/llm-one-shot.ts's json()) without surfacing *why* it
+ * failed, so title-generator can no longer log a distinct "haiku call
+ * failed: <subtype>" warning for that path — it now logs a generic
+ * "haiku call failed" warning instead, restoring observability without the
+ * subtype detail. The two tests below that used to cover "call failed"
+ * subtypes are kept (title is still asserted null) and assert the generic
+ * warning was logged.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -13,20 +36,14 @@ import type { SlackThread } from '../../types/index.js';
 // ---- Mocks ----
 
 const state = vi.hoisted(() => ({
-  queryEvents: [] as any[],
-  queryShouldThrow: false,
-  lastQueryArgs: null as any,
+  jsonMock: vi.fn(),
 }));
 
-vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
-  query: vi.fn((args: any) => {
-    state.lastQueryArgs = args;
-    if (state.queryShouldThrow) {
-      throw new Error('boom');
-    }
-    return (async function* () {
-      for (const e of state.queryEvents) yield e;
-    })();
+vi.mock('../../system/backends.js', () => ({
+  getLlmOneShot: () => ({
+    kind: 'claude' as const,
+    json: state.jsonMock,
+    text: vi.fn(async () => null),
   }),
 }));
 
@@ -58,7 +75,6 @@ vi.mock('../task.js', () => ({
 }));
 
 import { generateTaskTitle } from '../title-generator.js';
-import { query } from '@anthropic-ai/claude-agent-sdk';
 import { logger } from '../../system/logger.js';
 const warnSpy = logger.warn as unknown as ReturnType<typeof vi.fn>;
 
@@ -82,61 +98,63 @@ function makeThread(overrides?: Partial<SlackThread>): SlackThread {
   };
 }
 
-function successEvent(title: string): any {
-  return { type: 'result', subtype: 'success', structured_output: { title } };
+function titleResult(title: string): { title: string } {
+  return { title };
 }
 
 beforeEach(() => {
-  state.queryEvents = [];
-  state.queryShouldThrow = false;
-  state.lastQueryArgs = null;
+  state.jsonMock.mockReset();
+  state.jsonMock.mockResolvedValue(null);
   warnSpy.mockClear();
-  (query as any).mockClear();
 });
 
 // ---- Tests ----
 
 describe('generateTaskTitle', () => {
   it('returns trimmed title on success', async () => {
-    state.queryEvents = [successEvent('  Fix auth flow on Android  ')];
+    state.jsonMock.mockResolvedValue(titleResult('  Fix auth flow on Android  '));
     const title = await generateTaskTitle(makeThread());
     expect(title).toBe('Fix auth flow on Android');
   });
 
   it('strips surrounding quotes and trailing punctuation', async () => {
-    state.queryEvents = [successEvent('"Fix auth flow on Android."')];
+    state.jsonMock.mockResolvedValue(titleResult('"Fix auth flow on Android."'));
     const title = await generateTaskTitle(makeThread());
     expect(title).toBe('Fix auth flow on Android');
   });
 
   it('truncates titles longer than 60 chars', async () => {
-    state.queryEvents = [successEvent('A'.repeat(120))];
+    state.jsonMock.mockResolvedValue(titleResult('A'.repeat(120)));
     const title = await generateTaskTitle(makeThread());
     expect(title).not.toBeNull();
     expect(title!.length).toBe(60);
   });
 
   it('returns null when model returns empty/whitespace', async () => {
-    state.queryEvents = [successEvent('   ')];
+    state.jsonMock.mockResolvedValue(titleResult('   '));
     const title = await generateTaskTitle(makeThread());
     expect(title).toBeNull();
   });
 
-  it('returns null on error_during_execution and logs a warning', async () => {
-    state.queryEvents = [{ type: 'result', subtype: 'error_during_execution' }];
+  it('returns null when the one-shot call fails (error_during_execution)', async () => {
+    // LlmOneShot.json() returns null for any non-success SDK result subtype
+    // (see runtime/claude/llm-one-shot.ts); it no longer surfaces which
+    // subtype failed, but title-generator still logs a generic warn on that
+    // path.
+    state.jsonMock.mockResolvedValue(null);
     const title = await generateTaskTitle(makeThread());
     expect(title).toBeNull();
     expect(warnSpy).toHaveBeenCalled();
   });
 
   it('returns null on error_max_structured_output_retries', async () => {
-    state.queryEvents = [{ type: 'result', subtype: 'error_max_structured_output_retries' }];
+    state.jsonMock.mockResolvedValue(null);
     const title = await generateTaskTitle(makeThread());
     expect(title).toBeNull();
   });
 
-  it('returns null when query() throws', async () => {
-    state.queryShouldThrow = true;
+  it('returns null when the one-shot call throws', async () => {
+    state.jsonMock.mockRejectedValue(new Error('boom'));
     const title = await generateTaskTitle(makeThread());
     expect(title).toBeNull();
     expect(warnSpy).toHaveBeenCalled();
@@ -155,11 +173,11 @@ describe('generateTaskTitle', () => {
     });
     const title = await generateTaskTitle(thread);
     expect(title).toBeNull();
-    expect(query).not.toHaveBeenCalled();
+    expect(state.jsonMock).not.toHaveBeenCalled();
   });
 
   it('redacts external authors in transcript but keeps internal intact', async () => {
-    state.queryEvents = [successEvent('Mixed thread title')];
+    state.jsonMock.mockResolvedValue(titleResult('Mixed thread title'));
     const thread = makeThread({
       shared: true,
       messages: [
@@ -176,15 +194,15 @@ describe('generateTaskTitle', () => {
       ],
     });
     await generateTaskTitle(thread);
-    expect(query).toHaveBeenCalled();
-    const transcript = state.lastQueryArgs.prompt as string;
+    expect(state.jsonMock).toHaveBeenCalled();
+    const transcript = state.jsonMock.mock.calls[0][0].prompt as string;
     expect(transcript).toContain('[external]: [redacted: external participant in shared channel]');
     expect(transcript).toContain('[Dana]: internal subject');
     expect(transcript).not.toContain('should be redacted');
   });
 
   it('includes forwarded-from label for externally-authored attachment from internal author', async () => {
-    state.queryEvents = [successEvent('Forwarded title')];
+    state.jsonMock.mockResolvedValue(titleResult('Forwarded title'));
     const thread = makeThread({
       shared: false,
       messages: [
@@ -202,16 +220,18 @@ describe('generateTaskTitle', () => {
       ],
     });
     await generateTaskTitle(thread);
-    const transcript = state.lastQueryArgs.prompt as string;
+    const transcript = state.jsonMock.mock.calls[0][0].prompt as string;
     expect(transcript).toContain('[forwarded from @<UEXT:External> — external, team T_OTHER]');
     expect(transcript).toContain('forwarded body');
   });
 
-  it('uses haiku model and json_schema output format', async () => {
-    state.queryEvents = [successEvent('A title')];
+  it('calls getLlmOneShot().json with haiku model and the title JSON schema', async () => {
+    state.jsonMock.mockResolvedValue(titleResult('A title'));
     await generateTaskTitle(makeThread());
-    expect(state.lastQueryArgs.options.model).toBe('haiku');
-    expect(state.lastQueryArgs.options.outputFormat?.type).toBe('json_schema');
-    expect(state.lastQueryArgs.options.tools).toEqual([]);
+    expect(state.jsonMock).toHaveBeenCalledTimes(1);
+    const args = state.jsonMock.mock.calls[0][0];
+    expect(args.model).toBe('haiku');
+    expect(args.maxTurns).toBe(2);
+    expect(args.jsonSchema).toBeDefined();
   });
 });

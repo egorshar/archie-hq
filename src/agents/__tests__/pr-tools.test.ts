@@ -605,6 +605,56 @@ describe('get_check_run', () => {
   });
 });
 
+describe('code scanning tools — capability gating', () => {
+  const makeHost = (securityAlerts: boolean) => ({
+    kind: 'github' as const,
+    capabilities: vi.fn().mockReturnValue({
+      reviewStates: true,
+      securityAlerts,
+      nativeAutoMerge: false,
+      reReviewRequest: true,
+    }),
+    listCodeScanningAlerts: vi.fn().mockResolvedValue([]),
+    getCodeScanningAlert: vi.fn().mockResolvedValue({}),
+  });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('list_code_scanning_alerts short-circuits when securityAlerts is off (no API call)', async () => {
+    const host = makeHost(false);
+    vi.mocked(getGitHubClient).mockReturnValue(host as any);
+
+    const tool = getRepoTool(makeAgent(), makeTask(), 'list_code_scanning_alerts');
+    const result = await tool({}, {});
+
+    expect(result.content[0].text).toMatch(/not available/i);
+    expect(host.listCodeScanningAlerts).not.toHaveBeenCalled();
+  });
+
+  it('get_code_scanning_alert short-circuits when securityAlerts is off (no API call)', async () => {
+    const host = makeHost(false);
+    vi.mocked(getGitHubClient).mockReturnValue(host as any);
+
+    const tool = getRepoTool(makeAgent(), makeTask(), 'get_code_scanning_alert');
+    const result = await tool({ alert_number: 1 }, {});
+
+    expect(result.content[0].text).toMatch(/not available/i);
+    expect(host.getCodeScanningAlert).not.toHaveBeenCalled();
+  });
+
+  it('list_code_scanning_alerts calls through when securityAlerts is on', async () => {
+    const host = makeHost(true);
+    vi.mocked(getGitHubClient).mockReturnValue(host as any);
+
+    const tool = getRepoTool(makeAgent(), makeTask(), 'list_code_scanning_alerts');
+    await tool({}, {});
+
+    expect(host.listCodeScanningAlerts).toHaveBeenCalledWith('org/backend', expect.any(Object));
+  });
+});
+
 describe('PM agent tools', () => {
   it('does not include any PR tools', () => {
     const agent = makeAgent({ isPm: true, repo: undefined, id: 'pm-agent' });
