@@ -24,30 +24,30 @@ afterEach(() => { for (const k of Object.keys(SAVED)) { if (SAVED[k] === undefin
 
 describe('buildChildSandboxProfile allowlist', () => {
   it('edit-mode repo agent: provider + git host + registries + declared MCP host + frontmatter domains', () => {
-    const p = buildChildSandboxProfile({ agent: agent(), task, cwd: '/clone', editAllowed: true, proxy: fakeProxy() });
+    const p = buildChildSandboxProfile({ agent: agent(), task, cwd: '/clone', editAllowed: true, maxMode: false, proxy: fakeProxy() });
     expect(p.allowlist).toEqual(expect.arrayContaining([
       'openrouter.ai', 'gitlab.walli.com', 'registry.npmjs.org', 'registry.yarnpkg.com', 'jira.example.com', 'plugin.example.com',
     ]));
   });
   it('read-only repo agent: NO package registries (parity with the Claude sandbox)', () => {
-    const p = buildChildSandboxProfile({ agent: agent(), task, cwd: '/clone', editAllowed: false, proxy: fakeProxy() });
+    const p = buildChildSandboxProfile({ agent: agent(), task, cwd: '/clone', editAllowed: false, maxMode: false, proxy: fakeProxy() });
     expect(p.allowlist).not.toContain('registry.npmjs.org');
     expect(p.allowlist).toContain('openrouter.ai');
   });
   it('only DECLARED MCP servers get their host (not the global union)', () => {
-    const p = buildChildSandboxProfile({ agent: agent({ def: { id: 'x', mcpServers: {} } }), task, cwd: '/synthetic', editAllowed: false, proxy: fakeProxy() });
+    const p = buildChildSandboxProfile({ agent: agent({ def: { id: 'x', mcpServers: {} } }), task, cwd: '/synthetic', editAllowed: false, maxMode: false, proxy: fakeProxy() });
     expect(p.allowlist).not.toContain('jira.example.com');
   });
   it('throws on an unresolvable provider (no silent default)', async () => {
     const { resolveAgentOpencodeModel } = await import('../model.js');
     (resolveAgentOpencodeModel as any).mockReturnValueOnce({ providerID: 'mystery', modelID: 'm' });
-    expect(() => buildChildSandboxProfile({ agent: agent(), task, cwd: '/clone', editAllowed: false, proxy: fakeProxy() })).toThrow(/PROVIDER_EGRESS_HOSTS/);
+    expect(() => buildChildSandboxProfile({ agent: agent(), task, cwd: '/clone', editAllowed: false, maxMode: false, proxy: fakeProxy() })).toThrow(/PROVIDER_EGRESS_HOSTS/);
   });
 });
 
 describe('buildChildSandboxProfile env pruning', () => {
   it('carries base vars + HOME/XDG + proxy + the route provider key, and DROPS orchestrator secrets', () => {
-    const p = buildChildSandboxProfile({ agent: agent(), task, cwd: '/clone', editAllowed: true, proxy: fakeProxy() });
+    const p = buildChildSandboxProfile({ agent: agent(), task, cwd: '/clone', editAllowed: true, maxMode: false, proxy: fakeProxy() });
     expect(p.env.OPENROUTER_API_KEY).toBe('sk-or');
     expect(p.env.HOME).toBe(agentHomeDir('t1', 'backend'));
     expect(p.env.XDG_DATA_HOME).toBe(agentHomeDir('t1', 'backend'));
@@ -69,7 +69,7 @@ describe('agentHomeDir placement (session-store must not sit inside the serve cw
 
 describe('mount derivation + one-shot', () => {
   it('derives ro/rw/deny binds from agent.sandbox and adds cwd/.opencode + home to rw', () => {
-    const p = buildChildSandboxProfile({ agent: agent(), task, cwd: '/clone', editAllowed: true, proxy: fakeProxy() });
+    const p = buildChildSandboxProfile({ agent: agent(), task, cwd: '/clone', editAllowed: true, maxMode: false, proxy: fakeProxy() });
     expect(p.roBinds).toContain('/ro');
     expect(p.rwBinds).toEqual(expect.arrayContaining(['/clone', '/clone/.opencode', agentHomeDir('t1', 'backend')]));
     expect(p.denyWriteRoBinds).toContain('/clone/.git/HEAD');
@@ -93,19 +93,19 @@ describe('mount derivation + one-shot', () => {
 describe('computeProfileSkeleton cwd writability (C1)', () => {
   it('RO repo agent: clone is ro-only, cwd is NOT in rwBinds (so the deny cannot shadow .opencode)', () => {
     const roAgent = agent({ sandbox: { cwd: '/clone', allowReadPaths: ['/clone'], allowWritePaths: [], denyWritePaths: ['/clone'] } });
-    const p = buildChildSandboxProfile({ agent: roAgent, task, cwd: '/clone', editAllowed: false, proxy: fakeProxy() });
+    const p = buildChildSandboxProfile({ agent: roAgent, task, cwd: '/clone', editAllowed: false, maxMode: false, proxy: fakeProxy() });
     expect(p.roBinds).toContain('/clone');
     expect(p.rwBinds).not.toContain('/clone');
     expect(p.rwBinds).toEqual(expect.arrayContaining(['/clone/.opencode', agentHomeDir('t1', 'backend')]));
     expect(p.denyWriteRoBinds).toContain('/clone');
   });
   it('edit-mode repo agent: cwd (clone) IS in rwBinds', () => {
-    const p = buildChildSandboxProfile({ agent: agent({ sandbox: { cwd: '/clone', allowReadPaths: [], allowWritePaths: [], denyWritePaths: ['/clone/.git/HEAD'] } }), task, cwd: '/clone', editAllowed: true, proxy: fakeProxy() });
+    const p = buildChildSandboxProfile({ agent: agent({ sandbox: { cwd: '/clone', allowReadPaths: [], allowWritePaths: [], denyWritePaths: ['/clone/.git/HEAD'] } }), task, cwd: '/clone', editAllowed: true, maxMode: false, proxy: fakeProxy() });
     expect(p.rwBinds).toContain('/clone');
   });
   it('synthetic-root agent (no repo): cwd IS added to rwBinds even though the sandbox lists never mention it', () => {
     const synthetic = agent({ def: { repo: undefined }, sandbox: { cwd: '/synthetic', allowReadPaths: [], allowWritePaths: [], denyWritePaths: [] } });
-    const p = buildChildSandboxProfile({ agent: synthetic, task, cwd: '/synthetic', editAllowed: false, proxy: fakeProxy() });
+    const p = buildChildSandboxProfile({ agent: synthetic, task, cwd: '/synthetic', editAllowed: false, maxMode: false, proxy: fakeProxy() });
     expect(p.rwBinds).toContain('/synthetic');
   });
 });
@@ -114,20 +114,20 @@ describe('repoHostEgressDomains normalization (I2)', () => {
   it('REPO_HOST unset defaults to github hosts (mirrors backends.ts resolveRepoHostKind)', () => {
     delete process.env.REPO_HOST;
     delete process.env.GITLAB_BASE_URL;
-    const p = buildChildSandboxProfile({ agent: agent(), task, cwd: '/clone', editAllowed: false, proxy: fakeProxy() });
+    const p = buildChildSandboxProfile({ agent: agent(), task, cwd: '/clone', editAllowed: false, maxMode: false, proxy: fakeProxy() });
     expect(p.allowlist).toEqual(expect.arrayContaining(['github.com', 'api.github.com', 'codeload.github.com']));
     expect(p.allowlist).not.toContain('gitlab.walli.com');
   });
   it('mixed-case "GitHub" still resolves to the github hosts (trim + lowercase)', () => {
     process.env.REPO_HOST = 'GitHub';
     delete process.env.GITLAB_BASE_URL;
-    const p = buildChildSandboxProfile({ agent: agent(), task, cwd: '/clone', editAllowed: false, proxy: fakeProxy() });
+    const p = buildChildSandboxProfile({ agent: agent(), task, cwd: '/clone', editAllowed: false, maxMode: false, proxy: fakeProxy() });
     expect(p.allowlist).toContain('github.com');
   });
   it('mixed-case "GitLab" + GITLAB_BASE_URL resolves to the gitlab base host', () => {
     process.env.REPO_HOST = 'GitLab';
     process.env.GITLAB_BASE_URL = 'https://gitlab.walli.com';
-    const p = buildChildSandboxProfile({ agent: agent(), task, cwd: '/clone', editAllowed: false, proxy: fakeProxy() });
+    const p = buildChildSandboxProfile({ agent: agent(), task, cwd: '/clone', editAllowed: false, maxMode: false, proxy: fakeProxy() });
     expect(p.allowlist).toContain('gitlab.walli.com');
     expect(p.allowlist).not.toContain('github.com');
   });

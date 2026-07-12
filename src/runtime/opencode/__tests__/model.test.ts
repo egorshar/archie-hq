@@ -3,7 +3,7 @@ import { resolveOpencodeModel, opencodeFooterModel, resolveAgentOpencodeModel, o
 import { modelDisplayLabel } from '../../../agents/model-label.js';
 import type { AgentDef } from '../../../types/agent.js';
 
-const ENV_KEYS = ['ARCHIE_OPENCODE_MODEL_HAIKU', 'ARCHIE_OPENCODE_MODEL_SONNET', 'ARCHIE_OPENCODE_MODEL_DEFAULT', 'ARCHIE_OPENCODE_MODEL_OPUS'];
+const ENV_KEYS = ['ARCHIE_OPENCODE_MODEL_HAIKU', 'ARCHIE_OPENCODE_MODEL_SONNET', 'ARCHIE_OPENCODE_MODEL_DEFAULT', 'ARCHIE_OPENCODE_MODEL_OPUS', 'ARCHIE_MAX_MODE_MODEL'];
 const saved: Record<string, string | undefined> = {};
 
 beforeEach(() => {
@@ -112,6 +112,34 @@ describe('resolveAgentOpencodeModel', () => {
   it('falls back to the DEFAULT tier when the agent tier is unset', () => {
     process.env.ARCHIE_OPENCODE_MODEL_DEFAULT = 'openrouter/z-ai/glm-5.2';
     expect(resolveAgentOpencodeModel(def({ isPm: false }))).toEqual({ providerID: 'openrouter', modelID: 'z-ai/glm-5.2' });
+  });
+});
+
+describe('resolveAgentOpencodeModel — max mode', () => {
+  const repo = def({ repo: { primary: 'org/x', repos: [{ github: 'org/x', baseBranch: 'main', autoMerge: false, postCheckout: false }] } as any });
+
+  it('routes a repo agent to ARCHIE_MAX_MODE_MODEL (provider/model passthrough) when maxMode is on', () => {
+    process.env.ARCHIE_OPENCODE_MODEL_SONNET = 'openrouter/z-ai/glm-5.1';
+    process.env.ARCHIE_MAX_MODE_MODEL = 'openrouter/z-ai/glm-5.2';
+    expect(resolveAgentOpencodeModel(repo, true)).toEqual({ providerID: 'openrouter', modelID: 'z-ai/glm-5.2' });
+  });
+
+  it('ignores ARCHIE_MAX_MODE_MODEL when maxMode is off (normal tier route)', () => {
+    process.env.ARCHIE_OPENCODE_MODEL_SONNET = 'openrouter/z-ai/glm-5.1';
+    process.env.ARCHIE_MAX_MODE_MODEL = 'openrouter/z-ai/glm-5.2';
+    expect(resolveAgentOpencodeModel(repo, false)).toEqual({ providerID: 'openrouter', modelID: 'z-ai/glm-5.1' });
+  });
+
+  it('does NOT swap the PM in max mode (ARCHIE_MAX_MODE_MODEL is repo/dynamic-only)', () => {
+    process.env.ARCHIE_OPENCODE_MODEL_OPUS = 'openrouter/z-ai/glm-opus';
+    process.env.ARCHIE_MAX_MODE_MODEL = 'openrouter/z-ai/glm-5.2';
+    expect(resolveAgentOpencodeModel(def({ isPm: true }), true)).toEqual({ providerID: 'openrouter', modelID: 'z-ai/glm-opus' });
+  });
+
+  it('a per-agent maxMode.model route wins over ARCHIE_MAX_MODE_MODEL', () => {
+    process.env.ARCHIE_MAX_MODE_MODEL = 'openrouter/z-ai/glm-5.2';
+    const withOverride = def({ repo: { primary: 'org/x', repos: [] } as any, maxMode: { model: 'anthropic/claude-fable-5' } as any });
+    expect(resolveAgentOpencodeModel(withOverride, true)).toEqual({ providerID: 'anthropic', modelID: 'claude-fable-5' });
   });
 });
 

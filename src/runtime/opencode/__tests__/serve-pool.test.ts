@@ -89,7 +89,7 @@ import {
 } from '../serve-pool.js';
 
 const agentOf = (id: string, model = 'opus') => ({ def: { id, model } }) as any;
-const taskOf = (taskId: string) => ({ taskId }) as any;
+const taskOf = (taskId: string) => ({ taskId, metadata: {} }) as any;
 
 let exitCallbacks: Array<() => void>;
 function fakeEmbedded(url = 'http://127.0.0.1:9999') {

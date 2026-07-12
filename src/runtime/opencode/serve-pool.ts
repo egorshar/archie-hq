@@ -187,8 +187,9 @@ export async function getAgentServe(agent: Agent, task: Task, spec: AgentServeSp
       // path) — subsumes the old cwd-only check (cwd is a fingerprint input,
       // so a clone re-create at a NEW path — RO→RW — still recycles) AND
       // additionally catches a mount/allowlist flip on the SAME cwd (e.g. an
-      // edit-mode grant mid-task), which the old cwd comparison couldn't see.
-      const desiredFp = agentProfileFingerprint(agent, task, desiredCwd, agent.editModeAtSpawn === true);
+      // edit-mode grant mid-task) or a max-mode model swap, which the old cwd
+      // comparison couldn't see.
+      const desiredFp = agentProfileFingerprint(agent, task, desiredCwd, agent.editModeAtSpawn === true, task.metadata.max_mode === true);
       if (handle.fingerprint !== desiredFp) {
         handle.markStale('mode-transition'); // cwd OR mount/allowlist drift (RO→RW, etc.)
       }
@@ -293,7 +294,13 @@ async function bootChild(
     // resolveAgentOpencodeModel falls back to ARCHIE_OPENCODE_MODEL_DEFAULT
     // internally; if neither resolves the boot fails (same as the old
     // shared-server 'default' resolution) and task recovery runs.
-    const model = resolveAgentOpencodeModel(agent.def);
+    // Max mode (a task-lifetime, monotonic grant) may swap repo/dynamic agents
+    // onto ARCHIE_MAX_MODE_MODEL; read it live from task metadata (set before
+    // the approval resumes the task, so it's current for the child being
+    // booted) and thread it through the route, the sandbox egress allowlist,
+    // and the recycle fingerprint so a mid-task grant recycles onto the model.
+    const maxMode = task.metadata.max_mode === true;
+    const model = resolveAgentOpencodeModel(agent.def, maxMode);
 
     // P3b: build the per-child OS-sandbox profile (bwrap mounts + egress
     // allowlist), mint this child's proxy credential, and wrap the spawn.
@@ -303,8 +310,8 @@ async function bootChild(
     // for the child being booted.
     proxy = await getEgressProxy();
     const editAllowed = agent.editModeAtSpawn === true;
-    profile = buildChildSandboxProfile({ agent, task, cwd, editAllowed, proxy });
-    const fingerprint = agentProfileFingerprint(agent, task, cwd, editAllowed);
+    profile = buildChildSandboxProfile({ agent, task, cwd, editAllowed, maxMode, proxy });
+    const fingerprint = agentProfileFingerprint(agent, task, cwd, editAllowed, maxMode);
     const { command, args } = await wrapServeCommand(profile);
 
     // Spawn, jailed (Linux: bwrap; darwin: unwrapped dev parity — see

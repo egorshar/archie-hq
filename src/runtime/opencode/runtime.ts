@@ -155,9 +155,10 @@ export class OpencodeRuntime implements AgentRuntime {
   }
 
   /** The agent's opencode route as a beautify-ready id, or null when unresolved.
-   * opencode model routing has no max-mode swap, so `maxMode` is ignored. */
-  footerModelToken(def: AgentDef, _maxMode: boolean): string | null {
-    return opencodeAgentRoute(def);
+   * Honours max mode so the footer reflects any ARCHIE_MAX_MODE_MODEL / per-agent
+   * maxMode.model swap (repo/dynamic agents), matching the child's actual route. */
+  footerModelToken(def: AgentDef, maxMode: boolean): string | null {
+    return opencodeAgentRoute(def, maxMode);
   }
 
   /** The server-global default route, or null when unresolved. */
