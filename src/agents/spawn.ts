@@ -49,6 +49,7 @@ import { emitEvent } from '../system/event-bus.js';
 import { getProbeBaseUrl } from '../system/context-probe.js';
 import { buildSandboxConfig, createFilesystemGuardHooks, TRUSTED_PACKAGE_REGISTRY_DOMAINS, type SandboxOptions } from './sandbox.js';
 import { applyOAuthBindings } from '../system/oauth/inject.js';
+import { claudeCredentialEnv } from '../system/claude-credential.js';
 import { enrichPromptWithMemory, isMemoryEnabled, isInjectionEnabled } from '../memory/index.js';
 
 // ---- Prompt generation (per agent kind) ----
@@ -622,7 +623,7 @@ Shared folder: ${sharedPath} [READ-ONLY]
     // resolving to a literal `~` directory instead of the real home.
     env: {
       NODE_ENV: process.env.NODE_ENV || 'development',
-      ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
+      ...claudeCredentialEnv(),
       // CA-trust config for the spawned CLI. The SDK REPLACES env (see note
       // above), so without forwarding these an operator-provided CA (e.g. a
       // TLS-intercepting egress proxy) never reaches the child and its

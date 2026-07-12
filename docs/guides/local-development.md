@@ -2,7 +2,7 @@
 
 ## Quick Start
 
-The only required env var is `ANTHROPIC_API_KEY`. Slack and GitHub App credentials are optional.
+At least one Claude credential is required (see Claude authentication below); Slack and GitHub App credentials are optional.
 
 ```bash
 # 1. Setup environment
@@ -30,6 +30,12 @@ npm run docker:dev
 # 6. Use the CLI to create and monitor tasks (separate terminal)
 npm run cli
 ```
+
+### Claude authentication
+
+Archie auto-detects a Claude credential in priority order: `ANTHROPIC_API_KEY`, then `CLAUDE_CODE_OAUTH_TOKEN`.
+
+To use a Claude subscription instead of an API key, run `claude setup-token` and set the printed token as `CLAUDE_CODE_OAUTH_TOKEN`.
 
 ## Prerequisites
 

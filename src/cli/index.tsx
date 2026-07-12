@@ -2,6 +2,8 @@
 import React from 'react';
 import { render } from 'ink';
 import { App } from './App.js';
+import { getBaseUrl } from './api.js';
+import { ensureCredential, ensureServer, type ServerHandle } from './preflight.js';
 
 // Simple arg parsing — future: add --url, --task flags
 const args = process.argv.slice(2);
@@ -29,13 +31,34 @@ Controls:
   process.exit(0);
 }
 
-// Use alternate screen buffer for clean fullscreen TUI
-process.stdout.write('\x1b[?1049h');
-process.stdout.write('\x1b[H');
+async function main(): Promise<void> {
+  // Preflight runs in the normal terminal (the token flow is interactive and
+  // opens a browser) BEFORE we switch to the alternate screen buffer.
+  let server: ServerHandle;
+  try {
+    await ensureCredential();
+    server = await ensureServer(getBaseUrl());
+  } catch (err) {
+    console.error(`\n${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
 
-const instance = render(<App />, { exitOnCtrlC: true });
+  const teardown = () => {
+    if (server.startedByUs) server.stop();
+  };
+  process.on('SIGINT', teardown);
+  process.on('SIGTERM', teardown);
 
-instance.waitUntilExit().then(() => {
+  // Use alternate screen buffer for clean fullscreen TUI
+  process.stdout.write('\x1b[?1049h');
+  process.stdout.write('\x1b[H');
+
+  const instance = render(<App />, { exitOnCtrlC: true });
+
+  await instance.waitUntilExit();
   // Restore original screen buffer on exit
   process.stdout.write('\x1b[?1049l');
-});
+  teardown();
+}
+
+main();
