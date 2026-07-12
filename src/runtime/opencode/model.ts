@@ -46,9 +46,16 @@ export function resolveOpencodeModel(model: string): OpencodeModelRef {
  * (which falls back to ARCHIE_OPENCODE_MODEL_DEFAULT). Throws only if neither the
  * tier nor DEFAULT is set — which cannot happen in a booted server, since
  * server.ts resolves the 'default' route for config.model at boot.
+ *
+ * When `maxMode` is true the alias comes from the max-mode resolution
+ * (`resolveAgentModel(def, true)`): a per-agent `maxMode.model` override, or —
+ * for repo/dynamic agents — `ARCHIE_MAX_MODE_MODEL`. Point `ARCHIE_MAX_MODE_MODEL`
+ * at an opencode `provider/model` route (e.g. `openrouter/z-ai/glm-5.2`) and
+ * `resolveOpencodeModel` passes it straight through; a bare Claude alias with no
+ * matching `ARCHIE_OPENCODE_MODEL_<TIER>` falls back to _DEFAULT.
  */
-export function resolveAgentOpencodeModel(def: AgentDef): OpencodeModelRef {
-  const alias = resolveAgentModel(def).replace(/\[1m\]$/i, '');
+export function resolveAgentOpencodeModel(def: AgentDef, maxMode = false): OpencodeModelRef {
+  const alias = resolveAgentModel(def, maxMode).replace(/\[1m\]$/i, '');
   return resolveOpencodeModel(alias);
 }
 
@@ -90,9 +97,9 @@ export function opencodeFooterModel(): string | null {
  * `anthropic/claude-`/`claude-`, matching opencodeFooterModel's trimming).
  * Returns null when unresolved (never throws — the footer is best-effort).
  */
-export function opencodeAgentRoute(def: AgentDef): string | null {
+export function opencodeAgentRoute(def: AgentDef, maxMode = false): string | null {
   try {
-    const m = resolveAgentOpencodeModel(def);
+    const m = resolveAgentOpencodeModel(def, maxMode);
     const route = `${m.providerID}/${m.modelID}`;
     const match = CLAUDE_ID_IN_ROUTE_RE.exec(route);
     return match ? match[0] : route;

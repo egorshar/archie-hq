@@ -235,9 +235,11 @@ function buildChildEnv(providerID: string, homeDir: string, proxy: { url: string
  * defines the security boundary, WITHOUT the proxy credential/env. Shared by
  * buildChildSandboxProfile (which adds the cred + env) and agentProfileFingerprint
  * (which just hashes it) so the two can never disagree on what a "change" is. */
-function computeProfileSkeleton(agent: Agent, task: Task, cwd: string, editAllowed: boolean): { cwd: string; homeDir: string; roBinds: string[]; rwBinds: string[]; denyWriteRoBinds: string[]; allowlist: string[]; providerID: string } {
+function computeProfileSkeleton(agent: Agent, task: Task, cwd: string, editAllowed: boolean, maxMode: boolean): { cwd: string; homeDir: string; roBinds: string[]; rwBinds: string[]; denyWriteRoBinds: string[]; allowlist: string[]; providerID: string } {
   const sb = agent.sandbox; // SandboxOptions, set by prepareAgentContext
-  const route = resolveAgentOpencodeModel(agent.def);
+  // maxMode may swap the route to ARCHIE_MAX_MODE_MODEL (repo/dynamic agents),
+  // so the egress allowlist below must be computed from the max-mode provider.
+  const route = resolveAgentOpencodeModel(agent.def, maxMode);
   const homeDir = agentHomeDir(task.taskId, agent.def.id);
   const allowlist = Array.from(new Set([
     ...providerHostsOrThrow(route.providerID),
@@ -271,9 +273,9 @@ function computeProfileSkeleton(agent: Agent, task: Task, cwd: string, editAllow
   };
 }
 
-export function buildChildSandboxProfile(args: { agent: Agent; task: Task; cwd: string; editAllowed: boolean; proxy: EgressProxyHandle }): ChildSandboxProfile {
-  const { agent, task, cwd, editAllowed, proxy } = args;
-  const s = computeProfileSkeleton(agent, task, cwd, editAllowed);
+export function buildChildSandboxProfile(args: { agent: Agent; task: Task; cwd: string; editAllowed: boolean; maxMode: boolean; proxy: EgressProxyHandle }): ChildSandboxProfile {
+  const { agent, task, cwd, editAllowed, maxMode, proxy } = args;
+  const s = computeProfileSkeleton(agent, task, cwd, editAllowed, maxMode);
   const cred = proxy.mintCredential({ taskId: task.taskId, agentId: agent.def.id }, s.allowlist);
   const proxyEnv = { url: proxy.url, noProxy: '127.0.0.1,localhost' };
   return {
@@ -292,14 +294,22 @@ export function buildChildSandboxProfile(args: { agent: Agent; task: Task; cwd: 
 /** Proxy-free fingerprint over the skeleton — same field shape profileFingerprint
  * hashes (cwd, home, sorted ro/rw/deny/allow), so a warm handle's stored
  * fingerprint (set from the built profile) and the desired one computed here
- * agree exactly. No credential minted. */
-export function agentProfileFingerprint(agent: Agent, task: Task, cwd: string, editAllowed: boolean): string {
-  const s = computeProfileSkeleton(agent, task, cwd, editAllowed);
-  return profileFingerprint({
+ * agree exactly. No credential minted.
+ *
+ * The sandbox skeleton only captures the model's PROVIDER (via allowlist hosts),
+ * so a same-provider max-mode model swap (e.g. glm-5.1 → glm-5.2) would not
+ * change the skeleton hash. Bind the fingerprint to the exact resolved route as
+ * well, so approving max mode mid-task always recycles the warm child onto the
+ * max model (editAllowed already recycles via the allowlist; this covers model). */
+export function agentProfileFingerprint(agent: Agent, task: Task, cwd: string, editAllowed: boolean, maxMode: boolean): string {
+  const s = computeProfileSkeleton(agent, task, cwd, editAllowed, maxMode);
+  const base = profileFingerprint({
     cwd: s.cwd, homeDir: s.homeDir, roBinds: s.roBinds, rwBinds: s.rwBinds,
     denyWriteRoBinds: s.denyWriteRoBinds, allowlist: s.allowlist,
     proxy: { url: '', noProxy: '' }, env: {}, cred: { username: '', password: '' },
   });
+  const route = resolveAgentOpencodeModel(agent.def, maxMode);
+  return `${base}:${route.providerID}/${route.modelID}`;
 }
 
 export function buildOneShotSandboxProfile(args: { root: string; homeDir: string; proxy: EgressProxyHandle }): ChildSandboxProfile {
