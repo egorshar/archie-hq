@@ -23,7 +23,7 @@ import { Task } from '../../tasks/task.js';
 import { AGENT_PROMPTS } from '../../agents/prompts.js';
 import { isAutoMergeRepo } from '../../agents/registry.js';
 import { getRepoHost } from '../../system/backends.js';
-import { isMergeReadyPerGithub } from './mergeability.js';
+import { isMergeReadyPerGithub } from '../github/mergeability.js';
 import { logger } from '../../system/logger.js';
 import type { PRStatus } from '../../agents/tools.js';
 import type { BranchState } from '../../types/task.js';

@@ -12,8 +12,8 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-vi.mock('../client.js', () => ({
-  createGitHubClient: vi.fn(),
+vi.mock('../../../system/backends.js', () => ({
+  getRepoHost: vi.fn(),
 }));
 
 vi.mock('../../../tasks/task.js', () => ({
@@ -35,8 +35,8 @@ vi.mock('../../../system/logger.js', () => ({
 }));
 
 import { checkAndMergeLinkedPRs } from '../merge.js';
-import { assignPrNumber } from '../branch-state.js';
-import { createGitHubClient } from '../client.js';
+import { assignPrNumber } from '../../github/branch-state.js';
+import { getRepoHost } from '../../../system/backends.js';
 import { Task } from '../../../tasks/task.js';
 import { appendAgentFinding } from '../../../tasks/persistence.js';
 import { isAutoMergeRepo } from '../../../agents/registry.js';
@@ -125,7 +125,7 @@ function readyNotifications(): unknown[][] {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  vi.mocked(createGitHubClient).mockReturnValue(mockGitHubClient as never);
+  vi.mocked(getRepoHost).mockReturnValue(mockGitHubClient as never);
   vi.mocked(isAutoMergeRepo).mockReturnValue(false);
 });
 

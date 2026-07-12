@@ -15,7 +15,7 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import { initPlugins } from './plugin-loader.js';
 import { logger } from './logger.js';
-import { githubRepoToUrl } from '../connectors/github/repo-clone.js';
+import { repoCloneUrl } from '../connectors/shared/repo-url.js';
 
 const execAsync = promisify(exec);
 
@@ -129,7 +129,7 @@ export async function cloneRepos(
 ): Promise<void> {
   for (const { github, baseBranch } of repos) {
     const repoPath = getBaseCachePath(github);
-    const repoUrl = githubRepoToUrl(github);
+    const repoUrl = repoCloneUrl(github);
     await cloneOrFetch(repoUrl, repoPath, github, baseBranch);
   }
 }

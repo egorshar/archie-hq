@@ -17,6 +17,7 @@ import { SESSIONS_DIR } from '../system/workdir.js';
 import { emitEvent, onEvent } from '../system/event-bus.js';
 import { logger } from '../system/logger.js';
 import { formatSlackChannelRef, formatSlackChannelDisplay } from '../connectors/slack/client.js';
+import { repoEventPrefix } from '../connectors/shared/repo-url.js';
 
 /**
  * Generate a unique task ID with human-readable date format
@@ -479,7 +480,7 @@ export async function appendGitHubEvent(
   githubRepo: string,
   event: { from: string; destination: string; message: string }
 ): Promise<void> {
-  const destination = `github:${githubRepo}/${event.destination}`;
+  const destination = `${repoEventPrefix()}:${githubRepo}/${event.destination}`;
   const entry: LogEntry = {
     timestamp: new Date().toISOString(),
     source: `@<${event.from}> in ${destination}`,

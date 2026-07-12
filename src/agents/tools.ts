@@ -19,6 +19,7 @@ import type { Agent } from './agent.js';
 import { getVisiblePeerIdsForSender, findAgentDefsContainingRepo, synthesizeDynamicAgentDef, isAutoMergeRepo } from './registry.js';
 import { getRepoHost } from '../system/backends.js';
 import { parseCheckRef } from '../connectors/github/client.js';
+import { parseGitLabCheckRef } from '../connectors/gitlab/status-map.js';
 import { gitExec } from '../connectors/github/repo-clone.js';
 import { hydrateBranchState, findBranchStateByPR, assignPrNumber } from '../connectors/github/branch-state.js';
 import { taskBranchName } from '../connectors/github/branch-naming.js';
@@ -1034,7 +1035,7 @@ function createPushBranchTool(agent: Agent, task: Task) {
         task.debouncedSave();
 
         const message = `${force ? 'Force-pushed' : 'Pushed'} ${branch} to origin (${resolved.github})`;
-        logger.system(`GitHub: ${message}`);
+        logger.system(`Repo: ${message}`);
         return ok(`Successfully pushed: ${message}`);
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Unknown error';
@@ -1173,11 +1174,17 @@ function createGetCheckRunTool(agent: Agent, task: Task) {
       const client = getRepoHost();
       if (!client) throw new Error('GitHub client not configured');
 
-      let parsed;
-      try {
-        parsed = parseCheckRef(args.ref);
-      } catch (e) {
-        return err(e instanceof Error ? e.message : String(e));
+      let parsed: { kind: 'check_run' | 'workflow_run'; id: number; owner?: string; repo?: string };
+      if (client.kind === 'gitlab') {
+        const gl = parseGitLabCheckRef(args.ref);
+        if (!gl) return err(`Could not parse a GitLab job/pipeline reference from "${args.ref}".`);
+        parsed = { kind: gl.kind === 'pipeline' ? 'workflow_run' : 'check_run', id: gl.id };
+      } else {
+        try {
+          parsed = parseCheckRef(args.ref);
+        } catch (e) {
+          return err(e instanceof Error ? e.message : String(e));
+        }
       }
 
       // Stay within this agent's repo: a URL pointing elsewhere is out of scope.
