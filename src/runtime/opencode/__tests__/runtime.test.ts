@@ -4,27 +4,36 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 // `vi.fn()` referenced inside one throws "Cannot access before initialization"
 // under this vitest version, so the mock fns are created inside vi.hoisted
 // (same pattern as llm-one-shot.test.ts).
-const { getOpencodeClient, closeOpencodeBridge, registrySet, registryDelete, registryGet } = vi.hoisted(() => ({
-  getOpencodeClient: vi.fn(),
-  closeOpencodeBridge: vi.fn(async () => {}),
-  registrySet: vi.fn(),
-  registryDelete: vi.fn(),
-  registryGet: vi.fn(),
+const { getAgentServe, scheduleIdleReap, disarmSpy, closeServePool, markAllServesStale, evictTaskMock, registrySet, registryDelete, registryGet, closeBridge } = vi.hoisted(() => {
+  const disarmSpy = vi.fn();
+  return {
+    getAgentServe: vi.fn(),
+    scheduleIdleReap: vi.fn(() => disarmSpy),
+    disarmSpy,
+    closeServePool: vi.fn(async () => {}),
+    markAllServesStale: vi.fn(),
+    evictTaskMock: vi.fn(async () => {}),
+    registrySet: vi.fn(),
+    registryDelete: vi.fn(),
+    registryGet: vi.fn(),
+    closeBridge: vi.fn(async () => {}),
+  };
+});
+vi.mock('../serve-pool.js', () => ({
+  getAgentServe,
+  scheduleIdleReap,
+  closeServePool,
+  markAllServesStale,
+  evictTask: evictTaskMock,
 }));
 vi.mock('../server.js', () => ({
-  getOpencodeClient,
-  closeOpencodeBridge,
-  concatPromptText: (res: any) => {
-    const parts = res?.data?.parts ?? [];
-    const t = parts.filter((p: any) => p?.type === 'text').map((p: any) => p.text).join('');
-    return t || null;
-  },
+  closeBridge,
   sharedRegistry: { set: registrySet, delete: registryDelete, get: registryGet },
 }));
-// '../model.js' is NOT mocked here — this test drives the real
-// resolveAgentOpencodeModel/resolveOpencodeModel resolution (via
-// ARCHIE_OPENCODE_MODEL_OPUS, set in beforeEach below) so body.model reflects
-// actual per-agent routing rather than a stand-in.
+const { closeOneShotServe } = vi.hoisted(() => ({ closeOneShotServe: vi.fn(async () => {}) }));
+vi.mock('../llm-one-shot.js', () => ({ closeOneShotServe }));
+const { closeEgressProxy } = vi.hoisted(() => ({ closeEgressProxy: vi.fn(async () => {}) }));
+vi.mock('../egress-proxy.js', () => ({ closeEgressProxy }));
 const { prepareAgentContext } = vi.hoisted(() => ({ prepareAgentContext: vi.fn() }));
 vi.mock('../../../agents/spawn.js', () => ({ prepareAgentContext }));
 
@@ -55,9 +64,7 @@ describe('OpencodeRuntime.spawn', () => {
   let promptAsync: ReturnType<typeof vi.fn>;
   let create: ReturnType<typeof vi.fn>;
   let abort: ReturnType<typeof vi.fn>;
-  const SAVED_OPUS = { v: undefined as string | undefined };
-  beforeEach(() => { SAVED_OPUS.v = process.env.ARCHIE_OPENCODE_MODEL_OPUS; process.env.ARCHIE_OPENCODE_MODEL_OPUS = 'openrouter/z-ai/glm-5.2'; });
-  afterEach(() => { if (SAVED_OPUS.v === undefined) delete process.env.ARCHIE_OPENCODE_MODEL_OPUS; else process.env.ARCHIE_OPENCODE_MODEL_OPUS = SAVED_OPUS.v; });
+  let serveHandle: any;
   beforeEach(() => {
     create = vi.fn(async () => ({ data: { id: 'sess-1' } }));
     // promptAsync returns 204 immediately; the real server then emits
@@ -68,7 +75,15 @@ describe('OpencodeRuntime.spawn', () => {
       return { data: {} };
     });
     abort = vi.fn(async () => ({ data: {} }));
-    getOpencodeClient.mockResolvedValue({ session: { create, promptAsync, abort } });
+    serveHandle = {
+      client: { session: { create, promptAsync, abort } },
+      url: 'http://127.0.0.1:1', token: 'tok-1', cwd: '/serve/cwd',
+      markStale: vi.fn(), isStale: () => false, isClosed: () => false, close: vi.fn(async () => {}),
+    };
+    getAgentServe.mockReset();
+    getAgentServe.mockResolvedValue(serveHandle);
+    scheduleIdleReap.mockClear();
+    disarmSpy.mockClear();
     registrySet.mockReset();
     registryDelete.mockReset();
     prepareAgentContext.mockReset();
@@ -78,7 +93,7 @@ describe('OpencodeRuntime.spawn', () => {
     });
   });
 
-  it('fires promptAsync WITH the agent-routed body.model + the system prompt, completes on idle, sets a live handle', async () => {
+  it('fires promptAsync WITHOUT body.model (config.model owns per-agent routing) and completes on idle', async () => {
     const agent = makeAgent();
     const task = makeTask();
     await new OpencodeRuntime().spawn(agent as any, task as any);
@@ -93,9 +108,9 @@ describe('OpencodeRuntime.spawn', () => {
     expect(create).toHaveBeenCalledTimes(1);
     expect(promptAsync).toHaveBeenCalledTimes(1);
     const body = promptAsync.mock.calls[0][0].body;
-    // Model is routed PER TURN from the agent's tier (def.model 'opus' → OPUS route).
-    expect(body.model).toEqual({ providerID: 'openrouter', modelID: 'z-ai/glm-5.2' });
+    expect(body.model).toBeUndefined();
     expect(body.system).toBe('SYS');
+    expect(getAgentServe).toHaveBeenCalledWith(agent, task, {});
     expect(body.parts[0].text).toContain('investigate the login bug');
     expect(task.updateAgentState).toHaveBeenCalledWith('pm', true, 'sess-1');
     expect(task.updateAgentState).toHaveBeenCalledWith('pm', false);
@@ -118,10 +133,104 @@ describe('OpencodeRuntime.spawn', () => {
     expect(task.updateAgentState).toHaveBeenCalledWith('pm', false);
   });
 
-  it('shutdown() tears down the embedded server + bridge via closeOpencodeBridge', async () => {
-    closeOpencodeBridge.mockClear();
+  it('shutdown() closes pool → bridge → egress proxy → one-shot serve, in that order', async () => {
+    const order: string[] = [];
+    closeServePool.mockImplementation(async () => { order.push('pool'); });
+    closeBridge.mockImplementation(async () => { order.push('bridge'); });
+    closeEgressProxy.mockImplementation(async () => { order.push('egress'); });
+    closeOneShotServe.mockImplementation(async () => { order.push('one-shot'); });
     await new OpencodeRuntime().shutdown();
-    expect(closeOpencodeBridge).toHaveBeenCalledTimes(1);
+    expect(order).toEqual(['pool', 'bridge', 'egress', 'one-shot']);
+  });
+
+  it('onPluginsRefreshed marks every live child stale (recycled at next turn boundary)', async () => {
+    await new OpencodeRuntime().onPluginsRefreshed();
+    expect(markAllServesStale).toHaveBeenCalledWith('plugins');
+  });
+
+  it('onTaskTeardown evicts the task from the serve pool (close children + rm synthetic roots)', async () => {
+    await new OpencodeRuntime().onTaskTeardown('t1');
+    expect(evictTaskMock).toHaveBeenCalledWith('t1');
+  });
+
+  it('onTaskTeardown is best-effort: an evictTask failure never throws', async () => {
+    evictTaskMock.mockRejectedValueOnce(new Error('EBUSY'));
+    await expect(new OpencodeRuntime().onTaskTeardown('t1')).resolves.toBeUndefined();
+  });
+
+  it('arms the idle reap while parked and disarms when a message lands', async () => {
+    const agent = makeAgent();
+    const task = makeTask();
+    await new OpencodeRuntime().spawn(agent as any, task as any);
+    await tick();
+    expect(scheduleIdleReap).toHaveBeenCalledTimes(1); // armed for the first park
+    agent.queue.addMessage('go');
+    await tick();
+    expect(disarmSpy).toHaveBeenCalled();              // disarmed before the turn ran
+    expect(scheduleIdleReap).toHaveBeenCalledTimes(2); // re-armed for the next park
+  });
+
+  it('session continuity across a child recycle (S1=RESUME): same sessionId, no second session.create', async () => {
+    const agent = makeAgent();
+    const task = makeTask();
+    await new OpencodeRuntime().spawn(agent as any, task as any);
+    agent.queue.addMessage('turn 1');
+    await tick();
+    expect(create).toHaveBeenCalledTimes(1);
+
+    // The pool recycled the child between turns (stale) — a NEW client comes back.
+    const promptAsync2 = vi.fn(async (req: any) => {
+      queueMicrotask(() => turnCompletion.completeTurn(req.path.id));
+      return { data: {} };
+    });
+    getAgentServe.mockResolvedValue({ ...serveHandle, client: { session: { create, promptAsync: promptAsync2, abort } } });
+    agent.queue.addMessage('turn 2');
+    await tick();
+
+    expect(create).toHaveBeenCalledTimes(1); // resumed, not re-created
+    expect(promptAsync2).toHaveBeenCalledWith(expect.objectContaining({ path: { id: 'sess-1' } }));
+  });
+
+  it('passes the primary clone path as the serve spec for a repo agent', async () => {
+    prepareAgentContext.mockImplementation(async (agent: any) => {
+      agent.sandbox = { cwd: '/w' };
+      return {
+        systemPrompt: 'SYS', cwd: '/w', additionalDirectories: [], sandboxOpts: { cwd: '/w' },
+        repo: { editAllowed: true, repoMounts: [{ github: 'org/x', clonePath: '/clones/x' }], allClonePaths: ['/clones/x'] },
+      };
+    });
+    const agent = makeAgent();
+    (agent as any).def = { id: 'backend', repo: { primary: 'org/x', repos: [{ github: 'org/x' }] } };
+    const task = makeTask();
+    await new OpencodeRuntime().spawn(agent as any, task as any);
+    agent.queue.addMessage('go');
+    await tick();
+    expect(getAgentServe).toHaveBeenCalledWith(agent, task, { clonePath: '/clones/x' });
+  });
+
+  it('closes this agent\'s serve child at wind-down after a turn ran', async () => {
+    const agent = makeAgent();
+    const task = makeTask();
+    await new OpencodeRuntime().spawn(agent as any, task as any);
+    agent.queue.addMessage('go');
+    await tick();
+
+    agent.queue.stop();
+    await agent.handle.running;
+
+    expect(serveHandle.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('never boots a child, so never closes one, when the loop exits before any message arrives', async () => {
+    const agent = makeAgent();
+    const task = makeTask();
+    await new OpencodeRuntime().spawn(agent as any, task as any);
+
+    agent.queue.stop();
+    await agent.handle.running;
+
+    expect(getAgentServe).not.toHaveBeenCalled();
+    expect(serveHandle.close).not.toHaveBeenCalled();
   });
 
   it('registers the created session in the bridge registry as {task, agent}', async () => {
@@ -186,16 +295,21 @@ describe('OpencodeRuntime.spawn', () => {
   it('degrades gracefully when the embedded server fails to start', async () => {
     const agent = makeAgent();
     const task = makeTask();
-    // Embedded-server startup failure (e.g. `spawn opencode ENOENT`) must fail
-    // only this agent — spawn() must not reject, handle.running must resolve (not
+    // Serve-child boot failure (e.g. `spawn opencode ENOENT`) must fail only
+    // this agent — spawn() must not reject, handle.running must resolve (not
     // reject), and the agent must end inactive — so recovery re-spawn can't
-    // surface an unhandled rejection that crashes the process.
-    getOpencodeClient.mockRejectedValueOnce(new Error('spawn opencode ENOENT'));
+    // surface an unhandled rejection that crashes the process. The boot is now
+    // per-turn, so a message must arrive to trigger it.
+    getAgentServe.mockRejectedValueOnce(new Error('spawn opencode ENOENT'));
 
     await expect(new OpencodeRuntime().spawn(agent as any, task as any)).resolves.toBeUndefined();
     expect(agent.handle).toBeTruthy();
+    agent.queue.addMessage('go');
+    await tick();
+
     await expect(agent.handle.running).resolves.toBeUndefined();
     expect(agent.handle.isRunning).toBe(false);
+    expect(task.updateAgentState).toHaveBeenCalledWith('pm', false);
     // Never registered (no session was ever created), so nothing to evict either.
     expect(registrySet).not.toHaveBeenCalled();
     expect(registryDelete).not.toHaveBeenCalled();

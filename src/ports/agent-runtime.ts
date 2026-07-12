@@ -47,13 +47,24 @@ export interface AgentRuntime {
    * runtime refresh any process-global state it derived from the agent set at
    * boot. Optional and invoked as `getAgentRuntime().onPluginsRefreshed?.()`
    * (same precedent as `shutdown?()`): the Claude runtime re-links skills per
-   * spawn, so it omits this; the opencode runtime re-stages the shared embedded
-   * server's `.opencode/skills` dir, which is otherwise staged only once at boot
-   * and would keep serving stale skill contents after a plugins push. Routing
+   * spawn, so it omits this; the opencode runtime marks every live per-agent
+   * serve child stale so each recycles — with freshly staged skills — at its
+   * next turn boundary (children that boot after the push stage fresh by
+   * construction), instead of leaving them serving stale skills. Routing
    * this through the port keeps the plugins-refresh path runtime-agnostic — it
    * imports zero `runtime/opencode` modules, so the claude path never touches
    * opencode code on refresh. Best-effort: implementations must not throw
    * (a failure must never break the plugins refresh).
    */
   onPluginsRefreshed?(): Promise<void>;
+  /**
+   * Called when a task is torn down (stop/complete), after its agents' queues
+   * are stopped. Lets a runtime release per-task process state — the opencode
+   * runtime closes the task's per-agent serve children and removes their
+   * synthetic serve roots (P3a evictTask); the Claude runtime holds no
+   * per-task process state, so it omits this. Optional and invoked as
+   * `getAgentRuntime().onTaskTeardown?.(taskId)` (same precedent as
+   * `shutdown?()`); implementations must be best-effort and never throw.
+   */
+  onTaskTeardown?(taskId: string): Promise<void>;
 }

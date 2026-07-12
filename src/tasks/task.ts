@@ -997,6 +997,15 @@ export class Task {
       if (midTurn) a.handle?.abort();
     }
 
+    // Let the runtime release per-task process state (opencode: close this
+    // task's serve children + rm synthetic serve roots). Best-effort — a hook
+    // failure must never block teardown.
+    try {
+      await getAgentRuntime().onTaskTeardown?.(this.taskId);
+    } catch (err) {
+      logger.warn('task', `runtime task-teardown hook failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
     // Clean up clones to free disk space (only when not in edit mode)
     if (this.metadata.edit_allowed !== true) {
       await this.cleanupClones();
@@ -1040,6 +1049,15 @@ export class Task {
       const midTurn = a.session.active;
       a.queue.stop();
       if (midTurn) a.handle?.abort();
+    }
+
+    // Let the runtime release per-task process state (opencode: close this
+    // task's serve children + rm synthetic serve roots). Best-effort — a hook
+    // failure must never block teardown.
+    try {
+      await getAgentRuntime().onTaskTeardown?.(this.taskId);
+    } catch (err) {
+      logger.warn('task', `runtime task-teardown hook failed: ${err instanceof Error ? err.message : String(err)}`);
     }
 
     // Clean up clones to free disk space (only when not in edit mode).

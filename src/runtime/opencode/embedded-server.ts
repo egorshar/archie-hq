@@ -37,21 +37,61 @@ export async function prepareServeRoot(root: string): Promise<void> {
 /** The connected client type — from the SDK's client factory. */
 export type OpencodeClient = ReturnType<typeof createOpencodeClient>;
 
+/**
+ * Permission recipe every Archie-managed serve child boots with: allow
+ * reads/edit/bash/webfetch/external-directory so a turn never hangs on an
+ * opencode permission ask. RO enforcement (denying edit/bash while read-only)
+ * is handled by the bridge plugin guard + /tool rejection, NOT here.
+ */
+export const SERVE_PERMISSION = {
+  edit: 'allow',
+  bash: 'allow',
+  webfetch: 'allow',
+  external_directory: 'allow',
+} as const;
+
+/** The `opencode serve` invocation tail, shared by the default spawn and the
+ * P3b bwrap-wrapped spawn (child-sandbox wrapServeCommand appends these after
+ * the bwrap flags). Port 0 → an ephemeral free port. */
+export const SERVE_ARGS = ['serve', '--hostname=127.0.0.1', '--port=0'] as const;
+
 export interface EmbeddedServer {
   client: OpencodeClient;
+  /** The child's listening base url (also baked into `client`). */
+  url: string;
   /** Terminate the serve child. Idempotent / best-effort. */
   close: () => void;
+  /**
+   * Subscribe to the serve child's exit AFTER a successful start — the pool's
+   * eager dead-handle eviction hook (P3a A5). Never fires for a boot failure
+   * (those reject startEmbeddedServer instead).
+   */
+  onExit: (cb: () => void) => void;
 }
 
 export async function startEmbeddedServer(opts: {
   cwd: string;
   config: Record<string, unknown>;
   timeoutMs?: number;
+  /** P3b: the bwrap-wrapped invocation (`{command:'bwrap', args:[...flags, 'opencode', ...SERVE_ARGS]}`)
+   * in place of the default bare `opencode serve`. Omitted on darwin (no OS
+   * sandbox there) and by callers with no sandbox profile. */
+  spawnOverride?: { command: string; args: string[] };
+  /** P3b: the pruned per-child env (child-sandbox.ts buildChildEnv) — used
+   * VERBATIM, never spread with process.env (see below). Omitted falls back
+   * to the inherited env (macOS pre-P3b / callers without a profile). */
+  env?: Record<string, string>;
 }): Promise<EmbeddedServer> {
   const timeoutMs = opts.timeoutMs ?? 15000;
-  const proc = spawn('opencode', ['serve', '--hostname=127.0.0.1', '--port=0'], {
+  const { command, args } = opts.spawnOverride ?? { command: 'opencode', args: [...SERVE_ARGS] };
+  // When a pruned env is provided (P3b), use it VERBATIM — do NOT spread
+  // process.env, that would re-leak the orchestrator secrets the sandbox's
+  // env-pruning (Task 4) deliberately drops. Otherwise fall back to the
+  // inherited env (macOS pre-P3b / callers without a profile).
+  const baseEnv = opts.env ?? process.env;
+  const proc = spawn(command, args, {
     cwd: opts.cwd,
-    env: { ...process.env, OPENCODE_CONFIG_CONTENT: JSON.stringify(opts.config) },
+    env: { ...baseEnv, OPENCODE_CONFIG_CONTENT: JSON.stringify(opts.config) },
   });
 
   const url = await new Promise<string>((resolve, reject) => {
@@ -93,6 +133,8 @@ export async function startEmbeddedServer(opts: {
 
   return {
     client: createOpencodeClient({ baseUrl: url }),
+    url,
     close: () => { try { proc.kill(); } catch { /* already gone */ } },
+    onExit: (cb) => { proc.once('exit', () => cb()); },
   };
 }

@@ -73,7 +73,7 @@ describe('agent frontmatter repo parsing — autoMerge', () => {
     ].join('\n'));
 
     const repo = loadSingleAgentRepos();
-    expect(repo.repos).toEqual([{ github: 'org/backend', baseBranch: 'main', autoMerge: true }]);
+    expect(repo.repos).toEqual([{ github: 'org/backend', baseBranch: 'main', autoMerge: true, postCheckout: false }]);
   });
 
   it('defaults autoMerge to false when absent', () => {
@@ -134,7 +134,7 @@ describe('agent frontmatter repo parsing — autoMerge', () => {
 
     const repo = loadSingleAgentRepos();
     expect(repo.primary).toBe('org/backend');
-    expect(repo.repos).toEqual([{ github: 'org/backend', baseBranch: 'develop', autoMerge: true }]);
+    expect(repo.repos).toEqual([{ github: 'org/backend', baseBranch: 'develop', autoMerge: true, postCheckout: false }]);
   });
 
   it('legacy singular shape without autoMerge defaults to false', () => {

@@ -393,3 +393,65 @@ describe('bridge server', () => {
     });
   });
 });
+
+describe('per-child tokens (A4)', () => {
+  let handle: BridgeHandle;
+  let registry: SessionRegistry;
+  beforeEach(async () => { registry = new SessionRegistry(); handle = await startBridgeServer(registry); });
+  afterEach(async () => { await handle.close(); });
+
+  // report_completion on an isActive:false task short-circuits to a plain
+  // ToolResult without touching other stubs — a minimal real dispatch (same
+  // trick as the unwrap test above).
+  const session = (agentId: string) => ({ task: { taskId: 't1', isActive: false } as any, agent: { def: { id: agentId } } as any, readOnly: false });
+  const call = (token: string, sessionId: string) =>
+    fetch(`${handle.url}/tool`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+      body: JSON.stringify({ sessionId, tool: 'report_completion', args: {} }),
+    });
+
+  it('a child token dispatches a tool call for its own agent session', async () => {
+    registry.set('s-backend', session('backend'));
+    const token = handle.mintChildToken({ taskId: 't1', agentId: 'backend' });
+    const body: any = await (await call(token, 's-backend')).json();
+    expect(body.ok).toBe(true);
+  });
+
+  it("rejects child X's token used against child Y's session (verified caller identity)", async () => {
+    registry.set('s-backend', session('backend'));
+    const tokenMobile = handle.mintChildToken({ taskId: 't1', agentId: 'mobile' });
+    const body: any = await (await call(tokenMobile, 's-backend')).json();
+    expect(body.ok).toBe(false);
+    expect(body.error).toMatch(/token/i);
+  });
+
+  it("rejects a token whose taskId doesn't match the session's task", async () => {
+    registry.set('s-backend', session('backend'));
+    const tokenOtherTask = handle.mintChildToken({ taskId: 't2', agentId: 'backend' });
+    const body: any = await (await call(tokenOtherTask, 's-backend')).json();
+    expect(body.ok).toBe(false);
+  });
+
+  it('rejects a revoked token with 401 (unknown token)', async () => {
+    registry.set('s-backend', session('backend'));
+    const token = handle.mintChildToken({ taskId: 't1', agentId: 'backend' });
+    handle.revokeChildToken(token);
+    expect((await call(token, 's-backend')).status).toBe(401);
+  });
+
+  it('child tokens authorize GET /tools and GET /policy', async () => {
+    registry.set('s-backend', session('backend'));
+    const token = handle.mintChildToken({ taskId: 't1', agentId: 'backend' });
+    const tools = await fetch(`${handle.url}/tools`, { headers: { authorization: `Bearer ${token}` } });
+    expect(tools.status).toBe(200);
+    const policy = await fetch(`${handle.url}/policy?sessionId=s-backend`, { headers: { authorization: `Bearer ${token}` } });
+    expect(policy.status).toBe(200);
+  });
+
+  it('the process token still dispatches without an identity restriction', async () => {
+    registry.set('s-backend', session('backend'));
+    const body: any = await (await call(handle.token, 's-backend')).json();
+    expect(body.ok).toBe(true);
+  });
+});

@@ -1,6 +1,8 @@
 /**
- * opencode event consumer (spec §3.3 item 2). One global SSE subscription for
- * the whole embedded server (the server is a process-lifetime singleton). Each
+ * opencode event consumer (spec §3.3 item 2). One SSE subscription per serve
+ * child (P3a: one child per agent instance); each child's stream carries only
+ * its own sessions, and routing keys off the shared registry, so N concurrent
+ * consumers coexist with no cross-talk. Each
  * event is correlated to a live Archie turn via the bridge sharedRegistry
  * (sessionID → {task, agent}) for the status line, and to the turn-completion
  * registry (by sessionID) that drives the runtime's async turn loop. Unknown

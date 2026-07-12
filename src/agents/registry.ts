@@ -83,6 +83,7 @@ export function scanAgentDefs(): AgentDef[] {
               github: r.github,
               baseBranch: r.baseBranch || 'main',
               autoMerge: r.autoMerge === true,
+              postCheckout: r.postCheckout === true,
             })),
             primary: agent.repo.primary,
           },
@@ -220,6 +221,9 @@ export function synthesizeDynamicAgentDef(spec: DynamicAgentSpec): AgentDef {
     baseBranch: r.baseBranch || 'main',
     // PM-spawned dynamic agents can never confer auto-merge.
     autoMerge: false,
+    // Dynamic (PM-spawned) agents don't carry the post-checkout opt-in — the
+    // spec has no such field; static frontmatter repos are where it's declared.
+    postCheckout: false,
   }));
   if (repos.length === 0) {
     throw new Error(`Dynamic agent spec ${spec.id} has no repos`);

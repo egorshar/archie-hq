@@ -17,48 +17,52 @@ Two consequences drive the whole design:
                           Archie process (Node)
   ┌───────────────────────────────────────────────────────────────┐
   │  OpencodeRuntime.spawn(agent, task)                             │
-  │     │  per turn: session.promptAsync({ model, system, tools })  │
+  │     │  per turn: getAgentServe(agent, task) → serve-pool.ts     │
+  │     │            session.promptAsync({ model, system, tools })  │
   │     ▼                                                           │
-  │  getOpencodeClient()  ── singleton ──►  embedded-server.ts      │
-  │     │                                     (manual `opencode      │
-  │     │                                      serve` spawn, cwd =   │
-  │     │                                      clean serve root)     │
+  │  serve-pool.ts — ONE `opencode serve` child PER agent instance,  │
+  │  keyed `${taskId}:${agentId}` (embedded-server.ts spawns each)   │
   │     ▼                                                           │
-  │  Bridge (loopback HTTP + bearer token)                          │
+  │  Bridge (loopback HTTP + bearer token) — ONE listener, shared    │
   │   • SessionRegistry: sessionId → { task, agent, readOnly }      │
   │   • GET  /tools    → tool manifest                              │
   │   • POST /tool     → dispatch to in-process handlers            │
   │   • GET  /policy   → { readOnly, blockedTools, editModeApplies }│
-  │     ▲            SSE events (session.idle / message.part.…)     │
+  │     ▲       per-child bridge token       SSE per child           │
   │     │                    │                                      │
   └─────┼────────────────────┼──────────────────────────────────────┘
         │ HTTP (localhost)   │ HTTP/SSE
         │                    ▼
-  ┌─────┴───────────────────────────────────────────────────────────┐
-  │  opencode serve (child process, cwd = <workdir>/opencode-server) │
-  │   • built-in tools: read/edit/bash/webfetch/skill/…              │
-  │   • generated plugin (.opencode/plugins/archie-bridge.ts):       │
-  │       – registers Archie tools from GET /tools                   │
-  │       – tool.execute forwards to POST /tool                      │
-  │       – tool.execute.before guard queries GET /policy (RO)       │
-  │   • config.mcp: external domain MCP servers                      │
-  │   • .opencode/skills/: staged union of agent skills              │
-  └───────────────────────────────────────────────────────────────┘
+  ┌─────┴──────────────────────┐  ┌─────────────────────────────┐
+  │ opencode serve (agent A)    │  │ opencode serve (agent B)     │  ...
+  │  cwd = clone (repo agent)   │  │  cwd = synthetic root (PM/   │
+  │        or synthetic root    │  │        plugin agent)         │
+  │  .opencode/skills/: THIS     │  │  .opencode/skills/: THIS      │
+  │    agent's own skills only  │  │    agent's own skills only   │
+  │  generated bridge plugin     │  │  generated bridge plugin      │
+  │  config.model: THIS agent's │  │  config.model: THIS agent's  │
+  │    resolved route            │  │    resolved route             │
+  │  config.mcp: external MCP    │  │  config.mcp: external MCP     │
+  └─────────────────────────────┘  └─────────────────────────────┘
 ```
 
-## The embedded server (`server.ts`, `embedded-server.ts`)
+## Per-agent serve children (`serve-pool.ts`, `embedded-server.ts`)
 
-`getOpencodeClient()` (`server.ts`) lazily starts **one** embedded server per process and reuses it (shared by both the `LlmOneShot` path and the `AgentRuntime`). On first call it:
+Each spawned `Agent` gets its own `opencode serve` child, keyed `${taskId}:${agentId}` (`getAgentServe` in `serve-pool.ts`). On first acquire for a key it:
 
-1. Starts the bridge listener (`startBridgeServer`).
-2. Prepares a clean **serve root** at `<workdir>/opencode-server` — `mkdir` + `git init` (`prepareServeRoot`). The `git init` matters: opencode discovers project config (skills) by walking up from its cwd to the nearest git worktree, so making the serve root its own worktree stops that walk there and prevents it from reaching the repo's own `.claude/skills`.
-3. Stages skills into `<serveRoot>/.opencode/skills` (see Skills).
-4. Writes the generated bridge plugin into `<serveRoot>/.opencode/plugins`.
-5. Spawns `opencode serve` there (see below) and starts the SSE event consumer.
+1. Places the child's cwd: a repo agent's own clone (skills staged alongside, excluded from commits via `.git/info/exclude`), or a synthetic root at `<workdir>/opencode-server/<taskId>/<agentId>` for clone-less agents (PM, plugin agents) — `prepareServeRoot` (`mkdir` + `git init`, so opencode's upward skill-discovery walk stops at this root).
+2. Stages ONLY that agent's own skills (`skillsPath` + `coreSkillsPath`) into `<cwd>/.opencode/skills` (`stageAgentSkills`, see Skills).
+3. Mints a bridge token scoped to this child (`bridge.mintChildToken`) and writes the generated bridge plugin into `<cwd>/.opencode/plugins`.
+4. Resolves this agent's model route and spawns `opencode serve` with `config.model` set to it (its own `config.mcp` too) — see Model routing.
+5. Starts a per-child SSE event consumer.
 
-**Manual spawn (`embedded-server.ts`).** The SDK's `createOpencode` spawns the serve child in the *current process cwd* and offers no way to change it — but skill discovery keys off that cwd, and Archie's process cwd is the repo root (with the repo's own dev skills). So `embedded-server.ts` reproduces the SDK's spawn faithfully — `opencode serve --hostname --port=0`, config passed via the `OPENCODE_CONFIG_CONTENT` env var, the listening URL parsed from the `opencode server listening on <url>` stdout line — and adds the one missing piece: an explicit **`cwd`** (the clean serve root). It then connects with `createOpencodeClient({ baseUrl })`.
+Children boot on demand, are **reused** for later turns from the same agent instance, are **recycled** at the next turn boundary when marked stale (a plugins push, or a repo agent's clone moving path on a RO→RW mode transition), are **reaped** when their agent idles past `OPENCODE_CHILD_IDLE_TTL` (default 15m — safe because the agent's session store is pinned to a per-agent data dir on the workdir volume, so a reap-then-respawn resumes context-free; see "Per-agent session-store isolation" below), and are **evicted** (their synthetic root removed) at task teardown. `OPENCODE_CHILD_SOFT_CAP` (default 12) only emits a census warning when live children exceed it — it never queues or blocks a spawn. A measured idle `opencode serve` child is ~300 MB RSS, so lifecycle bounds (idle reap, per-task eviction) matter for VM memory budget as task/agent counts grow.
 
-**Lifecycle.** The server is a process-lifetime singleton. `closeOpencodeBridge()` (wired into `index.ts`'s SIGINT/SIGTERM `shutdown`) stops the event consumer, kills the serve child, closes the bridge, and clears the cached client — so a dev reload doesn't leak orphaned `opencode serve` children. A `shuttingDown` guard covers the shutdown-during-first-boot race (a boot that resolves after teardown closes its child instead of re-establishing it).
+**Manual spawn (`embedded-server.ts`).** The SDK's `createOpencode` spawns the serve child in the *current process cwd* and offers no way to change it — but skill discovery keys off that cwd, and Archie's process cwd is the repo root (with the repo's own dev skills). So `embedded-server.ts` reproduces the SDK's spawn faithfully — `opencode serve --hostname --port=0`, config passed via the `OPENCODE_CONFIG_CONTENT` env var, the listening URL parsed from the `opencode server listening on <url>` stdout line — and adds the one missing piece: an explicit **`cwd`**. It then connects with `createOpencodeClient({ baseUrl })`, and exposes `onExit` so the pool can eagerly evict a handle whose child crashed.
+
+**The bridge listener itself remains a process singleton** (`getBridge()`/`closeBridge()` in `server.ts`) — ONE loopback listener + `SessionRegistry` shared by every per-agent child; each child gets its own bearer token via `bridge.mintChildToken`, revoked when its child closes. The `LlmOneShot` path (`llm-one-shot.ts`) runs its own tiny utility serve outside the pool entirely — no skills, no bridge plugin, no MCP, since one-shots never call tools.
+
+**Lifecycle.** `closeServePool()` + `closeBridge()` + `closeOneShotServe()` (wired into `index.ts`'s SIGINT/SIGTERM `shutdown`) close every resolved child, the bridge listener, and the one-shot utility serve — so a dev reload doesn't leak orphaned `opencode serve` children. A `shuttingDown` guard on the pool covers the shutdown-during-first-boot race (a boot that resolves after teardown closes its child instead of re-establishing it).
 
 ## The tool bridge (`bridge/`)
 
@@ -86,7 +90,7 @@ The bridged control-tool handlers are the same functions the Claude MCP servers 
 
 A turn is fired with **`session.promptAsync`**, which returns immediately (HTTP 204). The turn's completion is the SSE **`session.idle`** event, delivered through an in-process **turn-completion registry** — NOT the HTTP response. (The blocking `session.prompt` held one HTTP request open for the whole agentic turn, which tripped undici's ~5-minute headers timeout on long turns.)
 
-- A single global SSE consumer (`events.ts`) subscribes once to `client.event.subscribe().stream`, filters events by registered `sessionID`, and drives: `message.part.updated` (tool parts) → `task.noteActivity` (the status line); `session.idle` → resolve the turn with the streamed text; `session.error` → reject.
+- One SSE consumer **per serve child** (`events.ts`, started by `serve-pool.ts` when a child boots) subscribes to that child's `client.event.subscribe().stream`, filters events by registered `sessionID`, and drives: `message.part.updated` (tool parts) → `task.noteActivity` (the status line); `session.idle` → resolve the turn with the streamed text; `session.error` → reject. Routing keys off the shared `SessionRegistry`, so N concurrent consumers (one per live child) coexist with no cross-talk.
 - **Session not-found** (`res.error.name === "NotFoundError"`, `data.message` "Session not found") → reset the stored id, create a fresh session, retry **once**. Kills the stale-id hot-loop.
 - **Transient (non-not-found) errors** → routed into the task's bounded recovery loop by marking the agent inactive (`updateAgentState(def.id, false)`) — mirroring the Claude runtime — rather than leaving the task hung `in_progress`.
 
@@ -101,19 +105,57 @@ opencode's built-in write/edit/bash tools have **no per-session permission surfa
 
 **`editModeApplies`.** `/policy` also returns whether edit-mode approval could ever make this session writable (i.e. it's a repo agent). The plugin's block message uses it: a read-only *repo* agent is told to request edit mode; a non-repo agent (PM/plugin) is told edit mode won't grant command execution — so a weaker model stops chasing edit mode to run a command (a dead-end that only re-blocks).
 
-> No OS sandbox. Unlike the Claude runtime (bubblewrap), read-only here is guard-enforced, not kernel-enforced; agent bash/egress are unsandboxed. A firewall + bash sandbox is planned future work.
+> Read-only enforcement above is guard-enforced (the plugin `before` hook + bridge dispatch), independent of the OS sandbox described next — a compromised/buggy guard would still be caught by the per-child filesystem jail for writes, but the jail alone doesn't gate read-only vs. edit-mode, which stays this section's job.
+
+## Per-child OS sandbox (P3b)
+
+Building on P3a's one-serve-child-per-agent-instance topology, P3b wraps each child's spawn in a bubblewrap (`bwrap`) filesystem jail and steers its egress through a cooperative HTTP(S) proxy. All of it is assembled per child in `child-sandbox.ts` and `egress-proxy.ts`, and wired into the spawn path in `serve-pool.ts` (`bootChild`), `llm-one-shot.ts` (the utility serve), and `embedded-server.ts` (`startEmbeddedServer`'s `spawnOverride`/`env` params).
+
+**Filesystem jail.** `buildChildSandboxProfile` (`child-sandbox.ts`) derives a `ChildSandboxProfile` from the agent's own `SandboxOptions` (`agent.sandbox`, the same object `src/agents/sandbox.ts` uses for the Claude runtime's bubblewrap/hook enforcement) plus P3b-specific paths, and `buildSandboxArgv` turns that profile into `bwrap` flags:
+
+- System dirs (`/usr /bin /lib /lib64 /etc /opt /sbin`) are `--ro-bind`, plus a fresh `--tmpfs /tmp`, `--proc /proc`, `--dev /dev`.
+- The agent's `SandboxOptions.allowReadPaths` are `--ro-bind`.
+- The child's `cwd` (the repo clone for a repo agent, or the synthetic root for PM/plugin agents) and its per-agent `homeDir` are always `--bind` (rw), regardless of what the profile assembler also lists; `<cwd>/.opencode` is included in the rw set so skill staging and the bridge plugin file can be written there.
+- `SandboxOptions.allowWritePaths` are added `--bind` (rw).
+- `SandboxOptions.denyWritePaths` are re-bound `--ro-bind` **after** the rw binds — `bwrap` processes binds sequentially, so a deny path inside an already-rw'd region is downgraded back to read-only by the later bind. This mirrors the allow/deny non-overlap rule `src/agents/sandbox.ts`'s `buildSandboxConfig` already uses for the Claude runtime.
+- Hardening flags: `--die-with-parent --unshare-pid --unshare-ipc --unshare-uts`.
+- Deliberately **no `--unshare-net`** — the child keeps the host network namespace so loopback (the bridge callback, the SDK client's HTTP/SSE connection) keeps working. Egress is filtered cooperatively instead (below), not by a kernel-level network namespace.
+
+Nonexistent bind sources are silently skipped (a clone or lib path can legitimately not exist on a given host/task); `cwd` and `homeDir` are guaranteed to exist on disk before the argv is built (the pool `mkdir`s them first), so they always bind. A read-only repo agent's `cwd` is bound **read-only** (it is in `allowReadPaths`, not `allowWritePaths`) with only its `cwd/.opencode` sub-path carved back to read-write for the boot-time plugin-dep write; the `denyWritePaths` re-bind is emitted **only** for a deny path that sits inside an rw region (otherwise a deny of the clone root would over-mount and shadow that `.opencode` carve-out). An edit-mode clone and a synthetic PM/plugin root bind their `cwd` read-write.
+
+Each child also gets a **private `--tmpfs /tmp`** — an empty, in-memory `/tmp` unique to that child, not the host's `/tmp`. This diverges from the Claude runtime's sandbox, which shares the host `/tmp`: any orchestrator↔child handoff that relies on a shared `/tmp` path will not work under the opencode runtime.
+
+**Cooperative egress proxy.** `egress-proxy.ts` runs one loopback CONNECT/HTTP proxy per process (a singleton, like the bridge listener). Each child gets its own randomly-generated Basic-auth credential (`mintCredential`, revoked on child close) tied to a per-child host allowlist, and is steered to the proxy by forcing `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` (and lowercase variants) in its pruned env; `NO_PROXY=127.0.0.1,localhost` keeps the loopback bridge/SSE traffic direct. The allowlist is assembled by `computeProfileSkeleton` from two kinds of source, with different trust models. The first three are **hardcoded and orchestrator-controlled** — the `PROVIDER_EGRESS_HOSTS` map, the `repoHostEgressDomains` git-host set, and `TRUSTED_PACKAGE_REGISTRY_DOMAINS` — none of them env- or plugin-settable, so no plugin (hot-reloaded or otherwise) can widen them. The last two come from **plugin frontmatter** — this agent's declared-MCP hosts and `def.allowedNetworkDomains` — and a plugins hot reload recycles each child under the newly-declared allowlist. That is deliberate and is the same trust model as the Claude runtime, whose `src/agents/sandbox.ts` likewise honors frontmatter-declared network domains: a plugin author already controls the agent's tools and prompt, so letting it also declare that agent's egress hosts adds no new authority. The full set:
+
+- The model provider's host(s), from the hardcoded `PROVIDER_EGRESS_HOSTS` map (`{ openrouter: ['openrouter.ai'], anthropic: ['api.anthropic.com'] }`), keyed off the agent's resolved route — throws if the provider has no entry.
+- The repo host, for repo agents only (`repoHostEgressDomains`: the `GITLAB_BASE_URL` hostname, or GitHub's fixed `github.com`/`api.github.com`/`codeload.github.com` endpoints).
+- `TRUSTED_PACKAGE_REGISTRY_DOMAINS` (`registry.npmjs.org`, `registry.yarnpkg.com`), for repo agents in edit mode only — the same constant the Claude runtime's build sandbox already trusts.
+- Hosts of the MCP servers this agent's own frontmatter declares (not the global union of every plugin's MCP servers).
+- `def.allowedNetworkDomains` from the agent's frontmatter.
+
+`hostAllowed` matches an allowlist entry as an exact host or a dot-suffix subdomain, with bare entries permitting ports 443/80 only (an explicit `host:port` entry is required for anything else). Denials are logged with `{taskId, agentId, host}` only — never the credential.
+
+**Honest boundary caveat.** The filesystem jail is kernel-enforced by `bwrap` — a write outside the rw binds or a read outside the ro/rw binds fails at the kernel, not by convention. The egress proxy is **cooperative and narrower than it may first appear**. What it actually filters is the **serve process's own outbound `fetch`** — the model-provider calls, `webfetch`, and remote-MCP traffic that the opencode server itself makes with Bun's `fetch`, which reads and honors the `HTTP(S)_PROXY` env vars (this is what S3 verified live: an allowed provider CONNECT succeeded, a non-allowlisted `webfetch` host got a clean 403, and `NO_PROXY` kept the loopback bridge callback direct). What it does **not** filter today is egress from **bash-spawned subprocesses** (`git`, `npm`, `curl`, …): opencode's `bash` tool does not forward the serve process's environment to the commands it spawns (the established `opencode-bash-env-isolation` finding), so those subprocesses never see `HTTP(S)_PROXY` and reach the network directly, unfiltered. Making bash egress honor the proxy is a tracked follow-up — inject the proxy vars via clone-local git config (the same on-disk-config pattern already used to pin git identity), rather than relying on env inheritance. And regardless of env, a deliberately malicious `bash` could always open a direct TCP socket, since there is no `--unshare-net`; kernel-enforced egress (adding `--unshare-net` plus a veth/user-mode network stack so loopback still works) is the larger tracked follow-up, not yet implemented.
+
+**Platform gate.** On Linux, `bwrap` is **mandatory and fail-closed**: `wrapServeCommand` probes for the `bwrap` binary once (cached) and throws if it's missing or unusable, which fails the child's boot and routes into the pool's boot-failure path → task recovery — a serve child is never spawned unsandboxed on a non-darwin host. On macOS (dev), there is no `bwrap`; `wrapServeCommand` warns once (`opencode children run UNSANDBOXED on darwin`) and runs the plain `opencode serve` command unwrapped — but the pruned env and the egress proxy still apply even without the filesystem jail.
+
+**Per-agent session-store isolation.** Each agent instance's child boots with `HOME` and `XDG_DATA_HOME` both pinned to `agentHomeDir(taskId, agentId)` — `<workdir>/opencode-server/<taskId>/<agentId>/home` — instead of the real user's `~/.local/share/opencode`. This dir is created before the child spawns (`buildSandboxArgv` silently skips a nonexistent bind source, so a missing homeDir would otherwise boot the child with no writable `HOME` at all) and lives under the task's serve root, so P3a's `evictTask` removes it at task teardown along with the rest of that task's serve state. Consequence: a task reopened after its serve root was evicted gets a fresh, empty session store for each agent — its opencode sessions cold-start rather than resume — which the runtime's existing stale-session (`NotFoundError`) recovery already handles as a reset-and-retry. Because the dir sits on the mounted `workdir` volume (not the container's ephemeral home), the store also survives a daemon redeploy: recycle, reap, and restart all resume context-free, and only teardown clears it. Two further properties fall out of the per-agent layout: one agent's child cannot resume another agent's sessions (the cross-agent read a single process-global `~/.local/share/opencode` store would permit is closed by construction — the bridge's per-child tokens gate tool calls, the data dir gates session storage), and session rows (which Archie never prunes) are bounded per task rather than growing process-wide, since the whole store is `rm`'d with the task at `evictTask`. A scheduled/TTL cleanup within a long-lived task is a deferred follow-up; the per-agent-dir layout already makes teardown cleanup structural.
+
+**Environment pruning.** `buildChildEnv` composes each child's env from scratch rather than inheriting the orchestrator's `process.env` — `startEmbeddedServer` uses the P3b-built env **verbatim**, never spread with `process.env`, specifically so this pruning can't be silently undone. The child gets: a small base allowlist (`PATH`, `TERM`, `LANG`, `TZ`, plus any `LC_*` vars), the pinned `HOME`/`XDG_DATA_HOME`, the forced proxy vars, and — from the hardcoded `PROVIDER_ENV_KEYS` map — only the API key for the route's own provider (e.g. `OPENROUTER_API_KEY` for an `openrouter` route). Orchestrator secrets that used to be ambiently inherited — Slack tokens, `GITLAB_*`/`GITHUB_*` tokens — no longer reach the child process at all.
+
+**No new env keys.** P3b introduces zero new Archie-level environment variables; the sandbox is on unconditionally wherever `AGENT_RUNTIME=opencode` runs (gated only by the existing platform check, not a config flag). Adding a new model provider means editing `PROVIDER_EGRESS_HOSTS` and `PROVIDER_ENV_KEYS` in `child-sandbox.ts`, not adding an env knob.
+
+**No Docker image changes.** `bwrap` and `socat` (used for the loopback bridge in the container) already ship in `Dockerfile.dev`/`Dockerfile.prod`; P3b is pure application code on top of an unchanged image.
 
 ## Model routing (`model.ts`, `runtime.ts`)
 
-Routing is **per agent, per turn**. Each turn sends `body.model = { providerID, modelID }` resolved from the agent's own tier via `resolveAgentOpencodeModel(def)` — `resolveAgentModel(def)` (the Claude runtime's alias: PM → `opus`, others → `sonnet`, or `def.model`) → strip the Claude-only `[1m]` suffix → `resolveOpencodeModel(alias)` → the `ARCHIE_OPENCODE_MODEL_<TIER>` route. The server-global `config.model` (set once at boot from the `default` route) is only the fallback when a turn omits `body.model`.
-
-(`body.model` must be the `{ providerID, modelID }` object — a `provider/model` string is ignored.)
+Routing is **per agent, per child**. Each agent's serve child boots with `config.model` set to that agent's own resolved route — `resolveAgentOpencodeModel(def)` (`resolveAgentModel(def)`, the Claude runtime's alias: PM → `opus`, others → `sonnet`, or `def.model`) → strip the Claude-only `[1m]` suffix → `resolveOpencodeModel(alias)` → the `ARCHIE_OPENCODE_MODEL_<TIER>` route, falling back to `ARCHIE_OPENCODE_MODEL_DEFAULT` if the tier has no route of its own. There is no per-turn `body.model` override: since each agent instance owns its own child, the child's boot-time `config.model` already IS that agent's route, so a turn never needs to override it.
 
 ## Skills (`skills.ts`)
 
-opencode has a native `skill` tool that discovers `SKILL.md` files by the **serve process's working directory at startup** — NOT per-session (`query.directory` does not affect skill discovery). Since Archie runs one shared server, skills are staged **globally**: at boot the runtime links the union of every agent's `skillsPath` + `coreSkillsPath` into `<serveRoot>/.opencode/skills` (`stageOpencodeSkills`, reusing the dependency-free `agents/skill-linking.ts`). Because the serve cwd is the clean git-bounded serve root, opencode sees only the staged skills — not the repo's own `.claude/skills`.
+opencode has a native `skill` tool that discovers `SKILL.md` files by the **serve process's working directory at startup** — NOT per-session (`query.directory` does not affect skill discovery). Since each agent instance has its own serve child, skills are staged **per agent**: on boot, `stageAgentSkills` links ONLY that agent's own `skillsPath` + `coreSkillsPath` (plugin source first, so it shadows a core skill of the same name) into `<cwd>/.opencode/skills`, reusing the dependency-free `agents/skill-linking.ts`. Because the child's cwd is either the agent's own clone or a clean, git-bounded synthetic root, opencode sees only that agent's own staged skills — never another agent's, and never the repo's own `.claude/skills`.
 
-Consequences vs the Claude runtime (which scopes skills per-agent via separate workspaces): **every opencode agent sees every staged skill** — prompts steer which to use. True per-agent scoping would require per-agent serve processes (dropping the shared singleton). A `SKILL.md` must carry both `name:` and `description:` frontmatter — opencode skips one missing `name:` (Claude derives it from the directory).
+This gives the opencode runtime the same per-agent skill scoping as the Claude runtime (which scopes skills per-agent via separate workspaces) — an agent's prompt no longer has to steer it away from skills that belong to a different agent. A skill push from a plugins refresh marks every live child stale (`markAllServesStale`), so each child re-stages fresh skills the next time it recycles at a turn boundary; because staging happens at child **boot** (not live, mid-process), the new skill set is visible on that very next turn — no process restart is needed. A `SKILL.md` must carry both `name:` and `description:` frontmatter — opencode skips one missing `name:` (Claude derives it from the directory).
 
 ## External MCP (`mcp-config.ts`, `tool-allowlist.ts`)
 
@@ -135,25 +177,29 @@ The opencode agent commits via its built-in `bash`. `configureGitIdentity` is fo
 
 | File | Responsibility |
 |------|----------------|
-| `server.ts` | Embedded-server singleton: boot orchestration (bridge + serve root + skills + plugin + spawn), shutdown, `concatPromptText`. |
-| `embedded-server.ts` | Manual `opencode serve` spawn with a controlled cwd + `createOpencodeClient`; serve-root prep. |
-| `runtime.ts` | `OpencodeRuntime.spawn` — per-turn loop, `body` build, session recovery, abort, capabilities. |
-| `events.ts` | Global SSE consumer → status activity, turn completion, error. |
+| `server.ts` | Shared process-singletons: bridge listener (`getBridge`/`closeBridge`), `sharedRegistry`, `concatPromptText`. |
+| `serve-pool.ts` | Per-agent-instance serve pool: boot/reuse/recycle/reap/evict, keyed `${taskId}:${agentId}`. |
+| `embedded-server.ts` | Manual `opencode serve` spawn with a controlled cwd + `createOpencodeClient`; serve-root prep; `SERVE_PERMISSION`. |
+| `runtime.ts` | `OpencodeRuntime.spawn` — per-turn loop, `getAgentServe` acquire, `body` build, session recovery, abort, capabilities. |
+| `events.ts` | Per-serve-child SSE consumer → status activity, turn completion, error. |
 | `turn-completion.ts` | In-process registry: `waitForTurn` / `completeTurn` / `failTurn` / `cancelTurn`. |
 | `model.ts` | `resolveOpencodeModel`, `resolveAgentOpencodeModel`, footer route helpers. |
-| `skills.ts` | Stage the global union of agent skills at the serve root. |
+| `skills.ts` | Stage one agent's own skills into its serve child's cwd (`stageAgentSkills`); `excludeOpencodeFromGit`. |
 | `mcp-config.ts` | Root `.mcp.json` → opencode `config.mcp` (+ OAuth headers). |
 | `tool-allowlist.ts` | Per-turn `body.tools` denylist scoping. |
-| `llm-one-shot.ts` | The `LlmOneShot` (title/memory) path on the shared server. |
-| `bridge/server.ts` | Loopback bridge: `/tools`, `/tool` dispatch, `/policy`; session handlers; RO/PM gating. |
+| `llm-one-shot.ts` | The `LlmOneShot` (title/memory) path on its own utility serve, outside the per-agent pool. |
+| `bridge/server.ts` | Loopback bridge: `/tools`, `/tool` dispatch, `/policy`; session handlers; RO/PM gating; per-child token mint/revoke. |
 | `bridge/plugin-source.ts` | Generated opencode plugin (registers tools, forwards to `/tool`, RO `before` guard). |
 | `bridge/registry.ts` | `SessionRegistry` (`sessionId → {task, agent, readOnly}`). |
 | `agents/skill-linking.ts` | Dependency-free `linkAgentSkills` (shared with the Claude spawn path). |
+| `child-sandbox.ts` | Pure bwrap-argv builder, profile fingerprint, platform-gated spawn wrapper, provider/env maps, per-agent home dir (P3b). |
+| `egress-proxy.ts` | The loopback cooperative CONNECT/HTTP egress proxy: per-child credentials, host allowlist matching (P3b). |
 
 ## Known limitations / follow-ups
 
-- **No OS sandbox** — RO is guard-enforced; bash/egress unsandboxed (a sandbox is planned future work).
-- **Skills are global, not per-agent** — a shared server can't scope per agent without per-agent serve processes.
+- **Egress is cooperative, not kernel-enforced** — the per-child bwrap filesystem jail (P3b) is kernel-enforced, but there is deliberately no `--unshare-net`; a malicious `bash` inside the jail could still open a direct TCP connection bypassing the proxy. Kernel-enforced egress (`--unshare-net` + a loopback-preserving network setup) is tracked follow-up work.
+- **macOS runs unsandboxed** — the bwrap jail is Linux-only; on darwin (dev) children run unwrapped (env pruning + the egress proxy still apply). Linux/Docker is fail-closed: a missing/broken `bwrap` fails the child boot rather than running unsandboxed.
+- **A reopened task cold-starts opencode sessions** — the per-agent session store lives under the task's serve root and is removed by `evictTask`, so a task reopened after teardown gets a fresh, empty opencode session store per agent (existing `NotFoundError` recovery handles it, but there's no history to resume).
 - **`backgroundTasks` unwired** — opencode subtasks aren't tracked into busy/idle accounting.
-- **Per-role model routing is server-global for `config.model`** — the per-turn `body.model` handles per-agent routing; the boot-time default is one route.
 - **PM orchestration needs a capable model** — weaker models mis-drive multi-step flows (glm-5.2 works well).
+- **Same-task agents sharing one clone** — when two agents share a single clone cwd, the second agent's serve child runs in its own synthetic root instead of the clone (so its skills + bridge plugin stay isolated).

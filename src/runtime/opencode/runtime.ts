@@ -15,10 +15,14 @@ import type { Agent } from '../../agents/agent.js';
 import type { Task } from '../../tasks/task.js';
 import { prepareAgentContext } from '../../agents/spawn.js';
 import { logger } from '../../system/logger.js';
-import { getOpencodeClient, closeOpencodeBridge, restageOpencodeSkills, sharedRegistry, type OpencodeClient } from './server.js';
+import { sharedRegistry, closeBridge } from './server.js';
+import { getAgentServe, scheduleIdleReap, markAllServesStale, closeServePool, evictTask, type AgentServeSpec, type ServeHandle } from './serve-pool.js';
+import { closeOneShotServe } from './llm-one-shot.js';
+import { closeEgressProxy } from './egress-proxy.js';
+import type { OpencodeClient } from './embedded-server.js';
 import { buildToolAllowlist } from './tool-allowlist.js';
 import { turnCompletion } from './turn-completion.js';
-import { resolveAgentOpencodeModel, opencodeAgentRoute, opencodeFooterModel } from './model.js';
+import { opencodeAgentRoute, opencodeFooterModel } from './model.js';
 import type { AgentDef } from '../../types/agent.js';
 
 const SESSION_NOT_FOUND_RE = /session.*not.*found|not.*found.*session/i;
@@ -92,7 +96,7 @@ export async function runPromptTurn(args: {
   task: Task;
   sessionId: string;
   readOnly: boolean;
-  body: { parts: { type: 'text'; text: string }[]; system: string; tools?: Record<string, boolean>; model?: { providerID: string; modelID: string } };
+  body: { parts: { type: 'text'; text: string }[]; system: string; tools?: Record<string, boolean> };
   onSession?: (sessionId: string) => void;
 }): Promise<{ reply: string; sessionId: string }> {
   const { client, agent, task, readOnly, body, onSession } = args;
@@ -160,20 +164,38 @@ export class OpencodeRuntime implements AgentRuntime {
     return opencodeFooterModel();
   }
 
-  /** Tear down the embedded server + bridge on process shutdown (no-op if never booted). */
+  /** Tear down every per-agent serve child, then the bridge, then the P3b
+   * egress proxy, then the one-shot utility serve (P3a/P3b error-handling
+   * order) — so a dev reload leaves no orphaned `opencode serve` children and
+   * no dangling proxy listener. */
   async shutdown(): Promise<void> {
-    await closeOpencodeBridge();
+    await closeServePool();
+    await closeBridge();
+    await closeEgressProxy();
+    await closeOneShotServe();
   }
 
   /**
-   * Re-stage the shared embedded server's skills dir after a plugins hot-reload
-   * so the native `skill` tool serves the updated skill set (boot stages it only
-   * once). No-op when the server never started; best-effort (never throws) — see
-   * `restageOpencodeSkills`. The Claude runtime omits this method (it re-links
-   * skills per spawn, so it has no process-global staging to refresh).
+   * Plugins hot-reload: mark every live child stale; each recycles at its own
+   * next turn boundary and re-stages fresh skills on boot (per-child restart —
+   * tiny blast radius vs the old shared-server managed restart). Agents spawned
+   * after the push — AND boots in flight right now (markAllServesStale skips
+   * null-handle entries) — stage fresh from the just-refreshed plugins by
+   * construction, so they need no stale mark. Best-effort, never throws.
    */
   async onPluginsRefreshed(): Promise<void> {
-    await restageOpencodeSkills();
+    markAllServesStale('plugins');
+  }
+
+  /** Close this task's serve children and rm their synthetic serve roots
+   * (pool.evictTask) — the ONLY place serve roots are removed (P3a A5).
+   * Best-effort: never throws into task teardown. */
+  async onTaskTeardown(taskId: string): Promise<void> {
+    try {
+      await evictTask(taskId);
+    } catch (err) {
+      logger.warn('opencode', `evictTask(${taskId}) failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   async spawn(agent: Agent, task: Task): Promise<void> {
@@ -205,12 +227,22 @@ export class OpencodeRuntime implements AgentRuntime {
     // in RO_BUILTIN_BLOCK).
     const readOnly = !(repo && repo.editAllowed);
 
-    // Abort target — the current opencode session id + shared client, kept
-    // current as the loop resumes/resets sessions. Task teardown calls
-    // handle.abort() AFTER stopping the queue. With the promptAsync turn model
-    // there's no held-open HTTP request to abort; instead we unblock the
-    // in-flight `await turn` (turn-completion registry) and tell opencode to
-    // abort the running turn server-side.
+    // Per-agent child placement (P3a A3/S2): a repo agent's child runs in its
+    // PRIMARY clone (the git-worktree boundary bounds skill discovery — spike
+    // S2); clone-less agents (PM/plugin) get a synthetic git-init root under
+    // <workdir>/opencode-server/<taskId>/<agentId>.
+    const primaryClone =
+      repo?.repoMounts.find((m) => m.github === def.repo?.primary)?.clonePath ??
+      repo?.repoMounts[0]?.clonePath;
+    const serveSpec: AgentServeSpec = primaryClone ? { clonePath: primaryClone } : {};
+
+    // Abort target — the current opencode session id + this turn's serve
+    // child's client, kept current as the loop resumes/resets sessions and
+    // recycles children. Task teardown calls handle.abort() AFTER stopping
+    // the queue. With the promptAsync turn model there's no held-open HTTP
+    // request to abort; instead we unblock the in-flight `await turn`
+    // (turn-completion registry) and tell opencode to abort the running turn
+    // server-side.
     let currentSessionId: string | undefined = agent.session.session_id;
     let clientRef: OpencodeClient | undefined;
 
@@ -228,77 +260,75 @@ export class OpencodeRuntime implements AgentRuntime {
     handle.running = (async () => {
       let sessionId = agent.session.session_id;
       let firstResponse = true;
+      let lastServe: ServeHandle | undefined; // last acquired child, closed at wind-down
       try {
-        // Start the embedded server INSIDE the turn body so a startup failure
-        // (server can't spawn) fails only this agent — logged here, marked
-        // inactive by the finally + Agent.spawn's crash wiring — instead of
-        // rejecting spawn() and surfacing as an unhandled rejection that
-        // crashes the process when recovery re-spawns. config.model
-        // (server.ts) remains the server-global fallback route; per-turn
-        // per-agent routing is resolved below (agentModel).
-        const client = await getOpencodeClient();
-        clientRef = client;
-
-        // Ensure a session (resume the stored one, else create).
-        if (!sessionId) {
-          const created = await client.session.create({ body: { title: `archie-${task.taskId}-${def.id}` } });
-          sessionId = (created as any)?.data?.id;
-          if (!sessionId) {
-            logger.error(def.id, 'opencode session.create returned no session id');
-            return;
-          }
-          agent.session.session_id = sessionId;
-        }
-        currentSessionId = sessionId;
-        // Register this session with the bridge's SessionRegistry so bridged
-        // control-tool calls (post_to_user / report_completion /
-        // request_edit_mode) resolve to this Task/Agent pair; evicted in the
-        // `finally` below regardless of how the turn loop exits. readOnly is the
-        // repo agent's real edit mode (false for non-repo agents) — the /policy
-        // read path and the bridge's write-tool rejection enforce RO from it.
-        sharedRegistry.set(sessionId, { task, agent, readOnly });
-
-        // Per-role routing: resolve the agent's own opencode route once for this
-        // spawn. Falls back to the server-global config.model (omit body.model)
-        // if resolution ever throws — never fail a turn over model routing.
-        let agentModel: { providerID: string; modelID: string } | undefined;
-        try {
-          agentModel = resolveAgentOpencodeModel(def);
-        } catch (err) {
-          logger.warn(def.id, `opencode model route unresolved — using server default: ${err instanceof Error ? err.message : String(err)}`);
-          agentModel = undefined;
-        }
-
         while (!agent.queue.isStopped()) {
           let msg;
+          // Idle reap (A1): armed ONLY while parked on nextMessage(), disarmed
+          // synchronously the moment a message lands — so the reap acts only at
+          // the parked/turn-boundary signal, never mid-turn. A reaped child is
+          // transparently re-acquired below (context-free — S1=RESUME).
+          const disarmReap = scheduleIdleReap(agent, task);
           try {
             msg = await agent.queue.nextMessage();
           } catch {
             break; // queue stopped → end the turn loop
+          } finally {
+            disarmReap();
           }
+
+          // A message can land in the same tick task.stop() runs (the queue is
+          // drained, not rejected). Re-check before acquiring so a stopped task
+          // never re-boots a reaped child or re-creates an evicted serve root.
+          if (agent.queue.isStopped()) break;
+
+          // Acquire this agent's serve child for the turn: boots on demand,
+          // reuses a warm handle, recycles a stale one (plugins push / RO→RW
+          // mode transition) — the single turn-boundary recycle point (P3a §5).
+          // A boot failure throws to the outer catch → the agent is marked
+          // inactive and the task's bounded recovery loop runs (parity with the
+          // old in-turn embedded-client-boot failure).
+          const serve = await getAgentServe(agent, task, serveSpec);
+          clientRef = serve.client;
+          lastServe = serve;
+
+          // Ensure a session (resume the stored one, else create). Sessions
+          // persist in opencode's GLOBAL store (spike S1) — they survive child
+          // recycles/reaps, so this runs once per agent, not per child.
+          if (!sessionId) {
+            const created = await serve.client.session.create({ body: { title: `archie-${task.taskId}-${def.id}` } });
+            sessionId = (created as any)?.data?.id;
+            if (!sessionId) {
+              logger.error(def.id, 'opencode session.create returned no session id');
+              return;
+            }
+            agent.session.session_id = sessionId;
+          }
+          currentSessionId = sessionId;
+          // (Re-)register with the bridge each turn — idempotent, and keeps the
+          // registration alive across child recycles; evicted in `finally`.
+          sharedRegistry.set(sessionId, { task, agent, readOnly });
+
           const text = msg.from ? `[From ${msg.from}]: ${msg.content}` : msg.content;
 
-          // Fresh per-turn state for the bridge's double-post dedup: clear the
-          // "a user post fired this turn" flag on the session registry entry
-          // (opencode-only state — never on the core Agent).
+          // Fresh per-turn state for the bridge's double-post dedup.
           const regForTurn = sharedRegistry.get(sessionId);
           if (regForTurn) regForTurn.postedThisTurn = false;
 
-          // Model is routed PER TURN from the agent's tier (agentModel, resolved
-          // above); config.model (server.ts) is only the fallback when omitted.
-          // `tools` is the per-agent external-MCP denylist (tool-allowlist.ts).
+          // NO body.model: the child's config.model IS this agent's route (P3a
+          // §6 — the per-turn override is dropped). `tools` remains the
+          // per-agent external-MCP denylist (tool-allowlist.ts).
           const toolAllow = buildToolAllowlist(agent);
           const body = {
             parts: [{ type: 'text' as const, text }],
             system: systemPrompt,
-            ...(agentModel ? { model: agentModel } : {}),
             ...(Object.keys(toolAllow).length > 0 ? { tools: toolAllow } : {}),
           };
           // Fire via promptAsync + await completion off the SSE session.idle
           // event (runPromptTurn), not the HTTP response — a long turn no longer
           // trips undici's headers timeout.
           const { reply, sessionId: activeId } = await runPromptTurn({
-            client, agent, task, sessionId, readOnly, body,
+            client: serve.client, agent, task, sessionId, readOnly, body,
             onSession: (sid) => { currentSessionId = sid; },
           });
           sessionId = activeId;
@@ -338,12 +368,24 @@ export class OpencodeRuntime implements AgentRuntime {
         // Evict the bridge registration + resolve any lingering turn waiter on
         // every exit path (normal, aborted, or errored) so a stale sessionId
         // can't resolve control-tool calls to a dead Task/Agent pair and no
-        // completion promise is left dangling. `sessionId` may still be unset if
-        // getOpencodeClient()/session.create() failed before registration ran.
-        if (sessionId) {
-          sharedRegistry.delete(sessionId);
-          turnCompletion.cancelTurn(sessionId, 'turn loop exited');
+        // completion promise is left dangling. Use the LIVE id: runPromptTurn's
+        // 404 recovery registers a fresh session (reported via onSession →
+        // currentSessionId) but the loop-local `sessionId` only advances on a
+        // successful turn — if the retried turn then throws, deleting the old
+        // `sessionId` would leak the fresh registry entry. `currentSessionId`
+        // may still be unset if getAgentServe()/session.create() failed before
+        // any registration ran.
+        const liveId = currentSessionId ?? sessionId;
+        if (liveId) {
+          sharedRegistry.delete(liveId);
+          turnCompletion.cancelTurn(liveId, 'turn loop exited');
         }
+        // Agent wind-down (P3a data flow): close this agent's child if one was
+        // acquired (root + per-agent session store kept — evictTask rm's them
+        // at task teardown; the store is on the workdir volume, so a later
+        // re-spawn resumes from it). Never boot a child just to close it;
+        // best-effort — never mask the loop's exit.
+        if (lastServe) await lastServe.close().catch(() => {});
         handle.isRunning = false;
         agent.backgroundTasks.clear();
         if (agent.pendingTeardown) {
