@@ -15,13 +15,11 @@ Two ports, one resolver:
          RepoHost port                   AgentRuntime port
       (src/ports/repo-host.ts)        (src/ports/agent-runtime.ts)
                 |                               |
-        +-------+-------+                       |
-        |               |                       |
-   GitHubHost       GitLabHost             ClaudeSdkRuntime
- (GitHubClient,   (src/connectors/     (src/runtime/claude/runtime.ts)
-  connectors/       gitlab/)
-    github/)             |
-                Phase 2: OpencodeRuntime
+        +-------+-------+              +---------+---------+
+        |               |             |                   |
+   GitHubHost       GitLabHost   ClaudeSdkRuntime    OpencodeRuntime
+   (connectors/     (connectors/  (src/runtime/       (src/runtime/
+     github/)          gitlab/)      claude/)            opencode/)
 ```
 
 Callers never import `GitHubClient` or the Claude SDK directly to reach these capabilities -- they call `getRepoHost()` / `getAgentRuntime()` / `getLlmOneShot()` from `src/system/backends.ts` and get back a port-typed object. A related but separate seam, `RepoHostEventSource`, normalizes inbound webhook events so the routing logic that decides "wake the PM" vs "run a merge check" is host-agnostic (see `src/connectors/shared/cr-router.ts`).
@@ -52,8 +50,8 @@ Two environment variables select the active backend per seam:
 Three factory functions hand callers a concrete, port-typed backend:
 
 - `getRepoHost(): RepoHost | null` -- returns the `GitHubClient` singleton (via `getGitHubClient()`) when `REPO_HOST=github`, or the `GitLabHost` singleton (via `getGitLabHost()`) when `REPO_HOST=gitlab`. GitHub returns `null` when its App environment is not configured (mirroring pre-Phase-0 behavior; callers already handle a null host by disabling PR tools). Unsupported hosts return `null` defensively and log a warning, but in practice `assertBackendConfig()` has already rejected them at boot.
-- `getAgentRuntime(): AgentRuntime` -- returns the `claudeSdkRuntime` singleton for `AGENT_RUNTIME=claude`.
-- `getLlmOneShot(): LlmOneShot` -- returns the `claudeLlmOneShot` singleton. There is still only one LLM provider, so this is unconditional today; it is tied to the runtime selection conceptually even though it does not yet switch on `AGENT_RUNTIME` (Phase 2).
+- `getAgentRuntime(): AgentRuntime` -- returns the `claudeSdkRuntime` singleton for `AGENT_RUNTIME=claude`, or the `opencodeRuntime` singleton for `AGENT_RUNTIME=opencode`. Unsupported runtimes default to claude defensively and log a warning (already rejected at boot by `assertBackendConfig()`).
+- `getLlmOneShot(): LlmOneShot` -- switches on the runtime: `claudeLlmOneShot` for `claude`, `opencodeLlmOneShot` for `opencode` (a tiny utility serve outside the per-agent pool — see `docs/architecture/opencode-runtime.md`).
 
 Call sites that previously imported `getGitHubClient()` or `createGitHubClient()` directly (`src/agents/tools.ts`, `src/connectors/github/merge.ts`) now go through `getRepoHost()` instead, and the four one-shot LLM call sites (title generation, memory extractor, memory housekeeping, triage) go through `getLlmOneShot()`.
 

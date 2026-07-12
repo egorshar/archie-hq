@@ -229,9 +229,9 @@ export class OpencodeRuntime implements AgentRuntime {
     // in RO_BUILTIN_BLOCK).
     const readOnly = !(repo && repo.editAllowed);
 
-    // Per-agent child placement (P3a A3/S2): a repo agent's child runs in its
-    // PRIMARY clone (the git-worktree boundary bounds skill discovery — spike
-    // S2); clone-less agents (PM/plugin) get a synthetic git-init root under
+    // Per-agent child placement: a repo agent's child runs in its PRIMARY clone
+    // (the git-worktree boundary bounds skill discovery); clone-less agents
+    // (PM/plugin) get a synthetic git-init root under
     // <workdir>/opencode-server/<taskId>/<agentId>.
     const primaryClone =
       repo?.repoMounts.find((m) => m.github === def.repo?.primary)?.clonePath ??
@@ -295,7 +295,7 @@ export class OpencodeRuntime implements AgentRuntime {
           lastServe = serve;
 
           // Ensure a session (resume the stored one, else create). Sessions
-          // persist in opencode's GLOBAL store (spike S1) — they survive child
+          // persist in opencode's GLOBAL store — they survive child
           // recycles/reaps, so this runs once per agent, not per child.
           if (!sessionId) {
             const created = await serve.client.session.create({ body: { title: `archie-${task.taskId}-${def.id}` } });
