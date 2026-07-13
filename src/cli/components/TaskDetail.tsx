@@ -122,7 +122,7 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
   const [eventCursor, setEventCursor] = useState(0);
   const [fallbackLines, setFallbackLines] = useState<string[]>([]); // knowledge.log for old tasks
   const [inputActive, setInputActive] = useState(true);
-  const [focusedApprovalLine, setFocusedApprovalLine] = useState<number | null>(null);
+  const [focusedLine, setFocusedLine] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string>('');
   // Live "Archie is …" indicator — the same line pushed to Slack, mirrored here
@@ -263,14 +263,16 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
     logLines.push({ node: <Text>{renderMarkdown(fallbackLines.join('\n'), mdWidth)}</Text> });
   }
 
-  // Collect line indices of pending approvals
-  const pendingApprovalLines = logLines
-    .map((l, i) => l.approval ? i : -1)
+  // Focusable rows: foldable rows and pending approvals (in display order).
+  const focusableLines = logLines
+    .map((l, i) => (l.fold || l.approval ? i : -1))
     .filter((i) => i >= 0);
 
-  // The approval at the focused line (if any)
-  const focusedApproval = focusedApprovalLine !== null
-    ? logLines[focusedApprovalLine]?.approval ?? null
+  const focusedApproval = focusedLine !== null
+    ? logLines[focusedLine]?.approval ?? null
+    : null;
+  const focusedFold = focusedLine !== null
+    ? logLines[focusedLine]?.fold ?? null
     : null;
 
   // Initial load: fetch metadata + events
@@ -388,39 +390,42 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
       }, 50);
       return;
     } else if (key.tab) {
-      // Tab cycles through: input → pending approvals → input
+      // Tab cycles: input → each focusable row (foldable/approval) → input
       if (inputActive) {
-        if (pendingApprovalLines.length > 0) {
-          setInputActive(false);
-          setFocusedApprovalLine(pendingApprovalLines[0]);
-        } else {
-          setInputActive(false);
-          setFocusedApprovalLine(null);
-        }
-      } else if (focusedApprovalLine !== null) {
-        const currentIdx = pendingApprovalLines.indexOf(focusedApprovalLine);
-        const nextIdx = currentIdx + 1;
-        if (nextIdx < pendingApprovalLines.length) {
-          setFocusedApprovalLine(pendingApprovalLines[nextIdx]);
+        setInputActive(false);
+        setFocusedLine(focusableLines.length > 0 ? focusableLines[0] : null);
+      } else if (focusedLine !== null) {
+        const cur = focusableLines.indexOf(focusedLine);
+        const next = cur + 1;
+        if (next < focusableLines.length) {
+          setFocusedLine(focusableLines[next]);
         } else {
           setInputActive(true);
-          setFocusedApprovalLine(null);
+          setFocusedLine(null);
         }
       } else {
         setInputActive(true);
-        setFocusedApprovalLine(null);
+        setFocusedLine(null);
       }
     } else if (!inputActive) {
-      // Scroll mode / approval handling
       if (input === 'q' || input === 'Q') exit();
       if (focusedApproval && (input === 'y' || input === 'Y')) {
         sendApproval(taskId, focusedApproval.approvalType, true, mergeIdentity(focusedApproval), focusedApproval.ref).catch((err: any) => setError(err.message));
-        setFocusedApprovalLine(null);
+        setFocusedLine(null);
         setInputActive(true);
       } else if (focusedApproval && (input === 'n' || input === 'N')) {
         sendApproval(taskId, focusedApproval.approvalType, false, mergeIdentity(focusedApproval), focusedApproval.ref).catch((err: any) => setError(err.message));
-        setFocusedApprovalLine(null);
+        setFocusedLine(null);
         setInputActive(true);
+      } else if (focusedFold && (key.return || key.rightArrow || key.leftArrow)) {
+        const id = focusedFold.id;
+        setExpandedFolds((prev) => {
+          const next = new Set(prev);
+          if (key.rightArrow) next.add(id);
+          else if (key.leftArrow) next.delete(id);
+          else next.has(id) ? next.delete(id) : next.add(id); // Enter toggles
+          return next;
+        });
       }
     }
 
@@ -435,14 +440,14 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
     // Scroll with arrows (always available) — clear focused approval when scrolling
     const scrollStep = key.meta ? 10 : 1;
     if (key.upArrow) {
-      setFocusedApprovalLine(null);
+      setFocusedLine(null);
       const refUp = scrollRef.current;
       if (refUp) {
         const current = refUp.getScrollOffset();
         refUp.scrollTo(Math.max(0, current - scrollStep));
       }
     } else if (key.downArrow) {
-      setFocusedApprovalLine(null);
+      setFocusedLine(null);
       const refDown = scrollRef.current;
       if (refDown) {
         const current = refDown.getScrollOffset();
@@ -528,7 +533,7 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
           }}
         >
           {logLines.map((line, i) => {
-            const isFocused = i === focusedApprovalLine;
+            const isFocused = i === focusedLine;
             const node = line.fold
               ? (expandedFolds.has(line.fold.id) ? line.fold.full : line.fold.summary)
               : line.node;
