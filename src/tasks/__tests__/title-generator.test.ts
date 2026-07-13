@@ -70,6 +70,7 @@ describe('generateTitle', () => {
   it('calls getLlmOneShot().json with haiku model and the title JSON schema', async () => {
     state.jsonMock.mockResolvedValue(titleResult('A title'));
     await generateTitle('x');
+    expect(state.jsonMock).toHaveBeenCalledTimes(1);
     const args = state.jsonMock.mock.calls[0][0];
     expect(args.model).toBe('haiku');
     expect(args.maxTurns).toBe(2);
