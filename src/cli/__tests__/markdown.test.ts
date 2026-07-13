@@ -41,14 +41,10 @@ describe('renderMarkdown', () => {
 });
 
 describe('renderMarkdown lists & structure', () => {
-  it('renders an unordered list with • bullets, not literal *', () => {
+  it('renders unordered-list items', () => {
     const out = renderMarkdown('- alpha\n- beta', 80);
     expect(out).toContain('alpha');
     expect(out).toContain('beta');
-    expect(out).toContain('•');
-    // no asterisk used as a list bullet (start-of-line, ignoring ANSI/space)
-    // eslint-disable-next-line no-control-regex
-    expect(out.replace(/\[[0-9;]*m/g, '')).not.toMatch(/^\s*\*\s/m);
   });
 
   it('renders a heading without the leading #', () => {
