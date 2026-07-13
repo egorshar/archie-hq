@@ -17,7 +17,12 @@ function instanceFor(width: number): Marked {
   if (!m) {
     // @types/marked-terminal (v6) types the return as TerminalRenderer; the
     // runtime (v7) returns a marked extension. Cast to the shape marked expects.
-    m = new Marked(markedTerminal({ width, reflowText: true }) as unknown as MarkedExtension);
+    m = new Marked(
+      // showSectionPrefix defaults to true, which re-prepends a literal `#`
+      // (repeated per heading level) to headings — disable it so headings
+      // render as plain styled text instead of raw markdown syntax.
+      markedTerminal({ width, reflowText: true, showSectionPrefix: false }) as unknown as MarkedExtension,
+    );
     cache.set(width, m);
   }
   return m;
@@ -29,7 +34,12 @@ export function renderMarkdown(text: string, width = 80): string {
     const out = instanceFor(w).parse(text, { async: false }) as string;
     // marked-terminal pads with surrounding blank lines; trim them so the block
     // sits flush in the log stream.
-    return out.replace(/^\n+/, '').replace(/\n+$/, '');
+    const trimmed = out.replace(/^\n+/, '').replace(/\n+$/, '');
+    // marked-terminal renders unordered-list items with a `*` bullet; rewrite
+    // to `•` for readability. Match the bullet at line start, tolerating ANSI
+    // color codes and leading indentation that marked-terminal may emit.
+    // eslint-disable-next-line no-control-regex
+    return trimmed.replace(/^(\s*(?:\[[0-9;]*m)*)\*(\s)/gm, '$1•$2');
   } catch {
     return text;
   }

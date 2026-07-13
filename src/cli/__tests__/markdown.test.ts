@@ -39,3 +39,30 @@ describe('renderMarkdown', () => {
     expect(() => renderMarkdown('```\nunterminated fence')).not.toThrow();
   });
 });
+
+describe('renderMarkdown lists & structure', () => {
+  it('renders an unordered list with • bullets, not literal *', () => {
+    const out = renderMarkdown('- alpha\n- beta', 80);
+    expect(out).toContain('alpha');
+    expect(out).toContain('beta');
+    expect(out).toContain('•');
+    // no asterisk used as a list bullet (start-of-line, ignoring ANSI/space)
+    // eslint-disable-next-line no-control-regex
+    expect(out.replace(/\[[0-9;]*m/g, '')).not.toMatch(/^\s*\*\s/m);
+  });
+
+  it('renders a heading without the leading #', () => {
+    const out = renderMarkdown('# Title here', 80);
+    expect(out).toContain('Title here');
+    expect(out).not.toContain('# Title here');
+  });
+
+  it('preserves fenced code content', () => {
+    const out = renderMarkdown('```\nconst x = 1;\n```', 80);
+    expect(out).toContain('const x = 1;');
+  });
+
+  it('returns plain text unchanged (trimmed)', () => {
+    expect(renderMarkdown('just words', 80)).toBe('just words');
+  });
+});
