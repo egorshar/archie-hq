@@ -26,6 +26,7 @@ import { logger } from '../../system/logger.js';
 import { listTriggers, loadTrigger, saveTrigger, deleteTrigger, countActiveTriggers } from '../../system/trigger-store.js';
 import { indexTrigger, deindexTrigger, announceTriggerChange, describeTrigger, MAX_TRIGGERS_PER_USER, MAX_TRIGGERS_PER_CHANNEL } from '../../system/trigger-scheduler.js';
 import type { Trigger } from '../../types/trigger.js';
+import { applyGeneratedTitle } from '../../tasks/title-generator.js';
 
 /**
  * Mount API routes on an existing Express app.
@@ -183,6 +184,11 @@ export function mountApiRoutes(app: Application): void {
       const task = await Task.create();
       task.linkCliChannel();
       await appendCliMessage(task.taskId, message);
+      if (!task.metadata.title) {
+        applyGeneratedTitle(task, message).catch((err) =>
+          logger.warn('title-generator', `cli pipeline failed: ${err}`),
+        );
+      }
       await task.sendMessage(AGENT_PROMPTS.newTask);
 
       res.status(201).json({ task_id: task.taskId });
@@ -207,6 +213,11 @@ export function mountApiRoutes(app: Application): void {
 
       const task = await Task.get(taskId);
       task.linkCliChannel();
+      if (!task.metadata.title) {
+        applyGeneratedTitle(task, message).catch((err) =>
+          logger.warn('title-generator', `cli pipeline failed: ${err}`),
+        );
+      }
       await task.sendMessage(AGENT_PROMPTS.existingTask);
 
       res.json({ ok: true });
