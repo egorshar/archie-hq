@@ -10,6 +10,19 @@ function formatDateTime(iso: string): string {
   });
 }
 
+// A freshly-created task's title is generated asynchronously (best-effort), so
+// `title` is null until it lands. Treat a very recent untitled task as "still
+// generating" so the list can show a placeholder instead of a blank. An older
+// untitled task (generation failed, or predates the feature) falls through to
+// no placeholder — we never show "generating" indefinitely.
+const TITLE_GENERATING_WINDOW_MS = 60_000;
+
+function isGeneratingTitle(task: TaskSummary): boolean {
+  if (task.title) return false;
+  const age = Date.now() - new Date(task.created_at).getTime();
+  return age >= 0 && age < TITLE_GENERATING_WINDOW_MS;
+}
+
 interface TaskSummary {
   task_id: string;
   status: string;
@@ -113,6 +126,21 @@ export function TaskList({ onSelect, onCreate, refreshTrigger, active }: TaskLis
     }
   }, [cursor, visibleRows, scrollTop]);
 
+  // While any recent task is still generating its title (async, no task: event
+  // on completion), poll page 0 — where the newest tasks live — so the
+  // placeholder swaps to the real title once it lands. Self-stops when no task
+  // is generating: each poll replaces allTasks (new array), re-running this
+  // effect, which re-evaluates the window and stops arming once titles have
+  // arrived or aged out.
+  useEffect(() => {
+    if (!allTasks.some((t) => t && isGeneratingTitle(t))) return;
+    const id = setInterval(() => {
+      fetchedPages.current.delete(0);
+      fetchPage(0);
+    }, 2000);
+    return () => clearInterval(id);
+  }, [allTasks, fetchPage]);
+
   useInput((input, key) => {
     if (!active) return;
     const step = key.meta ? 10 : 1;
@@ -184,7 +212,9 @@ export function TaskList({ onSelect, onCreate, refreshTrigger, active }: TaskLis
                 {' '}{task.task_id}
               </Text>
               <Text dimColor>  {channel}</Text>
-              {task.title && <Text>  {task.title}</Text>}
+              {task.title
+                ? <Text>  {task.title}</Text>
+                : isGeneratingTitle(task) ? <Text dimColor italic>  generating title…</Text> : null}
               {activeAgents > 0 && <Text color="green">  {activeAgents} active</Text>}
               {task.reminder && <Text color="magenta">  ⏰ {formatDateTime(task.reminder.trigger_at)} — {task.reminder.reason.length > 50 ? task.reminder.reason.slice(0, 50) + '…' : task.reminder.reason}</Text>}
             </Text>
