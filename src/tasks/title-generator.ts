@@ -1,26 +1,20 @@
 /**
  * Title Generator
  *
- * Generates a concise, AI-authored title for a task from its initial Slack
- * thread. Single Haiku call via the Claude Agent SDK with structured JSON
- * output. Returns null on any failure (logged, not thrown) — caller treats
- * absence of a title as a benign fallback to channel_name.
+ * Generates a concise, AI-authored title for a task from a transcript of its
+ * opening conversation. Channel-agnostic: callers build the transcript (Slack
+ * applies its own redaction; the CLI passes the user's message). Single haiku
+ * one-shot (getLlmOneShot().json) with structured JSON output. Best-effort —
+ * returns null on any failure (logged, not thrown); callers fall back to
+ * channel_name.
  */
-
 import { z, toJSONSchema } from 'zod';
-import type { SlackThread } from '../types/index.js';
-import { renderMessageForContext } from './persistence.js';
-import { isExternalUser } from '../connectors/slack/client.js';
+import type { Task } from './task.js';
 import { logger } from '../system/logger.js';
 import { getLlmOneShot } from '../system/backends.js';
 
-const REDACTION_PLACEHOLDER = '[redacted: external participant in shared channel]';
-
-const TitleSchema = z.object({
-  title: z.string(),
-});
+const TitleSchema = z.object({ title: z.string() });
 const rawTitleSchema = toJSONSchema(TitleSchema) as Record<string, unknown>;
-// Strip JSON Schema dialect URL — some SDK validators reject it.
 const { $schema: _drop, ...titleJsonSchema } = rawTitleSchema;
 
 const SYSTEM_PROMPT = `You generate a concise title for a task based on the initial conversation that started it.
@@ -34,32 +28,9 @@ Rules:
 
 Respond with JSON only.`;
 
-/**
- * Render the thread as a transcript for the title generator. Per-message
- * redaction matches what the agent sees in knowledge.log (parity via the
- * shared renderMessageForContext helper).
- */
-function buildTranscript(thread: SlackThread): { transcript: string; hasUsableContent: boolean } {
-  const lines: string[] = [];
-  let hasUsableContent = false;
-
-  for (const msg of thread.messages) {
-    const redacted = thread.shared && isExternalUser(msg.user);
-    const body = renderMessageForContext(msg, { redacted });
-    const author = redacted ? 'external' : msg.user.realName;
-    lines.push(`[${author}]: ${body}`);
-    if (!redacted && body.trim() !== '' && body !== REDACTION_PLACEHOLDER) {
-      hasUsableContent = true;
-    }
-  }
-
-  return { transcript: lines.join('\n'), hasUsableContent };
-}
-
 function cleanTitle(raw: string): string | null {
   let t = raw.trim();
   if (!t) return null;
-  // Strip surrounding matching quotes (single, double, or smart)
   const quotePairs: Array<[string, string]> = [['"', '"'], ["'", "'"], ['“', '”'], ['‘', '’']];
   for (const [open, close] of quotePairs) {
     if (t.startsWith(open) && t.endsWith(close) && t.length >= 2) {
@@ -67,7 +38,6 @@ function cleanTitle(raw: string): string | null {
       break;
     }
   }
-  // Strip trailing punctuation
   t = t.replace(/[.!?…]+$/u, '').trim();
   if (!t) return null;
   if (t.length > 60) t = t.slice(0, 60).trim();
@@ -75,18 +45,12 @@ function cleanTitle(raw: string): string | null {
 }
 
 /**
- * Generate a title for a task from its initial Slack thread.
- * Returns null on any failure (network error, malformed output, empty result,
- * fully-redacted input).
+ * Generate a title from a plain transcript. Returns null on a blank transcript,
+ * a failed/malformed one-shot, or an empty cleaned title.
  */
-export async function generateTaskTitle(thread: SlackThread): Promise<string | null> {
+export async function generateTitle(transcript: string): Promise<string | null> {
   try {
-    const { transcript, hasUsableContent } = buildTranscript(thread);
-    if (!hasUsableContent) {
-      return null;
-    }
-
-    let result: z.infer<typeof TitleSchema> | null = null;
+    if (!transcript || !transcript.trim()) return null;
 
     const prompt = `Generate a concise title for the following conversation.
 
@@ -110,10 +74,23 @@ Respond with JSON only.`;
       logger.warn('title-generator', `schema validation failed: ${parsed.error.message}`);
       return null;
     }
-    result = parsed.data;
-    return cleanTitle(result.title);
+    return cleanTitle(parsed.data.title);
   } catch (err) {
     logger.warn('title-generator', `unexpected failure: ${err}`);
     return null;
   }
+}
+
+/**
+ * Generate a title from `transcript` and, on success, set it on the task and
+ * persist. Returns the applied title (or null). Best-effort — callers invoke it
+ * fire-and-forget, guarded by `!task.metadata.title`.
+ */
+export async function applyGeneratedTitle(task: Task, transcript: string): Promise<string | null> {
+  const title = await generateTitle(transcript);
+  if (!title) return null;
+  task.metadata.title = title;
+  task.debouncedSave();
+  logger.system(`Task ${task.taskId} title set: "${title}"`);
+  return title;
 }
