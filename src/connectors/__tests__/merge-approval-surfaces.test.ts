@@ -31,7 +31,7 @@ vi.mock('../slack/client.js', () => ({
 
 vi.mock('../slack/channel-canvas.js', () => ({ ensureChannelCanvas: vi.fn() }));
 vi.mock('../slack/title.js', () => ({ setAssistantThreadTitle: vi.fn() }));
-vi.mock('../../tasks/title-generator.js', () => ({ generateTaskTitle: vi.fn() }));
+vi.mock('../../tasks/title-generator.js', () => ({ applyGeneratedTitle: vi.fn() }));
 vi.mock('../../system/shutdown.js', () => ({ getIsShuttingDown: vi.fn().mockReturnValue(false) }));
 vi.mock('../../system/event-bus.js', () => ({
   onEvent: vi.fn(),

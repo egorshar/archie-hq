@@ -36,7 +36,8 @@ import { getIsShuttingDown } from '../../system/shutdown.js';
 import { findTaskByThread } from '../../tasks/persistence.js';
 import { getChannelMessageTriggers, fireTrigger, triggerWhat } from '../../system/trigger-scheduler.js';
 import type { Trigger } from '../../types/trigger.js';
-import { generateTaskTitle } from '../../tasks/title-generator.js';
+import { applyGeneratedTitle } from '../../tasks/title-generator.js';
+import { buildSlackTitleTranscript } from './title-transcript.js';
 import { setAssistantThreadTitle } from './title.js';
 import type { SlackThread, SlackAuthor } from '../../types/task.js';
 // import { triageSlackMessage } from '../../system/triage.js';
@@ -615,14 +616,11 @@ export function registerMergeActionHandlers(boltApp: Pick<AppType, 'action'>): v
  * Errors are swallowed by the called helpers — title is best-effort.
  */
 async function generateTitleAndSync(task: Task, thread: SlackThread): Promise<void> {
-  const title = await generateTaskTitle(thread);
-  if (!title) return;
+  const { transcript, hasUsableContent } = buildSlackTitleTranscript(thread);
+  if (!hasUsableContent) return;
 
-  task.metadata.title = title;
-  task.debouncedSave();
-  logger.system(`Task ${task.taskId} title set: "${title}"`);
-
-  if (thread.channel.id.startsWith('D')) {
+  const title = await applyGeneratedTitle(task, transcript);
+  if (title && thread.channel.id.startsWith('D')) {
     await setAssistantThreadTitle(getSlackClient(), thread.channel.id, thread.threadId, title);
   }
 }
