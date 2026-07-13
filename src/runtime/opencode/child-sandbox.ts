@@ -150,7 +150,7 @@ export async function wrapServeCommand(profile: ChildSandboxProfile): Promise<{ 
 /** Hardcoded, orchestrator-controlled provider→egress-host map. NOT env/plugin
  * settable (so a hot reload can't widen egress). Extend when adding a route. */
 export const PROVIDER_EGRESS_HOSTS: Record<string, string[]> = {
-  openrouter: ['openrouter.ai'],
+  openrouter: ['openrouter.ai', 'models.dev'],
   anthropic: ['api.anthropic.com'],
 };
 
