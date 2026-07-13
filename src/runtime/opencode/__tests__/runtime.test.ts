@@ -247,14 +247,17 @@ describe('OpencodeRuntime.spawn', () => {
 
   it('registers a resumed session (no session.create call) under its existing id', async () => {
     const agent = makeAgent();
-    agent.session = { active: true, session_id: 'sess-existing' } as any;
+    // Real opencode session ids are `ses_…`; the resume guard discards
+    // foreign-shaped ids (e.g. a Claude UUID) and mints a fresh session, so a
+    // resumed-session fixture must use an opencode-shaped id.
+    agent.session = { active: true, session_id: 'ses_existing' } as any;
     const task = makeTask();
     await new OpencodeRuntime().spawn(agent as any, task as any);
     agent.queue.addMessage('continue');
     await new Promise((r) => setTimeout(r, 0));
 
     expect(create).not.toHaveBeenCalled();
-    expect(registrySet).toHaveBeenCalledWith('sess-existing', { task, agent, readOnly: true });
+    expect(registrySet).toHaveBeenCalledWith('ses_existing', { task, agent, readOnly: true });
   });
 
   it('de-registers the session from the bridge registry when the queue stops', async () => {
