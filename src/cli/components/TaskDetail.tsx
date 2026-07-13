@@ -162,7 +162,10 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
     }
   });
 
-  const oneLine = (s: string, n = 80): string => s.replace(/\s+/g, ' ').trim().slice(0, n);
+  const oneLine = (s: string, n = 80): string => {
+    const flat = s.replace(/\s+/g, ' ').trim();
+    return flat.length > n ? flat.slice(0, n) + '…' : flat;
+  };
 
   if (events.length > 0) {
     events.forEach((event, idx) => {
@@ -175,7 +178,7 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
           if (classifyEvent('message', event.data.from as string, event.data.to as string) === 'visible') {
             logLines.push({ node: full });
           } else {
-            const summary = <Text dimColor>▸ [{p.label}]{p.mention ? ` @${event.data.to}` : ''}  {oneLine(body)}… (Enter to expand)</Text>;
+            const summary = <Text dimColor>▸ [{p.label}]{p.mention ? ` @${event.data.to}` : ''}  {oneLine(body)} (Enter to expand)</Text>;
             logLines.push({ fold: { id: String(idx), summary, full: <><Text dimColor>▾ </Text>{full}</> } });
           }
           break;
@@ -189,7 +192,7 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
         case 'agent:log': {
           const finding = event.data.finding as string;
           const full = <Text><Text dimColor>[{event.agentName}] </Text>{renderMarkdown(finding, mdWidth)}</Text>;
-          const summary = <Text dimColor>▸ [{event.agentName}] finding: {oneLine(finding)}… (Enter to expand)</Text>;
+          const summary = <Text dimColor>▸ [{event.agentName}] finding: {oneLine(finding)} (Enter to expand)</Text>;
           logLines.push({ fold: { id: String(idx), summary, full: <><Text dimColor>▾ </Text>{full}</> } });
           break;
         }
