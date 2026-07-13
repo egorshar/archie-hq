@@ -62,6 +62,12 @@ describe('renderMarkdown lists & structure', () => {
     expect(out).toContain('const x = 1;');
   });
 
+  it('does not corrupt a JSDoc-style `*` line inside fenced code', () => {
+    const out = renderMarkdown('```\n/**\n * @param x - the value\n */\n```', 80);
+    expect(out).toContain('* @param');
+    expect(out).not.toContain('• @param');
+  });
+
   it('returns plain text unchanged (trimmed)', () => {
     expect(renderMarkdown('just words', 80)).toBe('just words');
   });
