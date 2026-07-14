@@ -12,7 +12,7 @@ export function StatusBar({ connected, view }: StatusBarProps) {
 
   const hints = view === 'list'
     ? 'arrows: navigate | enter: open | n: new task | t: triggers | q: quit'
-    : 'esc: back | tab: focus input | q: quit';
+    : 'tab: browse | enter/→: expand | ←: collapse | y/n: approve | ↑↓: scroll | esc: back | q: quit';
 
   return (
     <Box borderStyle="single" borderTop borderBottom={false} borderLeft={false} borderRight={false} paddingX={1}>
