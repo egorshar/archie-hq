@@ -329,6 +329,22 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
     ? logLines[focusedLine]?.fold ?? null
     : null;
 
+  // Newest pending approval (a blocking prompt that needs y/n), for auto-focus.
+  const pendingApprovalLines = focusableLines.filter((i) => logLines[i].approval);
+  const newestApprovalLine = pendingApprovalLines.length ? pendingApprovalLines[pendingApprovalLines.length - 1] : null;
+  const newestApprovalEventIndex = newestApprovalLine !== null ? logLines[newestApprovalLine].approval!.eventIndex : null;
+
+  // Auto-focus a pending approval the moment it appears (keyed by its event
+  // index, so this fires once per approval — it won't re-grab focus if the user
+  // Tabs away). Approvals block the task, so surfacing them for y/n takes
+  // priority over the input; auto-scroll (below) brings the row into view.
+  useEffect(() => {
+    if (newestApprovalLine === null) return;
+    setInputActive(false);
+    setFocusedLine(newestApprovalLine);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [newestApprovalEventIndex]);
+
   // Initial load: fetch metadata + events
   const loadInitial = useCallback(async () => {
     try {
