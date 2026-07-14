@@ -54,10 +54,27 @@ function formatMessageParts(from: string, to: string, destination?: string): { l
  */
 export function classifyEvent(type: string, from?: string, to?: string): 'visible' | 'foldable' {
   if (type === 'message') {
-    return from === 'user' || to === 'user' ? 'visible' : 'foldable';
+    // A message is part of the PM↔user conversation (shown in full) when it's
+    // addressed to the user, or its sender is a human rather than an agent.
+    // Agents are `<name>-agent`; a human sender is `cli` or a real name. So an
+    // inter-agent message (agent→agent/pm) is the only foldable message.
+    return to === 'user' || isUserSender(from) ? 'visible' : 'foldable';
   }
   if (type === 'agent:log' || type === 'agent:bg_task') return 'foldable';
   return 'visible'; // approvals, pr_card, reminders, and anything else
+}
+
+/** Non-human, non-agent senders that appear in the message stream: CI/webhook
+ * events (`from:'ci'`) and system notices (`from:'system'`, e.g. the wall-clock
+ * pause). These are neither agents (they don't end in `-agent`) nor the user. */
+const NON_USER_SENDERS = new Set(['ci', 'system']);
+
+/** A message sender that is a human — the CLI operator (`cli`) or a named
+ * person (Slack real name) — as opposed to an agent (`<name>-agent`) or a
+ * system/CI sender. Used to both classify and visually mark the user's own
+ * messages. */
+export function isUserSender(from?: string): boolean {
+  return !!from && !from.endsWith('-agent') && !NON_USER_SENDERS.has(from);
 }
 
 function formatDateTime(iso: string): string {
@@ -174,7 +191,13 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
           const p = formatMessageParts(event.data.from as string, event.data.to as string, event.data.destination as string | undefined);
           const footer = event.data.footer as string | undefined;
           const body = event.data.message as string;
-          const full = <><Text dimColor>[{p.label}]</Text>{p.mention ? <Text color="cyan">{p.mention}</Text> : null} <Text>{renderMarkdown(body, mdWidth)}</Text>{footer ? <Text dimColor>{'\n'}{footer}</Text> : null}</>;
+          const fromUser = isUserSender(event.data.from as string);
+          // The user's own messages get a distinct green label ([you] for the
+          // CLI operator, the person's name for Slack); agents stay dim.
+          const label = fromUser
+            ? <Text color="green" bold>[{(event.data.from as string) === 'cli' ? 'you' : p.label}]</Text>
+            : <Text dimColor>[{p.label}]</Text>;
+          const full = <>{label}{p.mention ? <Text color="cyan">{p.mention}</Text> : null} <Text>{renderMarkdown(body, mdWidth)}</Text>{footer ? <Text dimColor>{'\n'}{footer}</Text> : null}</>;
           if (classifyEvent('message', event.data.from as string, event.data.to as string) === 'visible') {
             logLines.push({ node: full });
           } else {
@@ -393,15 +416,19 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
       }, 50);
       return;
     } else if (key.tab) {
-      // Tab cycles: input → each focusable row (foldable/approval) → input
+      // Tab cycles bottom→top: input → last focusable row → … → first → input.
+      // Starting from the bottom matches what the user sees first (newest
+      // entries are at the bottom of the log).
       if (inputActive) {
-        setInputActive(false);
-        setFocusedLine(focusableLines.length > 0 ? focusableLines[0] : null);
+        // Nothing to browse → stay in the input rather than stranding focus.
+        if (focusableLines.length > 0) {
+          setInputActive(false);
+          setFocusedLine(focusableLines[focusableLines.length - 1]);
+        }
       } else if (focusedLine !== null) {
         const cur = focusableLines.indexOf(focusedLine);
-        const next = cur + 1;
-        if (next < focusableLines.length) {
-          setFocusedLine(focusableLines[next]);
+        if (cur > 0) {
+          setFocusedLine(focusableLines[cur - 1]);
         } else {
           setInputActive(true);
           setFocusedLine(null);
@@ -565,7 +592,7 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
         <MessageInput
           onSubmit={handleSendMessage}
           active={inputActive}
-          placeholder={inputActive ? 'Type message to PM...' : 'Press Tab to type...'}
+          placeholder={inputActive ? 'Type message to PM...' : 'Browsing messages — Tab to cycle, Tab past the top to type'}
         />
       </Box>
     </Box>
