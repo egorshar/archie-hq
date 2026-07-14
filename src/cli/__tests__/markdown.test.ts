@@ -1,38 +1,44 @@
 import { describe, it, expect } from 'vitest';
 import { renderMarkdown } from '../markdown.js';
 
-// Colour output depends on TTY/chalk; under vitest it's typically disabled, so
-// these assert the structural transform (syntax stripped, content kept) which
-// holds regardless of colour.
+// marked-terminal emits ANSI colour codes when chalk detects colour support,
+// which varies by environment (TTY / FORCE_COLOR). These tests assert the
+// structural transform (markdown syntax stripped, content kept, no `•`
+// corruption), so strip ANSI first — the transform holds regardless of colour.
+// (Build the ESC matcher from a char code to avoid a raw control byte here.)
+const ANSI = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, 'g');
+const stripAnsi = (s: string): string => s.replace(ANSI, '');
+const md = (text: string, width = 80): string => stripAnsi(renderMarkdown(text, width));
+
 describe('renderMarkdown', () => {
   it('strips bold markers but keeps the text', () => {
-    const out = renderMarkdown('**bold**');
+    const out = md('**bold**');
     expect(out).toContain('bold');
     expect(out).not.toContain('**');
   });
 
   it('renders inline code without backticks', () => {
-    const out = renderMarkdown('`code`');
+    const out = md('`code`');
     expect(out).toContain('code');
     expect(out).not.toContain('`');
   });
 
   it('keeps heading text', () => {
-    expect(renderMarkdown('# Title')).toContain('Title');
+    expect(md('# Title')).toContain('Title');
   });
 
   it('renders list items', () => {
-    const out = renderMarkdown('- alpha\n- beta');
+    const out = md('- alpha\n- beta');
     expect(out).toContain('alpha');
     expect(out).toContain('beta');
   });
 
   it('passes plain prose through', () => {
-    expect(renderMarkdown('hello world')).toContain('hello world');
+    expect(md('hello world')).toContain('hello world');
   });
 
   it('returns empty string for empty input', () => {
-    expect(renderMarkdown('')).toBe('');
+    expect(md('')).toBe('');
   });
 
   it('does not throw on malformed markdown', () => {
@@ -42,29 +48,29 @@ describe('renderMarkdown', () => {
 
 describe('renderMarkdown lists & structure', () => {
   it('renders unordered-list items', () => {
-    const out = renderMarkdown('- alpha\n- beta', 80);
+    const out = md('- alpha\n- beta', 80);
     expect(out).toContain('alpha');
     expect(out).toContain('beta');
   });
 
   it('renders a heading without the leading #', () => {
-    const out = renderMarkdown('# Title here', 80);
+    const out = md('# Title here', 80);
     expect(out).toContain('Title here');
     expect(out).not.toContain('# Title here');
   });
 
   it('preserves fenced code content', () => {
-    const out = renderMarkdown('```\nconst x = 1;\n```', 80);
+    const out = md('```\nconst x = 1;\n```', 80);
     expect(out).toContain('const x = 1;');
   });
 
   it('does not corrupt a JSDoc-style `*` line inside fenced code', () => {
-    const out = renderMarkdown('```\n/**\n * @param x - the value\n */\n```', 80);
+    const out = md('```\n/**\n * @param x - the value\n */\n```', 80);
     expect(out).toContain('* @param');
     expect(out).not.toContain('• @param');
   });
 
   it('returns plain text unchanged (trimmed)', () => {
-    expect(renderMarkdown('just words', 80)).toBe('just words');
+    expect(md('just words', 80)).toBe('just words');
   });
 });
