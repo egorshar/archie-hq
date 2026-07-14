@@ -223,7 +223,7 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
             // Visible conversation, OR a short inter-agent message — show inline.
             logLines.push({ node: full });
           } else {
-            const summary = <Text color={AGENT_GRAY}>▸ [{p.label}]{p.mention ? ` @${event.data.to}` : ''}  {oneLine(body)} (Enter to expand)</Text>;
+            const summary = <Text color={AGENT_GRAY}>▸ [{p.label}]{p.mention ? ` @${event.data.to}` : ''} {oneLine(body)} (Enter to expand)</Text>;
             logLines.push({ fold: { id: String(idx), summary, full: <><Text color={AGENT_GRAY}>▾ </Text>{full}</> } });
           }
           break;
