@@ -203,28 +203,28 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
           const fromStr = event.data.from as string;
           const fromUser = isUserSender(fromStr);
           const isPm = fromStr === 'pm-agent';
-          // Distinct labels so the conversation is scannable: the user's own
-          // messages green ([you] for the CLI operator, the name for Slack), the
-          // PM cyan (the agent you talk to), every other agent gray.
-          const isAgent = !fromUser && !isPm; // a non-PM agent → whole line recedes to gray
-          // The user's own messages are green ([you]/name), the PM cyan (the
-          // agent you talk to). Both keep markdown-rendered bodies. Every other
-          // agent is rendered as one flat gray block: markdown's embedded ANSI
-          // resets would otherwise punch default-colored holes through a gray
-          // wrapper, so agent bodies are shown as plain (unrendered) gray text.
-          const full = isAgent
-            ? <Text color={AGENT_GRAY}>[{p.label}]{p.mention ? ` @${event.data.to}` : ''} {body}{footer ? `\n${footer}` : ''}</Text>
-            : <>
-                <Text color={fromUser ? 'green' : 'cyan'} bold>[{fromUser && fromStr === 'cli' ? 'you' : p.label}]</Text>
-                {p.mention ? <Text color="cyan">{p.mention}</Text> : null} <Text>{renderMarkdown(body, mdWidth)}</Text>
-                {footer ? <Text dimColor>{'\n'}{footer}</Text> : null}
-              </>;
-          if (classifyEvent('message', event.data.from as string, event.data.to as string) === 'visible' || isShort(body)) {
-            // Visible conversation, OR a short inter-agent message — show inline.
-            logLines.push({ node: full });
+          const mentionSuffix = p.mention ? ` @${event.data.to}` : '';
+          const mentionNode = p.mention ? <Text color="cyan">{p.mention}</Text> : null;
+          const mdBody = <><Text>{renderMarkdown(body, mdWidth)}</Text>{footer ? <Text dimColor>{'\n'}{footer}</Text> : null}</>;
+          if (classifyEvent('message', fromStr, event.data.to as string) === 'visible') {
+            // The user↔PM conversation: prominent colored label (user green, PM
+            // cyan) + markdown-rendered body.
+            const label = fromUser
+              ? <Text color="green" bold>[{fromStr === 'cli' ? 'you' : p.label}]</Text>
+              : isPm
+                ? <Text color="cyan" bold>[{p.label}]</Text>
+                : <Text color={AGENT_GRAY}>[{p.label}]</Text>;
+            logLines.push({ node: <>{label}{mentionNode} {mdBody}</> });
+          } else if (isShort(body)) {
+            // Short agent-to-agent traffic: shown inline, receded to flat gray
+            // (unrendered — it's a one-liner of noise, no need for markdown).
+            logLines.push({ node: <Text color={AGENT_GRAY}>[{p.label}]{mentionSuffix} {body}{footer ? `\n${footer}` : ''}</Text> });
           } else {
-            const summary = <Text color={AGENT_GRAY}>▸ [{p.label}]{p.mention ? ` @${event.data.to}` : ''} {oneLine(body)} (Enter to expand)</Text>;
-            logLines.push({ fold: { id: String(idx), summary, full: <><Text color={AGENT_GRAY}>▾ </Text>{full}</> } });
+            // Long agent traffic: gray one-line summary; expanding it (an
+            // explicit "I want to read this") shows the full markdown body.
+            const summary = <Text color={AGENT_GRAY}>▸ [{p.label}]{mentionSuffix} {oneLine(body)} (Enter to expand)</Text>;
+            const expanded = <><Text color={AGENT_GRAY}>▾ [{p.label}]{mentionSuffix}</Text> {mdBody}</>;
+            logLines.push({ fold: { id: String(idx), summary, full: expanded } });
           }
           break;
         }
@@ -236,13 +236,14 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
         }
         case 'agent:log': {
           const finding = event.data.finding as string;
-          // Plain gray (not markdown) — same reason as agent messages above.
-          const full = <Text color={AGENT_GRAY}>[{event.agentName}] {finding}</Text>;
           if (isShort(finding)) {
-            logLines.push({ node: full });
+            // Short finding — inline, flat gray, unrendered.
+            logLines.push({ node: <Text color={AGENT_GRAY}>[{event.agentName}] {finding}</Text> });
           } else {
+            // Long finding — gray summary; expand for the full markdown body.
             const summary = <Text color={AGENT_GRAY}>▸ [{event.agentName}] finding: {oneLine(finding)} (Enter to expand)</Text>;
-            logLines.push({ fold: { id: String(idx), summary, full: <><Text color={AGENT_GRAY}>▾ </Text>{full}</> } });
+            const expanded = <><Text color={AGENT_GRAY}>▾ [{event.agentName}] </Text><Text>{renderMarkdown(finding, mdWidth)}</Text></>;
+            logLines.push({ fold: { id: String(idx), summary, full: expanded } });
           }
           break;
         }
