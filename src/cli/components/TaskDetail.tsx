@@ -179,10 +179,14 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
     }
   });
 
-  const oneLine = (s: string, n = 80): string => {
+  const FOLD_MIN_CHARS = 80;
+  const oneLine = (s: string, n = FOLD_MIN_CHARS): string => {
     const flat = s.replace(/\s+/g, ' ').trim();
     return flat.length > n ? flat.slice(0, n) + '…' : flat;
   };
+  // A foldable entry that's already short (fits the one-line summary without
+  // truncation) is shown inline instead of collapsed — there's nothing to hide.
+  const isShort = (s: string): boolean => s.replace(/\s+/g, ' ').trim().length <= FOLD_MIN_CHARS;
 
   if (events.length > 0) {
     events.forEach((event, idx) => {
@@ -191,14 +195,20 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
           const p = formatMessageParts(event.data.from as string, event.data.to as string, event.data.destination as string | undefined);
           const footer = event.data.footer as string | undefined;
           const body = event.data.message as string;
-          const fromUser = isUserSender(event.data.from as string);
-          // The user's own messages get a distinct green label ([you] for the
-          // CLI operator, the person's name for Slack); agents stay dim.
+          const fromStr = event.data.from as string;
+          const fromUser = isUserSender(fromStr);
+          const isPm = fromStr === 'pm-agent';
+          // Distinct labels so the conversation is scannable: the user's own
+          // messages green ([you] for the CLI operator, the name for Slack), the
+          // PM cyan (the agent you talk to), every other agent gray.
           const label = fromUser
-            ? <Text color="green" bold>[{(event.data.from as string) === 'cli' ? 'you' : p.label}]</Text>
-            : <Text dimColor>[{p.label}]</Text>;
+            ? <Text color="green" bold>[{fromStr === 'cli' ? 'you' : p.label}]</Text>
+            : isPm
+              ? <Text color="cyan" bold>[{p.label}]</Text>
+              : <Text color="gray">[{p.label}]</Text>;
           const full = <>{label}{p.mention ? <Text color="cyan">{p.mention}</Text> : null} <Text>{renderMarkdown(body, mdWidth)}</Text>{footer ? <Text dimColor>{'\n'}{footer}</Text> : null}</>;
-          if (classifyEvent('message', event.data.from as string, event.data.to as string) === 'visible') {
+          if (classifyEvent('message', event.data.from as string, event.data.to as string) === 'visible' || isShort(body)) {
+            // Visible conversation, OR a short inter-agent message — show inline.
             logLines.push({ node: full });
           } else {
             const summary = <Text dimColor>▸ [{p.label}]{p.mention ? ` @${event.data.to}` : ''}  {oneLine(body)} (Enter to expand)</Text>;
@@ -215,8 +225,12 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
         case 'agent:log': {
           const finding = event.data.finding as string;
           const full = <Text><Text dimColor>[{event.agentName}] </Text>{renderMarkdown(finding, mdWidth)}</Text>;
-          const summary = <Text dimColor>▸ [{event.agentName}] finding: {oneLine(finding)} (Enter to expand)</Text>;
-          logLines.push({ fold: { id: String(idx), summary, full: <><Text dimColor>▾ </Text>{full}</> } });
+          if (isShort(finding)) {
+            logLines.push({ node: full });
+          } else {
+            const summary = <Text dimColor>▸ [{event.agentName}] finding: {oneLine(finding)} (Enter to expand)</Text>;
+            logLines.push({ fold: { id: String(idx), summary, full: <><Text dimColor>▾ </Text>{full}</> } });
+          }
           break;
         }
         case 'agent:bg_task': {
@@ -232,10 +246,10 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
           if (ended) {
             const status = ended.data.status as string;
             const node = <Text dimColor>{status === 'completed' ? '✅' : '❌'} [{event.agentName}] background task {status} — {desc}</Text>;
-            logLines.push({ fold: { id: String(idx), summary: node, full: node } });
+            logLines.push({ node });
           } else {
             const node = <Text color="yellow">⏳ [{event.agentName}] background task running — {desc}</Text>;
-            logLines.push({ fold: { id: String(idx), summary: node, full: node } });
+            logLines.push({ node });
           }
           break;
         }
@@ -387,6 +401,27 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
       setTimeout(() => scrollRef.current?.scrollToBottom(), 0);
     }
   }, [liveEvents]);
+
+  // Keep the focused row in view: when focus moves (Tab/Shift+Tab) or a focused
+  // fold expands/collapses, scroll minimally so the row is fully visible. Runs
+  // after paint (setTimeout 0) so the ScrollView has re-measured item heights.
+  useEffect(() => {
+    if (focusedLine === null) return;
+    const t = setTimeout(() => {
+      const ref = scrollRef.current;
+      if (!ref) return;
+      const pos = ref.getItemPosition(focusedLine);
+      if (!pos) return;
+      const offset = ref.getScrollOffset();
+      const vh = ref.getViewportHeight();
+      if (pos.top < offset) {
+        ref.scrollTo(pos.top);
+      } else if (pos.top + pos.height > offset + vh) {
+        ref.scrollTo(pos.top + pos.height - vh);
+      }
+    }, 0);
+    return () => clearTimeout(t);
+  }, [focusedLine, expandedFolds]);
 
   // Handle reconnect — fetch missed events
   useEffect(() => {
@@ -588,8 +623,14 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
               ? (expandedFolds.has(line.fold.id) ? line.fold.full : line.fold.summary)
               : line.node;
             return (
+              // Focus is shown by a leading cursor (❯), NOT by inverting the
+              // whole row — inverse fought the markdown ANSI colors and made an
+              // expanded message hard to read.
               <Box key={i} marginBottom={1}>
-                <Text wrap="wrap" inverse={isFocused}>{node}</Text>
+                {/* Fixed 2-col gutter (flexShrink:0 so a wrapping body can't
+                    collapse the cursor's trailing space); body grows + wraps. */}
+                <Box flexShrink={0}><Text color="cyan" bold>{isFocused ? '❯ ' : '  '}</Text></Box>
+                <Box flexGrow={1}><Text wrap="wrap">{node}</Text></Box>
               </Box>
             );
           })}
