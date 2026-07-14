@@ -12,6 +12,13 @@ describe('classifyEvent', () => {
     expect(classifyEvent('message', 'pm-agent', 'frontend-agent')).toBe('foldable');
     expect(classifyEvent('message', 'backend-agent', 'pm-agent')).toBe('foldable');
   });
+  it('folds CI/webhook messages (from:ci → pm), not treated as user', () => {
+    expect(classifyEvent('message', 'ci', 'pm-agent')).toBe('foldable');
+  });
+  it('keeps a system notice to the user visible but not user-flagged', () => {
+    expect(classifyEvent('message', 'system', 'user')).toBe('visible'); // to===user
+    expect(isUserSender('system')).toBe(false);                          // but not styled as the human
+  });
   it('shows actionable/tracked events', () => {
     for (const t of ['approval:requested', 'approval:resolved', 'pr_card', 'reminder:set', 'reminder:fired', 'reminder:cancelled']) {
       expect(classifyEvent(t)).toBe('visible');
@@ -30,6 +37,8 @@ describe('isUserSender', () => {
     expect(isUserSender('user')).toBe(true);
     expect(isUserSender('pm-agent')).toBe(false);
     expect(isUserSender('backend-agent')).toBe(false);
+    expect(isUserSender('ci')).toBe(false);       // CI/webhook, not a human
+    expect(isUserSender('system')).toBe(false);   // system notice, not a human
     expect(isUserSender(undefined)).toBe(false);
   });
 });

@@ -64,11 +64,17 @@ export function classifyEvent(type: string, from?: string, to?: string): 'visibl
   return 'visible'; // approvals, pr_card, reminders, and anything else
 }
 
-/** A message sender that is a human (CLI operator or a named person), not an
- * agent. Agent ids end in `-agent`; everything else (`cli`, real names) is a
- * user. Used to both classify and visually mark the user's own messages. */
+/** Non-human, non-agent senders that appear in the message stream: CI/webhook
+ * events (`from:'ci'`) and system notices (`from:'system'`, e.g. the wall-clock
+ * pause). These are neither agents (they don't end in `-agent`) nor the user. */
+const NON_USER_SENDERS = new Set(['ci', 'system']);
+
+/** A message sender that is a human — the CLI operator (`cli`) or a named
+ * person (Slack real name) — as opposed to an agent (`<name>-agent`) or a
+ * system/CI sender. Used to both classify and visually mark the user's own
+ * messages. */
 export function isUserSender(from?: string): boolean {
-  return !!from && !from.endsWith('-agent');
+  return !!from && !from.endsWith('-agent') && !NON_USER_SENDERS.has(from);
 }
 
 function formatDateTime(iso: string): string {
