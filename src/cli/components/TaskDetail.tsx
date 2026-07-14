@@ -415,6 +415,26 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
         onBack();
       }, 50);
       return;
+    } else if (key.tab && key.shift) {
+      // Shift+Tab: the reverse of Tab — move focus downward (top→bottom).
+      // Checked before plain Tab since Shift+Tab also sets key.tab.
+      if (inputActive) {
+        if (focusableLines.length > 0) {
+          setInputActive(false);
+          setFocusedLine(focusableLines[0]);
+        }
+      } else if (focusedLine !== null) {
+        const cur = focusableLines.indexOf(focusedLine);
+        if (cur >= 0 && cur < focusableLines.length - 1) {
+          setFocusedLine(focusableLines[cur + 1]);
+        } else {
+          setInputActive(true);
+          setFocusedLine(null);
+        }
+      } else {
+        setInputActive(true);
+        setFocusedLine(null);
+      }
     } else if (key.tab) {
       // Tab cycles bottom→top: input → last focusable row → … → first → input.
       // Starting from the bottom matches what the user sees first (newest
