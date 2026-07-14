@@ -47,6 +47,19 @@ function formatMessageParts(from: string, to: string, destination?: string): { l
   return { label, mention };
 }
 
+/**
+ * Which log entries are shown in full by default vs. folded. Visible: the
+ * PM↔user conversation and actionable/tracked items. Foldable: inter-agent
+ * chatter, findings, and background tasks. Pure + exported for unit testing.
+ */
+export function classifyEvent(type: string, from?: string, to?: string): 'visible' | 'foldable' {
+  if (type === 'message') {
+    return from === 'user' || to === 'user' ? 'visible' : 'foldable';
+  }
+  if (type === 'agent:log' || type === 'agent:bg_task') return 'foldable';
+  return 'visible'; // approvals, pr_card, reminders, and anything else
+}
+
 function formatDateTime(iso: string): string {
   const d = new Date(iso);
   return d.toLocaleString('en-US', {
@@ -109,7 +122,7 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
   const [eventCursor, setEventCursor] = useState(0);
   const [fallbackLines, setFallbackLines] = useState<string[]>([]); // knowledge.log for old tasks
   const [inputActive, setInputActive] = useState(true);
-  const [focusedApprovalLine, setFocusedApprovalLine] = useState<number | null>(null);
+  const [focusedLine, setFocusedLine] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string>('');
   // Live "Archie is …" indicator — the same line pushed to Slack, mirrored here
@@ -122,6 +135,7 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
   const scrollRef = useRef<ScrollViewRef>(null);
   const autoScroll = useRef(true); // stick to bottom unless user scrolls up
   const [linesBelow, setLinesBelow] = useState(0);
+  const [expandedFolds, setExpandedFolds] = useState<Set<string>>(new Set());
   const escapeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Reserve lines: header(1) + agents(1) + margin(1) + indicator/gap(2) + input(1)
@@ -131,7 +145,7 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
   const mdWidth = Math.max(40, (stdout?.columns ?? 80) - 2);
 
   // Build log lines with inline approvals
-  const logLines: { node: React.ReactNode; approval?: { approvalType: 'edit_mode' | 'research_budget' | 'merge' | 'trigger' | 'max_mode'; eventIndex: number; github?: string; pr_number?: number; ref?: string } }[] = [];
+  const logLines: { node?: React.ReactNode; approval?: { approvalType: 'edit_mode' | 'research_budget' | 'merge' | 'trigger' | 'max_mode'; eventIndex: number; github?: string; pr_number?: number; ref?: string }; fold?: { id: string; summary: React.ReactNode; full: React.ReactNode } }[] = [];
 
   // Fold pr_card events so a card renders once, at its most recent `post`
   // (anchor), showing the latest merged state. `update` events refresh the data
@@ -148,25 +162,40 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
     }
   });
 
+  const oneLine = (s: string, n = 80): string => {
+    const flat = s.replace(/\s+/g, ' ').trim();
+    return flat.length > n ? flat.slice(0, n) + '…' : flat;
+  };
+
   if (events.length > 0) {
     events.forEach((event, idx) => {
       switch (event.type) {
-        case 'message':
-          logLines.push({
-            node: (() => { const p = formatMessageParts(event.data.from as string, event.data.to as string, event.data.destination as string | undefined); const footer = event.data.footer as string | undefined; return <><Text dimColor>[{p.label}]</Text>{p.mention ? <Text color="cyan">{p.mention}</Text> : null} <Text>{renderMarkdown(event.data.message as string, mdWidth)}</Text>{footer ? <Text dimColor>{'\n'}{footer}</Text> : null}</>; })(),
-          });
+        case 'message': {
+          const p = formatMessageParts(event.data.from as string, event.data.to as string, event.data.destination as string | undefined);
+          const footer = event.data.footer as string | undefined;
+          const body = event.data.message as string;
+          const full = <><Text dimColor>[{p.label}]</Text>{p.mention ? <Text color="cyan">{p.mention}</Text> : null} <Text>{renderMarkdown(body, mdWidth)}</Text>{footer ? <Text dimColor>{'\n'}{footer}</Text> : null}</>;
+          if (classifyEvent('message', event.data.from as string, event.data.to as string) === 'visible') {
+            logLines.push({ node: full });
+          } else {
+            const summary = <Text dimColor>▸ [{p.label}]{p.mention ? ` @${event.data.to}` : ''}  {oneLine(body)} (Enter to expand)</Text>;
+            logLines.push({ fold: { id: String(idx), summary, full: <><Text dimColor>▾ </Text>{full}</> } });
+          }
           break;
+        }
         case 'pr_card': {
           const cardId = event.data.cardId as string | undefined;
           if (!cardId || prCardAnchor.get(cardId) !== idx) break; // render once, at the anchor
           logLines.push({ node: renderPrCard(prCardLatest.get(cardId) ?? event.data) });
           break;
         }
-        case 'agent:log':
-          logLines.push({
-            node: <Text><Text dimColor>[{event.agentName}] </Text>{renderMarkdown(event.data.finding as string, mdWidth)}</Text>,
-          });
+        case 'agent:log': {
+          const finding = event.data.finding as string;
+          const full = <Text><Text dimColor>[{event.agentName}] </Text>{renderMarkdown(finding, mdWidth)}</Text>;
+          const summary = <Text dimColor>▸ [{event.agentName}] finding: {oneLine(finding)} (Enter to expand)</Text>;
+          logLines.push({ fold: { id: String(idx), summary, full: <><Text dimColor>▾ </Text>{full}</> } });
           break;
+        }
         case 'agent:bg_task': {
           // One entry per background task, keyed by task_id: render the 'start' as
           // ⏳ running, and once the matching 'end' has arrived (events is rebuilt on
@@ -179,13 +208,11 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
           const desc = (event.data.description as string) || 'background task';
           if (ended) {
             const status = ended.data.status as string;
-            logLines.push({
-              node: <Text dimColor>{status === 'completed' ? '✅' : '❌'} [{event.agentName}] background task {status} — {desc}</Text>,
-            });
+            const node = <Text dimColor>{status === 'completed' ? '✅' : '❌'} [{event.agentName}] background task {status} — {desc}</Text>;
+            logLines.push({ fold: { id: String(idx), summary: node, full: node } });
           } else {
-            logLines.push({
-              node: <Text color="yellow">⏳ [{event.agentName}] background task running — {desc}</Text>,
-            });
+            const node = <Text color="yellow">⏳ [{event.agentName}] background task running — {desc}</Text>;
+            logLines.push({ fold: { id: String(idx), summary: node, full: node } });
           }
           break;
         }
@@ -235,20 +262,20 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
           break;
       }
     });
-  } else {
-    fallbackLines.forEach((line) => {
-      logLines.push({ node: <Text>{line}</Text> });
-    });
+  } else if (fallbackLines.length > 0) {
+    logLines.push({ node: <Text>{renderMarkdown(fallbackLines.join('\n'), mdWidth)}</Text> });
   }
 
-  // Collect line indices of pending approvals
-  const pendingApprovalLines = logLines
-    .map((l, i) => l.approval ? i : -1)
+  // Focusable rows: foldable rows and pending approvals (in display order).
+  const focusableLines = logLines
+    .map((l, i) => (l.fold || l.approval ? i : -1))
     .filter((i) => i >= 0);
 
-  // The approval at the focused line (if any)
-  const focusedApproval = focusedApprovalLine !== null
-    ? logLines[focusedApprovalLine]?.approval ?? null
+  const focusedApproval = focusedLine !== null
+    ? logLines[focusedLine]?.approval ?? null
+    : null;
+  const focusedFold = focusedLine !== null
+    ? logLines[focusedLine]?.fold ?? null
     : null;
 
   // Initial load: fetch metadata + events
@@ -366,39 +393,42 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
       }, 50);
       return;
     } else if (key.tab) {
-      // Tab cycles through: input → pending approvals → input
+      // Tab cycles: input → each focusable row (foldable/approval) → input
       if (inputActive) {
-        if (pendingApprovalLines.length > 0) {
-          setInputActive(false);
-          setFocusedApprovalLine(pendingApprovalLines[0]);
-        } else {
-          setInputActive(false);
-          setFocusedApprovalLine(null);
-        }
-      } else if (focusedApprovalLine !== null) {
-        const currentIdx = pendingApprovalLines.indexOf(focusedApprovalLine);
-        const nextIdx = currentIdx + 1;
-        if (nextIdx < pendingApprovalLines.length) {
-          setFocusedApprovalLine(pendingApprovalLines[nextIdx]);
+        setInputActive(false);
+        setFocusedLine(focusableLines.length > 0 ? focusableLines[0] : null);
+      } else if (focusedLine !== null) {
+        const cur = focusableLines.indexOf(focusedLine);
+        const next = cur + 1;
+        if (next < focusableLines.length) {
+          setFocusedLine(focusableLines[next]);
         } else {
           setInputActive(true);
-          setFocusedApprovalLine(null);
+          setFocusedLine(null);
         }
       } else {
         setInputActive(true);
-        setFocusedApprovalLine(null);
+        setFocusedLine(null);
       }
     } else if (!inputActive) {
-      // Scroll mode / approval handling
       if (input === 'q' || input === 'Q') exit();
       if (focusedApproval && (input === 'y' || input === 'Y')) {
         sendApproval(taskId, focusedApproval.approvalType, true, mergeIdentity(focusedApproval), focusedApproval.ref).catch((err: any) => setError(err.message));
-        setFocusedApprovalLine(null);
+        setFocusedLine(null);
         setInputActive(true);
       } else if (focusedApproval && (input === 'n' || input === 'N')) {
         sendApproval(taskId, focusedApproval.approvalType, false, mergeIdentity(focusedApproval), focusedApproval.ref).catch((err: any) => setError(err.message));
-        setFocusedApprovalLine(null);
+        setFocusedLine(null);
         setInputActive(true);
+      } else if (focusedFold && (key.return || key.rightArrow || key.leftArrow)) {
+        const id = focusedFold.id;
+        setExpandedFolds((prev) => {
+          const next = new Set(prev);
+          if (key.rightArrow) next.add(id);
+          else if (key.leftArrow) next.delete(id);
+          else next.has(id) ? next.delete(id) : next.add(id); // Enter toggles
+          return next;
+        });
       }
     }
 
@@ -413,14 +443,14 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
     // Scroll with arrows (always available) — clear focused approval when scrolling
     const scrollStep = key.meta ? 10 : 1;
     if (key.upArrow) {
-      setFocusedApprovalLine(null);
+      setFocusedLine(null);
       const refUp = scrollRef.current;
       if (refUp) {
         const current = refUp.getScrollOffset();
         refUp.scrollTo(Math.max(0, current - scrollStep));
       }
     } else if (key.downArrow) {
-      setFocusedApprovalLine(null);
+      setFocusedLine(null);
       const refDown = scrollRef.current;
       if (refDown) {
         const current = refDown.getScrollOffset();
@@ -506,9 +536,14 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
           }}
         >
           {logLines.map((line, i) => {
-            const isFocused = i === focusedApprovalLine;
+            const isFocused = i === focusedLine;
+            const node = line.fold
+              ? (expandedFolds.has(line.fold.id) ? line.fold.full : line.fold.summary)
+              : line.node;
             return (
-              <Text key={i} wrap="wrap" inverse={isFocused}>{line.node}</Text>
+              <Box key={i} marginBottom={1}>
+                <Text wrap="wrap" inverse={isFocused}>{node}</Text>
+              </Box>
             );
           })}
         </ScrollView>

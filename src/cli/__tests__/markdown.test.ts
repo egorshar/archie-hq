@@ -39,3 +39,32 @@ describe('renderMarkdown', () => {
     expect(() => renderMarkdown('```\nunterminated fence')).not.toThrow();
   });
 });
+
+describe('renderMarkdown lists & structure', () => {
+  it('renders unordered-list items', () => {
+    const out = renderMarkdown('- alpha\n- beta', 80);
+    expect(out).toContain('alpha');
+    expect(out).toContain('beta');
+  });
+
+  it('renders a heading without the leading #', () => {
+    const out = renderMarkdown('# Title here', 80);
+    expect(out).toContain('Title here');
+    expect(out).not.toContain('# Title here');
+  });
+
+  it('preserves fenced code content', () => {
+    const out = renderMarkdown('```\nconst x = 1;\n```', 80);
+    expect(out).toContain('const x = 1;');
+  });
+
+  it('does not corrupt a JSDoc-style `*` line inside fenced code', () => {
+    const out = renderMarkdown('```\n/**\n * @param x - the value\n */\n```', 80);
+    expect(out).toContain('* @param');
+    expect(out).not.toContain('• @param');
+  });
+
+  it('returns plain text unchanged (trimmed)', () => {
+    expect(renderMarkdown('just words', 80)).toBe('just words');
+  });
+});

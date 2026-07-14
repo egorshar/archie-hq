@@ -17,7 +17,14 @@ function instanceFor(width: number): Marked {
   if (!m) {
     // @types/marked-terminal (v6) types the return as TerminalRenderer; the
     // runtime (v7) returns a marked extension. Cast to the shape marked expects.
-    m = new Marked(markedTerminal({ width, reflowText: true }) as unknown as MarkedExtension);
+    m = new Marked(markedTerminal({
+      width,
+      reflowText: true,
+      // showSectionPrefix defaults to true, which re-prepends a literal `#`
+      // (repeated per heading level) to headings — disable it so headings
+      // render as plain styled text instead of raw markdown syntax.
+      showSectionPrefix: false,
+    }) as unknown as MarkedExtension);
     cache.set(width, m);
   }
   return m;
