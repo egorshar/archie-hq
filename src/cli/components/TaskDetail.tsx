@@ -201,18 +201,19 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
           // Distinct labels so the conversation is scannable: the user's own
           // messages green ([you] for the CLI operator, the name for Slack), the
           // PM cyan (the agent you talk to), every other agent gray.
+          const isAgent = !fromUser && !isPm; // a non-PM agent → whole line recedes to gray
           const label = fromUser
             ? <Text color="green" bold>[{fromStr === 'cli' ? 'you' : p.label}]</Text>
             : isPm
               ? <Text color="cyan" bold>[{p.label}]</Text>
               : <Text color="gray">[{p.label}]</Text>;
-          const full = <>{label}{p.mention ? <Text color="cyan">{p.mention}</Text> : null} <Text>{renderMarkdown(body, mdWidth)}</Text>{footer ? <Text dimColor>{'\n'}{footer}</Text> : null}</>;
+          const full = <>{label}{p.mention ? <Text color="cyan">{p.mention}</Text> : null} <Text color={isAgent ? 'gray' : undefined}>{renderMarkdown(body, mdWidth)}</Text>{footer ? <Text dimColor>{'\n'}{footer}</Text> : null}</>;
           if (classifyEvent('message', event.data.from as string, event.data.to as string) === 'visible' || isShort(body)) {
             // Visible conversation, OR a short inter-agent message — show inline.
             logLines.push({ node: full });
           } else {
-            const summary = <Text dimColor>▸ [{p.label}]{p.mention ? ` @${event.data.to}` : ''}  {oneLine(body)} (Enter to expand)</Text>;
-            logLines.push({ fold: { id: String(idx), summary, full: <><Text dimColor>▾ </Text>{full}</> } });
+            const summary = <Text color="gray">▸ [{p.label}]{p.mention ? ` @${event.data.to}` : ''}  {oneLine(body)} (Enter to expand)</Text>;
+            logLines.push({ fold: { id: String(idx), summary, full: <><Text color="gray">▾ </Text>{full}</> } });
           }
           break;
         }
@@ -224,12 +225,12 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
         }
         case 'agent:log': {
           const finding = event.data.finding as string;
-          const full = <Text><Text dimColor>[{event.agentName}] </Text>{renderMarkdown(finding, mdWidth)}</Text>;
+          const full = <Text color="gray">[{event.agentName}] {renderMarkdown(finding, mdWidth)}</Text>;
           if (isShort(finding)) {
             logLines.push({ node: full });
           } else {
-            const summary = <Text dimColor>▸ [{event.agentName}] finding: {oneLine(finding)} (Enter to expand)</Text>;
-            logLines.push({ fold: { id: String(idx), summary, full: <><Text dimColor>▾ </Text>{full}</> } });
+            const summary = <Text color="gray">▸ [{event.agentName}] finding: {oneLine(finding)} (Enter to expand)</Text>;
+            logLines.push({ fold: { id: String(idx), summary, full: <><Text color="gray">▾ </Text>{full}</> } });
           }
           break;
         }
@@ -245,7 +246,7 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
           const desc = (event.data.description as string) || 'background task';
           if (ended) {
             const status = ended.data.status as string;
-            const node = <Text dimColor>{status === 'completed' ? '✅' : '❌'} [{event.agentName}] background task {status} — {desc}</Text>;
+            const node = <Text color="gray">{status === 'completed' ? '✅' : '❌'} [{event.agentName}] background task {status} — {desc}</Text>;
             logLines.push({ node });
           } else {
             const node = <Text color="yellow">⏳ [{event.agentName}] background task running — {desc}</Text>;
