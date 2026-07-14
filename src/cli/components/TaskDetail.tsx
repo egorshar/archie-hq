@@ -278,7 +278,7 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
           );
           if (resolved || supersededByLater) {
             logLines.push({
-              node: <Text dimColor>{resolved ? '✅ ' : ''}{event.data.text as string}{resolved ? ' (resolved)' : ''}</Text>,
+              node: <Text color={AGENT_GRAY}>[system] {event.data.text as string}{resolved ? ' (resolved)' : ''}</Text>,
             });
           } else {
             logLines.push({
