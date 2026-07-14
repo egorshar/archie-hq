@@ -269,9 +269,16 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
         }
         case 'approval:requested': {
           const resolved = isApprovalResolved(event, events);
-          if (resolved) {
+          // An approval is only actionable while it's the last thing awaiting
+          // you. If any later message or approval exists, the conversation moved
+          // on (e.g. you answered in chat rather than via y/n), so it's no
+          // longer active — render it settled and not focusable/auto-focusable.
+          const supersededByLater = events.slice(idx + 1).some(
+            (e) => e.type === 'message' || e.type === 'approval:requested',
+          );
+          if (resolved || supersededByLater) {
             logLines.push({
-              node: <Text dimColor>✅ {event.data.text as string} (resolved)</Text>,
+              node: <Text dimColor>{resolved ? '✅ ' : ''}{event.data.text as string}{resolved ? ' (resolved)' : ''}</Text>,
             });
           } else {
             logLines.push({
