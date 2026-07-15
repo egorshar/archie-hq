@@ -5,7 +5,7 @@ export const meta = {
   phases: [
     { title: 'Plan', detail: 'forge-plan: planner + critics' },
     { title: 'Implement', detail: 'forge-implement: tasks, gate, blind review' },
-    { title: 'QA', detail: 'forge-qa: black-box live verification, route-back cap 2' },
+    { title: 'QA', detail: 'forge-qa: black-box live verification, 2 cycles (one route-back)' },
     { title: 'Docs', detail: 'forge-docs: update + verify documentation' },
     { title: 'Ship', detail: 'forge-ship: push, open PR with manifest' },
   ],
@@ -20,9 +20,13 @@ export const meta = {
 //     qa?: string, qaCycles?: string, docs?: string, ship?: string,
 //   },
 // }
-// Resume contract: relaunch with the SAME args plus answers.<stage>. Answers reach only the
-// stage that impassed (and only its guided-retry prompts), so every completed agent call
-// replays from cache. `args` may arrive as a JSON string — normalize before use.
+// Resume contract: relaunch with the SAME args plus the answer under the key the impasse
+// question names. Answers reach only the stage that impassed (and only its guided-retry
+// prompts), so every completed agent call replays from cache. Replay is POSITIONAL: the
+// longest unchanged prefix of agent calls replays; from the first divergent call onward
+// everything runs live — which is why re-reviews and re-QA after a live fix never replay
+// stale verdicts even when their prompts are byte-identical to earlier rounds. `args` may
+// arrive as a JSON string — normalize before use.
 const input = typeof args === 'string' ? JSON.parse(args) : (args || {})
 if (!input.change || !input.brief || !Array.isArray(input.acs)) return { status: 'error', reason: 'missing input.change/brief/acs' }
 const base = input.base || 'main'
@@ -62,10 +66,17 @@ while (cycles < qaCap) {
   if (qaRes.status !== 'ok') return qaRes
   if (qaRes.failures.length === 0) break
   if (cycles === qaCap) {
-    return { status: 'impasse', stage: 'qa', question: `${qaRes.failures.length} AC(s) still failing after ${cycles} QA cycle(s). Fix differently, waive, or rescope? (Your answer becomes guidance keyed "qaCycles" and unlocks one more cycle.)`, context: qaRes.failures }
+    // The qaCycles unlock is deliberately one-shot: caps exist so runs stay bounded.
+    return answers.qaCycles
+      ? { status: 'impasse', stage: 'qa', terminal: true, question: `${qaRes.failures.length} AC(s) still failing after the operator-guided extra cycle. The run has exhausted its QA budget — abandon it (fix manually or start a fresh run with a reworked brief); no further answer unlocks more cycles.`, context: qaRes.failures }
+      : { status: 'impasse', stage: 'qa', question: `${qaRes.failures.length} AC(s) still failing after ${cycles} QA cycles. How should the fixes change? (Your answer becomes guidance keyed "qaCycles" and unlocks ONE more fix + QA cycle — it is delivered into the extra cycle's fix prompts.)`, context: qaRes.failures }
   }
   log(`QA cycle ${cycles}: ${qaRes.failures.length} failing AC(s) — routing back to implement`)
-  implRes = await run('forge-implement', { change: input.change, branch, base, brief: input.brief, acs: input.acs, plan: planRes.plan, fresh: false, fixes: qaRes.failures, guidance: answers.qaCycles || answers.implement }, 'implement')
+  // The operator's qaCycles steer is baked only into the UNLOCKED cycle's route-back (the one
+  // new call sequence on resume); earlier route-backs keep their original guidance so their
+  // completed calls stay cache-stable.
+  const unlockedRouteBack = cycles === 2 && answers.qaCycles
+  implRes = await run('forge-implement', { change: input.change, branch, base, brief: input.brief, acs: input.acs, plan: planRes.plan, fresh: false, fixes: qaRes.failures, guidance: unlockedRouteBack ? answers.qaCycles : answers.implement }, 'implement')
   if (implRes.status !== 'ok') return implRes
 }
 
@@ -91,5 +102,8 @@ return {
   pr: shipRes.pr,
   manifest: qaRes.manifest,
   planSummary: planRes.plan.summary,
+  // The full plan travels out so the conductor can launch fix-mode forge-implement for
+  // post-run review feedback (it requires plan.design and plan.tasks).
+  plan: planRes.plan,
   rounds: { plan: planRes.rounds, implement: implRes.rounds, qaCycles: cycles, docs: docsRes.rounds },
 }

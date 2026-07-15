@@ -18,6 +18,20 @@ if (!input.brief || !Array.isArray(input.acs)) return { status: 'error', reason:
 const PLAN = {
   type: 'object',
   properties: {
+    exceedsScope: { type: 'boolean', description: 'Set true INSTEAD of planning when the change cannot fit one bounded run — then fill proposedSplit and summary, and leave the plan fields empty' },
+    proposedSplit: {
+      type: 'array',
+      description: 'Only with exceedsScope: ordered iterations, each independently shippable and QA-able',
+      items: {
+        type: 'object',
+        properties: {
+          title: { type: 'string' },
+          rationale: { type: 'string' },
+          observableOutcome: { type: 'string', description: 'The behavior a live instance exhibits after ONLY this iteration merges — must not be "code exists"' },
+        },
+        required: ['title', 'rationale', 'observableOutcome'],
+      },
+    },
     design: { type: 'string', description: 'The design, markdown: approach, key decisions, affected files/subsystems, error and recovery paths, known trade-offs' },
     tasks: {
       type: 'array',
@@ -49,8 +63,9 @@ const PLAN = {
     },
     summary: { type: 'string', description: 'Compact plan summary for the operator: goal, approach, task count, verification highlights, trade-offs' },
   },
-  required: ['design', 'tasks', 'verificationPlan', 'summary'],
+  required: ['summary'],
 }
+const planComplete = (p) => !!(p && p.design && Array.isArray(p.tasks) && p.tasks.length > 0 && Array.isArray(p.verificationPlan) && p.verificationPlan.length > 0)
 
 const VERDICT = {
   type: 'object',
@@ -84,34 +99,38 @@ const critics = [
   },
 ]
 
+// Fail CLOSED: a critic that dies (null result) counts as a blocking finding so the gate is
+// never silently skipped — the critic simply re-runs next round.
 const critique = async (which, tag) => {
   const verdicts = await parallel(which.map((c) => () =>
     agent(c.prompt(plan), { label: `critic:${c.key} ${tag}`, phase: 'Critique', schema: VERDICT }).then((v) => ({ key: c.key, v }))
   ))
   const blocking = []
+  const got = new Set()
   for (const r of verdicts.filter(Boolean)) {
     if (r.v) {
+      got.add(r.key)
       lastVerdicts[r.key] = r.v
       for (const f of r.v.findings) if (f.blocking) blocking.push({ critic: r.key, text: f.text })
     }
   }
+  for (const c of which) if (!got.has(c.key)) blocking.push({ critic: c.key, text: 'AGENT-FAILURE: this critic returned no verdict; it must re-run and pass before the plan is accepted' })
   return blocking
 }
 
-const revisePrompt = (blocking, extra) => `You are the planner, revising your plan to resolve blocking findings from independent critics. Address every finding; do not silently drop tasks or ACs.${extra || ''} ${planContext}\nThe current plan:\n${JSON.stringify(plan, null, 2)}\nBlocking findings:\n${JSON.stringify(blocking, null, 2)}`
+const revisePrompt = (blocking, extra) => `You are the planner, revising your plan to resolve blocking findings from independent critics. Address every finding; do not silently drop tasks or ACs. Findings tagged AGENT-FAILURE are not design findings — change nothing for them; that critic simply re-runs.${extra || ''} ${planContext}\nThe current plan:\n${JSON.stringify(plan, null, 2)}\nBlocking findings:\n${JSON.stringify(blocking, null, 2)}`
 
 phase('Draft')
-let plan = await agent(
-  `You are a planner. Inputs are ONLY the brief, ACs, and dossier below — you have no other context and must not assume any. Produce: (1) a design that satisfies every AC within the dossier's constraints; (2) small ordered tasks, each independently checkable; (3) a verification plan mapping every AC id to its method and the concrete scenario/check producing its evidence. Follow the repo's conventions (read CLAUDE.md and docs/architecture/ as needed). ${planContext}`,
-  { label: 'planner', phase: 'Draft', schema: PLAN }
-)
-if (!plan && input.guidance) {
-  plan = await agent(
-    `You are a planner. Inputs are ONLY the brief, ACs, and dossier below — you have no other context and must not assume any. Operator guidance from a previous failed attempt: ${input.guidance}. Produce: (1) a design that satisfies every AC within the dossier's constraints; (2) small ordered tasks, each independently checkable; (3) a verification plan mapping every AC id to its method and the concrete scenario/check producing its evidence. Follow the repo's conventions (read CLAUDE.md and docs/architecture/ as needed). ${planContext}`,
-    { label: 'planner (guided)', phase: 'Draft', schema: PLAN }
-  )
+const plannerBase = `You are a planner. Inputs are ONLY the brief, ACs, and dossier below — you have no other context and must not assume any. Produce: (1) a design that satisfies every AC within the dossier's constraints; (2) small ordered tasks, each independently checkable; (3) a verification plan mapping every AC id to its method and the concrete scenario/check producing its evidence. Follow the repo's conventions (read CLAUDE.md and docs/architecture/ as needed). ESCAPE HATCH: if the dossier shows the change cannot fit one bounded run (single feature branch, single live-QA boot, roughly a normal-sized PR, review loops capped at 3 rounds), do NOT force a plan — set exceedsScope true and propose an ordered split whose every iteration is independently shippable and QA-able against a live instance. ${planContext}`
+let plan = await agent(plannerBase, { label: 'planner', phase: 'Draft', schema: PLAN })
+if ((!plan || (!plan.exceedsScope && !planComplete(plan))) && input.guidance) {
+  plan = await agent(`${plannerBase}\nOperator guidance from a previous failed attempt: ${input.guidance}`, { label: 'planner (guided)', phase: 'Draft', schema: PLAN })
 }
-if (!plan) return { status: 'impasse', stage: 'plan', question: 'The planner agent failed to produce a plan. Retry the run, or rescope?', context: null }
+if (!plan) return { status: 'impasse', stage: 'plan', question: 'The planner agent failed to produce a plan. How should we proceed? (Your answer becomes guidance for a retry.)', context: null }
+if (plan.exceedsScope) {
+  return { status: 'impasse', stage: 'plan', reason: 'exceeds-scope', question: 'The planner judged this change too big for one bounded run and proposes a split. Approve the split (conductor: route back to the split path — file issues, restart with iteration #1), or override with guidance to plan it anyway?', context: { proposedSplit: plan.proposedSplit || [], summary: plan.summary } }
+}
+if (!planComplete(plan)) return { status: 'impasse', stage: 'plan', question: 'The planner returned an incomplete plan (missing design, tasks, or verification plan). How should we proceed? (Your answer becomes guidance for a retry.)', context: { summary: plan.summary } }
 
 phase('Critique')
 let lastVerdicts = {}

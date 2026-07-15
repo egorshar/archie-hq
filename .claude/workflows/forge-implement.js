@@ -65,13 +65,15 @@ const REVIEW = {
 }
 
 phase('Setup')
-const setup = await agent(
-  input.fresh
-    ? `Set up a fresh feature branch in this repo: git fetch origin ${input.base}, then git checkout -B ${input.branch} origin/${input.base} (this run owns branch ${input.branch}; discarding any stale copy of it is intended). Confirm a clean working tree. Return the head SHA.`
-    : `Continue work on existing branch ${input.branch} in this repo: git fetch origin ${input.base}, git checkout ${input.branch}. Do NOT reset it — it carries this run's prior commits. Confirm a clean working tree. Return the head SHA.`,
-  { label: 'branch-setup', phase: 'Setup', effort: 'low', schema: { type: 'object', properties: { ok: { type: 'boolean' }, headSha: { type: 'string' } }, required: ['ok', 'headSha'] } }
-)
-if (!setup || !setup.ok) return { status: 'impasse', stage: 'implement', question: `Could not set up branch ${input.branch}. Working tree dirty, or base ${input.base} unreachable?`, context: setup }
+const SETUP = { type: 'object', properties: { ok: { type: 'boolean' }, headSha: { type: 'string' } }, required: ['ok', 'headSha'] }
+const setupPrompt = input.fresh
+  ? `Set up a fresh feature branch in this repo: git fetch origin ${input.base}, then git checkout -B ${input.branch} origin/${input.base} (this run owns branch ${input.branch}; discarding any stale copy of it is intended). Confirm a clean working tree. Return the head SHA.`
+  : `Continue work on existing branch ${input.branch} in this repo: git fetch origin ${input.base}, git checkout ${input.branch}. Do NOT reset it — it carries this run's prior commits. Confirm a clean working tree. Return the head SHA.`
+let setup = await agent(setupPrompt, { label: 'branch-setup', phase: 'Setup', effort: 'low', schema: SETUP })
+if ((!setup || !setup.ok) && guideFor('setup')) {
+  setup = await agent(setupPrompt + guideFor('setup'), { label: 'branch-setup (guided)', phase: 'Setup', effort: 'low', schema: SETUP })
+}
+if (!setup || !setup.ok) return { status: 'impasse', stage: 'implement', question: `Could not set up branch ${input.branch}. Working tree dirty, or base ${input.base} unreachable? (Your answer becomes guidance keyed "setup".)`, context: setup }
 
 const conventions = `Follow the repo's own conventions (CLAUDE.md, surrounding code style). Use the unified logger, never console.*. Never touch CHANGELOG.md. New behavior gets new tests alongside it. Commit on branch ${input.branch} with a clear conventional message; never commit to any other branch.`
 
@@ -85,11 +87,15 @@ const attempt = async (key, prompt, label, phaseName) => {
 
 phase('Tasks')
 if (Array.isArray(input.fixes) && input.fixes.length > 0) {
+  // String guidance (an operator's "fix differently" steer from a QA-cap impasse) is baked into
+  // the BASE fix prompts: these calls are new on the unlocked cycle, so cache stability is not
+  // at stake, and steering must reach agents whose attempts *succeed* (commit but fix wrong).
+  const steer = typeof input.guidance === 'string' ? `\nOperator guidance for this fix cycle: ${input.guidance}` : ''
   for (const [i, fix] of input.fixes.entries()) {
     const key = fix.ac || `fix-${i + 1}`
     const r = await attempt(
       key,
-      `You fix a QA-verified failure on branch ${input.branch} (already checked out). The acceptance criterion that failed: ${JSON.stringify(fix)}. The design context:\n${input.plan.design}\nDiagnose against the failing scenario, fix the code, add or strengthen a test that fails without your fix, run typecheck and the targeted tests, and commit. ${conventions}`,
+      `You fix a QA-verified failure on branch ${input.branch} (already checked out). The acceptance criterion that failed: ${JSON.stringify(fix)}. The design context:\n${input.plan.design}\nDiagnose against the failing scenario, fix the code, add or strengthen a test that fails without your fix, run typecheck and the targeted tests, and commit. ${conventions}${steer}`,
       `fix:${key}`, 'Tasks'
     )
     if (!r || !r.done) return { status: 'impasse', stage: 'implement', question: `QA fix for ${key} could not be completed: ${r ? r.notes : 'agent failed'}. How should we proceed? (Your answer becomes guidance keyed "${key}".)`, context: fix }
@@ -106,7 +112,7 @@ if (Array.isArray(input.fixes) && input.fixes.length > 0) {
 }
 
 phase('Gate')
-const gatePrompt = `On branch ${input.branch}, run the full gate: npm run typecheck, npm run build, npm test. If something is red and the fix is mechanical (a missed import, a stale snapshot, a type error in new code), fix it, commit, and re-run. Report the final state honestly — never claim green without the passing output.`
+const gatePrompt = `On branch ${input.branch}, run the full gate: npm run typecheck, npm run build, npm test. If something is red and the fix is mechanical (a missed import, a stale snapshot, a type error in new code), fix it, commit, and re-run. Report the final state honestly — never claim green without the passing output. ${conventions}`
 let gate = await agent(gatePrompt, { label: 'full-gate', phase: 'Gate', schema: GATE })
 if ((!gate || !gate.green) && guideFor('gate')) {
   gate = await agent(gatePrompt + guideFor('gate'), { label: 'full-gate (guided)', phase: 'Gate', schema: GATE })
@@ -127,20 +133,25 @@ const reviewers = [
   },
 ]
 
+// Fail CLOSED: a reviewer that dies (null result) counts as a blocking finding so the gate is
+// never silently skipped — the reviewer simply re-runs next round.
 const runReviewers = async (which, tag) => {
   const verdicts = await parallel(which.map((rv) => () =>
     agent(rv.prompt, { label: `review:${rv.key} ${tag}`, phase: 'Review', schema: REVIEW }).then((v) => ({ key: rv.key, v }))
   ))
   const blocking = []
+  const got = new Set()
   for (const r of verdicts.filter(Boolean)) {
     if (r.v) {
+      got.add(r.key)
       lastVerdicts[r.key] = r.v
       for (const f of r.v.findings) if (f.blocking) blocking.push({ reviewer: r.key, ...f })
     }
   }
+  for (const rv of which) if (!got.has(rv.key)) blocking.push({ reviewer: rv.key, text: 'AGENT-FAILURE: this reviewer returned no verdict; it must re-run and pass before the diff is accepted', file: '-', blocking: true })
   return blocking
 }
-const fixPrompt = (blocking, extra) => `You fix blocking review findings on branch ${input.branch} (already checked out). Address every finding below, run npm run typecheck / npm run build / npm test until green, and commit. If you believe a finding is wrong, do not silently skip it — note why in your report.${extra || ''} ${conventions}\nFindings:\n${JSON.stringify(blocking, null, 2)}\nDesign context:\n${input.plan.design}`
+const fixPrompt = (blocking, extra) => `You fix blocking review findings on branch ${input.branch} (already checked out). Address every finding below, run npm run typecheck / npm run build / npm test until green, and commit. If you believe a finding is wrong, do not silently skip it — note why in your report. Findings tagged AGENT-FAILURE are not code findings — change nothing for them; that reviewer simply re-runs.${extra || ''} ${conventions}\nFindings:\n${JSON.stringify(blocking, null, 2)}\nDesign context:\n${input.plan.design}`
 
 let lastVerdicts = {}
 let pending = reviewers
@@ -155,7 +166,10 @@ while (rounds < 3) {
   }
   if (rounds === 3) break
   log(`Review round ${rounds}: ${blocking.length} blocking finding(s) — fixing`)
-  const fixed = await agent(fixPrompt(blocking), { label: `fix-findings r${rounds}`, phase: 'Review', schema: GATE })
+  let fixed = await agent(fixPrompt(blocking), { label: `fix-findings r${rounds}`, phase: 'Review', schema: GATE })
+  if ((!fixed || !fixed.green) && guideFor('review')) {
+    fixed = await agent(fixPrompt(blocking, guideFor('review')), { label: `fix-findings r${rounds} (guided)`, phase: 'Review', schema: GATE })
+  }
   if (!fixed || !fixed.green) return { status: 'impasse', stage: 'implement', question: `Fixing review findings left the gate red: ${fixed ? fixed.summary : 'fixer agent failed'}. How should we proceed? (Your answer becomes guidance keyed "review".)`, context: { blocking } }
   gate = fixed
   const blockedReviewers = new Set(blocking.map((b) => b.reviewer))

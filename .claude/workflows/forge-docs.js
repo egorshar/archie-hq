@@ -45,11 +45,12 @@ const CHECK = {
 const diffCmd = `git diff origin/${input.base}...HEAD -- . ':!docs'`
 
 phase('Update')
-let updated = await agent(
-  `You keep this repo's documentation true. On branch ${input.branch} (already checked out), read the code diff (${diffCmd}) and the brief:\n<brief>${input.brief || '(none provided)'}</brief>\nFind which pages under docs/ (docs/architecture/ describes the current system; docs/guides/ the how-tos) cover the touched subsystem — search before writing; prefer updating an existing page over creating one. Update them to describe what actually shipped: behavior, not implementation history. If no doc covers the area and the change is user- or architecture-visible, create a page in the right folder. If the change genuinely warrants no doc update (pure internal refactor with no behavioral surface), say so. Never touch CHANGELOG.md, docs/plans/, or docs/proposals/. Never hard-wrap prose. Commit any changes on ${input.branch}.`,
-  { label: 'doc-updater', phase: 'Update', schema: UPDATED }
-)
-if (!updated) return { status: 'impasse', stage: 'docs', question: 'The doc-updater agent failed. Retry, or ship without a docs pass? (Your answer becomes guidance for a retry.)', context: null }
+const updaterPrompt = `You keep this repo's documentation true. On branch ${input.branch} (already checked out), read the code diff (${diffCmd}) and the brief:\n<brief>${input.brief || '(none provided)'}</brief>\nFind which pages under docs/ (docs/architecture/ describes the current system; docs/guides/ the how-tos) cover the touched subsystem — search before writing; prefer updating an existing page over creating one. Update them to describe what actually shipped: behavior, not implementation history. If no doc covers the area and the change is user- or architecture-visible, create a page in the right folder. If the change genuinely warrants no doc update (pure internal refactor with no behavioral surface), say so. Never touch CHANGELOG.md, docs/plans/, or docs/proposals/. Never hard-wrap prose. Commit any changes on ${input.branch}.`
+let updated = await agent(updaterPrompt, { label: 'doc-updater', phase: 'Update', schema: UPDATED })
+if (!updated && guidance) {
+  updated = await agent(updaterPrompt + guidance, { label: 'doc-updater (guided)', phase: 'Update', schema: UPDATED })
+}
+if (!updated) return { status: 'impasse', stage: 'docs', question: 'The doc-updater agent failed. How should we proceed? (Your answer becomes guidance for a retry.)', context: null }
 
 const verify = (tag) => agent(
   `You verify documentation against reality. On the current branch, read the code diff (${diffCmd}) and the doc changes (git diff origin/${input.base}...HEAD -- docs). The updater claims: ${JSON.stringify(updated)}. Judge: do the updated docs accurately describe the shipped behavior? Findings are: stale claims left standing, behavior the diff introduces that the docs miss, and invented behavior the diff does not support. If the updater claimed no docs were needed, verify that too — a behavioral or architectural change with no doc update is a blocking finding.`,
@@ -61,14 +62,20 @@ const fix = (blocking, extra) => agent(
 )
 
 let blocking = []
+let verifierFailed = false
 let round = 0
 while (round < 2) {
   round++
   phase('Verify')
   const check = await verify(`r${round}`)
+  verifierFailed = !check
   blocking = check && check.findings ? check.findings.filter((f) => f.blocking) : []
   if (check && blocking.length === 0) return { status: 'ok', updated, rounds: round }
   if (round === 2) break
+  if (verifierFailed) {
+    log('Doc verifier returned no verdict — retrying the verification, not the docs')
+    continue
+  }
   log(`Docs round ${round}: ${blocking.length} blocking finding(s) — revising`)
   const revised = await fix(blocking)
   if (revised) updated = revised
@@ -77,10 +84,13 @@ while (round < 2) {
 // Cap hit — one operator-guided fix + re-verify (prompts the capped rounds never used).
 if (guidance) {
   log('Docs cap hit — running one operator-guided round')
-  const revised = await fix(blocking, guidance + " The operator's word overrides a verifier finding where they conflict.")
-  if (revised) updated = revised
+  if (blocking.length > 0) {
+    const revised = await fix(blocking, guidance + " The operator's word overrides a verifier finding where they conflict.")
+    if (revised) updated = revised
+  }
   const check = await verify('guided')
+  verifierFailed = !check
   blocking = check && check.findings ? check.findings.filter((f) => f.blocking) : []
   if (check && blocking.length === 0) return { status: 'ok', updated, rounds: 3, guided: true }
 }
-return { status: 'impasse', stage: 'docs', question: `Doc verifier still has ${blocking.length} blocking finding(s) after ${guidance ? 'a guided round' : '2 rounds'}. How should we proceed?`, context: { blocking } }
+return { status: 'impasse', stage: 'docs', question: verifierFailed ? 'The doc verifier repeatedly failed to return a verdict. How should we proceed? (Your answer becomes guidance for one more round.)' : `Doc verifier still has ${blocking.length} blocking finding(s) after ${guidance ? 'a guided round' : '2 rounds'}. How should we proceed? (Your answer becomes guidance for one more round.)`, context: { blocking, verifierFailed } }
