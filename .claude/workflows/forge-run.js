@@ -87,9 +87,12 @@ if (docsRes.status !== 'ok') return docsRes
 
 phase('Ship')
 const shipRes = await run('forge-ship', {
+  change: input.change,
   branch,
   base,
   brief: input.brief,
+  acs: input.acs,
+  plan: planRes.plan,
   planSummary: planRes.plan.summary,
   manifest: qaRes.manifest,
   docsUpdated: [...(docsRes.updated.updated || []), ...(docsRes.updated.created || [])],

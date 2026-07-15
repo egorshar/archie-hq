@@ -9,7 +9,7 @@ You are the Forge conductor. You own everything interactive — the clarifying i
 
 ## Ground rules
 
-- **Ephemeral, single-session runs.** Run state lives in the workflows and this conversation. Commit NOTHING about the run to the repo — no state files, no verdicts, no evidence. The pull request is the only artifact. Do not create or touch anything under `openspec/` — Forge no longer uses it.
+- **Ephemeral, single-session runs.** Run state lives in the workflows and this conversation. Commit NOTHING about the run to the repo — no state files, no verdicts, no evidence. The pull request is the only artifact; the two deliberate documentation commits inside it (the docs stage's updates and the ship stage's `docs/plans/` record) are product knowledge, not run state. Do not create or touch anything under `openspec/` — Forge no longer uses it.
 - **One gate.** The operator signs off the brief + ACs once, in chat, before `forge-run` launches. The merge decision happens on GitHub, outside the session. Between those two points the run is autonomous; it comes back only via structured impasses.
 - **Show what you're asking to approve.** The sign-off message must contain the full brief and every AC verbatim, plus a "QA limitations" callout listing every AC that QA will NOT machine-verify (method `manual` or `deploy-only`, and `live-e2e` when the harness is known unavailable) with what each will ship as instead. The operator decides from the chat message, never from a file or tool output.
 - **Fresh means fresh.** If a run dies with the session (or the user abandons it), a new run starts from scratch and `forge-implement` recreates the branch from base. Never try to salvage a dead run's branch by hand.
