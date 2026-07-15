@@ -73,10 +73,11 @@ while (cycles < qaCap) {
   }
   log(`QA cycle ${cycles}: ${qaRes.failures.length} failing AC(s) — routing back to implement`)
   // The operator's qaCycles steer is baked only into the UNLOCKED cycle's route-back (the one
-  // new call sequence on resume); earlier route-backs keep their original guidance so their
-  // completed calls stay cache-stable.
+  // new call sequence on resume). Keyed answers.implement guidance travels separately to EVERY
+  // route-back, so per-unit impasse answers stay honorable in any cycle; successful calls ignore
+  // guidance, keeping earlier cycles cache-stable.
   const unlockedRouteBack = cycles === 2 && answers.qaCycles
-  implRes = await run('forge-implement', { change: input.change, branch, base, brief: input.brief, acs: input.acs, plan: planRes.plan, fresh: false, fixes: qaRes.failures, guidance: unlockedRouteBack ? answers.qaCycles : answers.implement }, 'implement')
+  implRes = await run('forge-implement', { change: input.change, branch, base, brief: input.brief, acs: input.acs, plan: planRes.plan, fresh: false, fixes: qaRes.failures, steer: unlockedRouteBack ? answers.qaCycles : undefined, guidance: answers.implement }, 'implement')
   if (implRes.status !== 'ok') return implRes
 }
 

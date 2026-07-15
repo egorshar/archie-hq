@@ -123,8 +123,11 @@ const revisePrompt = (blocking, extra) => `You are the planner, revising your pl
 phase('Draft')
 const plannerBase = `You are a planner. Inputs are ONLY the brief, ACs, and dossier below — you have no other context and must not assume any. Produce: (1) a design that satisfies every AC within the dossier's constraints; (2) small ordered tasks, each independently checkable; (3) a verification plan mapping every AC id to its method and the concrete scenario/check producing its evidence. Follow the repo's conventions (read CLAUDE.md and docs/architecture/ as needed). ESCAPE HATCH: if the dossier shows the change cannot fit one bounded run (single feature branch, single live-QA boot, roughly a normal-sized PR, review loops capped at 3 rounds), do NOT force a plan — set exceedsScope true and propose an ordered split whose every iteration is independently shippable and QA-able against a live instance. ${planContext}`
 let plan = await agent(plannerBase, { label: 'planner', phase: 'Draft', schema: PLAN })
-if ((!plan || (!plan.exceedsScope && !planComplete(plan))) && input.guidance) {
-  plan = await agent(`${plannerBase}\nOperator guidance from a previous failed attempt: ${input.guidance}`, { label: 'planner (guided)', phase: 'Draft', schema: PLAN })
+// Guided retry covers null, incomplete, AND exceedsScope results (planComplete is false for all
+// three) — this is what makes the exceeds-scope impasse's "override with guidance" offer real:
+// on resume the cached exceedsScope result replays, then this differently-prompted retry runs live.
+if ((!plan || !planComplete(plan)) && input.guidance) {
+  plan = await agent(`${plannerBase}\nOperator guidance from a previous failed or exceeds-scope attempt (the operator's word overrides the escape hatch): ${input.guidance}`, { label: 'planner (guided)', phase: 'Draft', schema: PLAN })
 }
 if (!plan) return { status: 'impasse', stage: 'plan', question: 'The planner agent failed to produce a plan. How should we proceed? (Your answer becomes guidance for a retry.)', context: null }
 if (plan.exceedsScope) {

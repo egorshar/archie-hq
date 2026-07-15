@@ -48,7 +48,8 @@ A thin **conductor skill** (`/forge`) owns everything interactive; **workflows**
                   adversarially verify doc-vs-diff; rides in the same PR
        ship       push branch, open PR — verification manifest as the
                   Verification section
-       returns { pr, manifest } | { impasse, stage, question, context }
+       returns { status: done, pr, manifest, plan }
+             | { status: impasse, stage, question, context, reason?, terminal? }
   5. conductor: report PR + manifest summary in chat. Session's job is done.
      The merge decision happens on GitHub, on the operator's schedule.
 ```

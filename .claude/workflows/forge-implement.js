@@ -11,10 +11,13 @@ export const meta = {
 }
 
 // args: { change, branch, base, brief, acs, plan: {design, tasks}, fresh: boolean,
-//         fixes?: [{ac, problem, scenario}], guidance?: { [taskOrFixId]: string, gate?, review? } }
+//         fixes?: [{ac, problem, scenario}], guidance?: string | { [taskOrFixId]: string, setup?, gate?, review? },
+//         steer?: string }
 // guidance carries operator answers to previous impasses, keyed by the failing unit. A failed
 // call replays its failure from cache on resume, so each impasse site retries once with a
 // guidance-augmented prompt (a cache miss) while everything that succeeded stays cached.
+// steer (fixes mode only) is a whole-cycle instruction baked into the BASE fix prompts — used by
+// the QA-cap unlock, whose calls are new on resume, so cache stability is not at stake there.
 const input = typeof args === 'string' ? JSON.parse(args) : (args || {})
 if (!input.branch || !input.base || !input.plan) return { status: 'error', reason: 'missing input.branch/base/plan' }
 const guideFor = (key) => {
@@ -87,10 +90,9 @@ const attempt = async (key, prompt, label, phaseName) => {
 
 phase('Tasks')
 if (Array.isArray(input.fixes) && input.fixes.length > 0) {
-  // String guidance (an operator's "fix differently" steer from a QA-cap impasse) is baked into
-  // the BASE fix prompts: these calls are new on the unlocked cycle, so cache stability is not
-  // at stake, and steering must reach agents whose attempts *succeed* (commit but fix wrong).
-  const steer = typeof input.guidance === 'string' ? `\nOperator guidance for this fix cycle: ${input.guidance}` : ''
+  // The steer must reach agents whose attempts *succeed* (commit but fix the wrong thing), so it
+  // goes in the base prompt; keyed guidance still powers the per-unit failure retries via attempt().
+  const steer = typeof input.steer === 'string' && input.steer ? `\nOperator guidance for this fix cycle: ${input.steer}` : ''
   for (const [i, fix] of input.fixes.entries()) {
     const key = fix.ac || `fix-${i + 1}`
     const r = await attempt(
