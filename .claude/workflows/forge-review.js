@@ -36,7 +36,7 @@ const wt = `${scratch}/${isPr ? `pr-${input.pr}` : 'local-review'}`
 const mutWt = `${wt}-mutation`
 const GH_READONLY = 'You are strictly read-only on GitHub: never comment, review, approve, or modify anything there.'
 const teardown = () => agent(
-  `Best-effort cleanup, from the MAIN checkout of this repo: if a docker compose project is running from ${wt}, run docker compose down there first; then git worktree remove --force ${wt} and git worktree remove --force ${mutWt} (each may not exist — ignore those errors), then git worktree prune. Touch nothing else; commit and push nothing.`,
+  `Best-effort cleanup, from the MAIN checkout of this repo: if a docker compose project is running from ${wt}, run docker compose down there first; then git worktree remove --force ${wt}, remove ${mutWt} (git worktree remove --force if it is a worktree, else rm -rf), and git worktree prune (each may not exist — ignore those errors). Touch nothing else; commit and push nothing.`,
   { label: 'teardown', phase: 'QA', effort: 'low', schema: { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'] } }
 )
 
@@ -57,7 +57,7 @@ const CHECKED = {
 phase('Ground')
 const setupPrompt = isPr
   ? `Prepare an isolated checkout of PR #${input.pr} of this repo at exactly ${wt}. Use the GitHub MCP tools (via ToolSearch) or gh CLI to find the PR's head SHA and base branch. Then: git fetch origin pull/${input.pr}/head, git worktree add ${wt} FETCH_HEAD, and VERIFY git -C ${wt} rev-parse HEAD matches the API's head SHA (another process may move FETCH_HEAD between commands) — on mismatch, re-fetch and re-create the worktree once. If the repo has gitignored local state needed to boot (.env, secrets/), copy it from the main checkout into the worktree. Do NOT commit, push, or create branches. ${GH_READONLY} Report the verified head SHA, base branch, and whether boot prerequisites (.env, docker) are present.`
-  : `Prepare an isolated checkout of this repo's CURRENT branch at exactly ${wt}. In the main checkout: note the current branch name and HEAD SHA, then git worktree add ${wt} <that SHA> (detached). The review covers COMMITTED state only — if git status shows uncommitted changes, say so prominently in notes (they will NOT be reviewed). The base branch is ${input.base || 'main'} (fetch it: git fetch origin ${input.base || 'main'}). If the repo has gitignored local state needed to boot (.env, secrets/), copy it from the main checkout into the worktree. Do NOT commit, push, create branches, or touch the main checkout's working tree. Report the head SHA, the base branch, and whether boot prerequisites (.env, docker) are present.`
+  : `Prepare an isolated snapshot of this repo's CURRENT state — the code exactly as it sits, uncommitted and untracked changes included — at exactly ${wt}. In the main checkout: note the branch name and HEAD SHA, git worktree add ${wt} <that SHA> (detached), then overlay the dirty state: for every path in git status --porcelain, copy it from the checkout into ${wt} (paths deleted in the checkout: delete in ${wt} too), and run git -C ${wt} add -A --intent-to-add so new files show up in git diff. The operator's checkout is copied FROM only — never touch it. The base branch is ${input.base || 'main'} (fetch it: git fetch origin ${input.base || 'main'}). If the repo has gitignored local state needed to boot (.env, secrets/), copy it in too. Do NOT commit, push, or create branches. Report the head SHA, the base branch, whether boot prerequisites (.env, docker) are present, and in notes how many uncommitted/untracked files the snapshot includes.`
 const setup = await agent(
   setupPrompt,
   { label: 'worktree-setup', phase: 'Ground', effort: 'low', schema: { type: 'object', properties: { ok: { type: 'boolean' }, headSha: { type: 'string' }, base: { type: 'string' }, bootReady: { type: 'boolean' }, notes: { type: 'string' } }, required: ['ok', 'headSha', 'base', 'bootReady'] } }
@@ -66,7 +66,9 @@ if (!setup || !setup.ok) {
   await teardown()
   return { status: 'error', reason: `could not prepare a worktree for ${subject}: ${setup ? setup.notes : 'setup agent failed'}` }
 }
-const diffCmd = `git -C ${wt} diff origin/${setup.base}...HEAD`
+// PR mode diffs committed history; branch mode diffs the working tree (so uncommitted work,
+// overlaid by setup, is part of the reviewed diff).
+const diffCmd = isPr ? `git -C ${wt} diff origin/${setup.base}...HEAD` : `git -C ${wt} diff $(git -C ${wt} merge-base origin/${setup.base} HEAD)`
 
 const CONTRACT = 'Return findings as factual claims, each with a citation. Do not speculate; a claim you cannot cite is not a finding.'
 const lenses = [
@@ -129,7 +131,7 @@ if (!qaOnly) {
       { label: 'review:claims', phase: 'Review', schema: REVIEW }
     ),
     () => agent(
-      `You hunt for real bugs in a diff. Inputs: the diff (${diffCmd}); treat ${wt} as read-only reference (running typecheck/tests there is allowed; never modify its files, never commit anywhere). Look for logic errors, unhandled error paths, races/lifecycle issues (spawn/stop/resume/recovery interactions are this codebase's classic failure mode), broken invariants in persisted state, and test theater. Mutation-check each NEW test in a SEPARATE disposable worktree that is yours alone: git worktree add ${mutWt} ${setup.headSha}, revert the guarded change there, confirm the test fails, then git worktree remove --force ${mutWt} when done. CONFIRMED = you can state the failing input/sequence.${followUp}`,
+      `You hunt for real bugs in a diff. Inputs: the diff (${diffCmd}); treat ${wt} as read-only reference (running typecheck/tests there is allowed; never modify its files, never commit anywhere). Look for logic errors, unhandled error paths, races/lifecycle issues (spawn/stop/resume/recovery interactions are this codebase's classic failure mode), broken invariants in persisted state, and test theater. Mutation-check each NEW test in a SEPARATE disposable copy that is yours alone: ${isPr ? `git worktree add ${mutWt} ${setup.headSha}` : `copy ${wt} to ${mutWt} (excluding .git)`}, revert the guarded change there, confirm the test fails, then remove ${mutWt} when done. CONFIRMED = you can state the failing input/sequence.${followUp}`,
       { label: 'review:bugs', phase: 'Review', schema: REVIEW }
     ),
   ])

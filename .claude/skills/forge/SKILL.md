@@ -21,7 +21,7 @@ You are the Forge conductor. You own everything interactive — the clarifying i
 - `/forge issue <n>` — fetch the issue (GitHub MCP); its body seeds the interview; derive the change name from the issue title.
 - `/forge review <n>` (optionally `qa-only`) — zero-footprint review + QA of an existing PR; see Review mode below. Exempt from the one-run rule: it writes nothing, so it can run alongside an active run.
 - `/forge qa <n>` — alias for `review <n> qa-only`.
-- `/forge review` / `/forge qa ["intent"]` (no PR number) — the same machinery on the **current branch's committed diff** against main (`base` override allowed). With `qa` the quoted intent, if given, is the authoritative source for AC derivation — pass it as `args.intent`. Nothing touches GitHub in branch mode, so there is nothing to submit — the report is the whole deliverable. Uncommitted changes are NOT reviewed; the workflow flags them in `setupNotes` — surface that in the report.
+- `/forge review` / `/forge qa ["intent"]` (no PR number) — the same machinery on the **current working tree as-is** (uncommitted and untracked changes included; the setup snapshots them into the isolated worktree, never touching the operator's checkout), diffed against main (`base` override allowed). With `qa` the quoted intent, if given, is the authoritative source for AC derivation — pass it as `args.intent`. Nothing touches GitHub in branch mode, so there is nothing to submit — the report is the whole deliverable. `setupNotes` says how much uncommitted work the snapshot included — surface it in the report so it's clear what was reviewed.
 
 (PR-finish mode — taking over and completing someone's PR — is a future phase; see the proposal. If asked, say so.)
 
