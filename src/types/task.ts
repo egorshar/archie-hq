@@ -310,6 +310,12 @@ export interface TaskMetadata {
    */
   edit_approved_by?: { id: string; name: string; email?: string };
   /**
+   * The human who requested this task (first human message). Stamped as the
+   * `Requested-by:` commit trailer for SOC2 traceability. Set once at task
+   * creation; never an agent. `source: 'cli'` when opened from the CLI.
+   */
+  requested_by?: { id: string; name: string; source: 'slack' | 'cli' };
+  /**
    * The single pending merge-approval request (written by `merge_pull_request`
    * on a non-auto repo, cleared on every resolution — approve or deny). A
    * request record, not a grant: merge approval is one-shot per PR, not a

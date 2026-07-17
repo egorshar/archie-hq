@@ -182,6 +182,8 @@ export function mountApiRoutes(app: Application): void {
 
       const task = await Task.create();
       task.linkCliChannel();
+      task.metadata.requested_by ??= { id: 'cli', name: 'cli', source: 'cli' };
+      task.debouncedSave();
       await appendCliMessage(task.taskId, message);
       await task.sendMessage(AGENT_PROMPTS.newTask);
 

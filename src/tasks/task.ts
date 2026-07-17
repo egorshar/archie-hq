@@ -55,6 +55,7 @@ import {
 } from './persistence.js';
 import { getIsShuttingDown } from '../system/shutdown.js';
 import { scheduleIdleCheck } from './recovery.js';
+import { captureRequester } from './requested-by.js';
 import { scanAgentDefs, getAgentDef, getVisiblePeerIdsForSender, synthesizeDynamicAgentDef } from '../agents/registry.js';
 import type { AttachedRepo } from '../types/task.js';
 import { syncPlugins } from '../system/plugin-sync.js';
@@ -321,6 +322,12 @@ export class Task {
   async append(thread: SlackThread): Promise<{ linkedNewThread: boolean }> {
     const channelId = `slack:${thread.channel.id}:${thread.threadId}`;
     const existing = this.metadata.channels[channelId] as SlackChannel | undefined;
+
+    // SOC2: record the requesting human once (first human message).
+    if (!this.metadata.requested_by && !thread.rootAuthorWasBot && thread.messages[0]?.user) {
+      this.metadata.requested_by = captureRequester(this.metadata.requested_by, { kind: 'slack', author: thread.messages[0].user });
+      this.debouncedSave();
+    }
 
     // Redaction policy: when the channel is shared and the message author is
     // external, drop content and don't download files. Author info is logged.
