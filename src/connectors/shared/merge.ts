@@ -22,7 +22,7 @@ import { appendAgentFinding } from '../../tasks/persistence.js';
 import { Task } from '../../tasks/task.js';
 import { AGENT_PROMPTS } from '../../agents/prompts.js';
 import { isAutoMergeRepo } from '../../agents/registry.js';
-import { getRepoHost } from '../../system/backends.js';
+import { getRepoHost, isMergeDisabled } from '../../system/backends.js';
 import { isMergeReadyPerGithub } from '../github/mergeability.js';
 import { logger } from '../../system/logger.js';
 import type { PRStatus } from '../../agents/tools.js';
@@ -48,6 +48,10 @@ interface LinkedPRStatus {
  * same instance that gets activated.
  */
 export async function checkAndMergeLinkedPRs(taskId: string): Promise<void> {
+  if (isMergeDisabled()) {
+    logger.warn('merge', `merge disabled (ARCHIE_DISABLE_MERGE) — skipping merge check for ${taskId}`);
+    return;
+  }
   const task = await Task.get(taskId);
   const result = await runMergeCheck(task);
 
@@ -115,6 +119,7 @@ function markNewlyNotifiableReadyPRs(task: Task, readyPRs: string[]): string[] {
  * notifying PM (since PM is calling this via a tool).
  */
 export async function triggerMergeCheck(taskId: string): Promise<MergeCheckResult> {
+  if (isMergeDisabled()) return { merged: [], pending: [], conflicts: [], ready: [] };
   return runMergeCheck(await Task.get(taskId));
 }
 
