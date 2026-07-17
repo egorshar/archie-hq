@@ -2837,7 +2837,7 @@ export const WRITE_REPO_TOOLS: readonly string[] = [
  * (ARCHIE_DISABLE_MERGE), `merge_pull_request` is dropped entirely — neither the
  * Claude SDK server nor the opencode bridge exposes it, so agents can only open
  * MRs. */
-function activeRepoToolSpecs(): readonly RepoToolSpec[] {
+export function activeRepoToolSpecs(): readonly RepoToolSpec[] {
   return isMergeDisabled()
     ? REPO_TOOL_SPECS.filter((s) => s.name !== 'merge_pull_request')
     : REPO_TOOL_SPECS;
