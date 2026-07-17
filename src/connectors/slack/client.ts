@@ -909,6 +909,7 @@ async function resolveRawMessages(
           teamId: info.teamId,
           isRestricted: info.isRestricted,
           isUltraRestricted: info.isUltraRestricted,
+          isBot: info.isBot,
         }];
       } catch {
         return [uid, null];
@@ -970,6 +971,7 @@ async function resolveAuthorsAndMap(messages: RawSlackMessage[]): Promise<SlackT
           teamId: info.teamId,
           isRestricted: info.isRestricted,
           isUltraRestricted: info.isUltraRestricted,
+          isBot: info.isBot,
         }];
       } catch {
         return [uid, { id: uid, username: uid, realName: uid }];
@@ -979,9 +981,11 @@ async function resolveAuthorsAndMap(messages: RawSlackMessage[]): Promise<SlackT
   const userInfoMap = new Map(userInfoEntries);
 
   return messages.map((msg) => {
+    // No `msg.user` means this message came from a bot (bot_id/bot_profile) —
+    // a known, not merely unresolved, bot identity.
     const author: SlackAuthor = msg.user
       ? userInfoMap.get(msg.user)!
-      : { id: msg.botId!, username: msg.botName || 'bot', realName: msg.botName || 'bot', teamId: msg.teamId };
+      : { id: msg.botId!, username: msg.botName || 'bot', realName: msg.botName || 'bot', teamId: msg.teamId, isBot: true };
     return {
       user: author,
       text: msg.text,
@@ -1115,6 +1119,7 @@ export async function getUserInfo(userId: string): Promise<{
   teamId?: string;
   isRestricted?: boolean;
   isUltraRestricted?: boolean;
+  isBot?: boolean;
 }> {
   const client = getSlackClient();
 
@@ -1127,6 +1132,7 @@ export async function getUserInfo(userId: string): Promise<{
     team_id?: string;
     is_restricted?: boolean;
     is_ultra_restricted?: boolean;
+    is_bot?: boolean;
   } | undefined;
 
   // External users (Slack Connect) often only populate the name under profile.*
@@ -1148,6 +1154,7 @@ export async function getUserInfo(userId: string): Promise<{
     teamId: user?.team_id,
     isRestricted: user?.is_restricted,
     isUltraRestricted: user?.is_ultra_restricted,
+    isBot: user?.is_bot,
   };
 }
 

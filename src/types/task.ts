@@ -33,6 +33,14 @@ export interface SlackAuthor {
   teamId?: string;
   isRestricted?: boolean;
   isUltraRestricted?: boolean;
+  /**
+   * True when this identity is a Slack bot user (`users.info.is_bot`), or when
+   * synthesized directly from a known `bot_id`/`bot_profile` on a message.
+   * Undefined/false means "known human" or "unknown" — callers that must never
+   * attribute an action to a bot (e.g. SOC2 `requested_by` capture) should treat
+   * only `isBot === true` as the disqualifying signal, not its absence.
+   */
+  isBot?: boolean;
 }
 
 /** An emoji reaction present on a Slack message (snapshot at fetch time). */

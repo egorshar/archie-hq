@@ -13,6 +13,15 @@
  * — never with anything derived from thread content. This test verifies its
  * guard logic directly: it only ever calls `task.setRequester` with the
  * supplied human identity, and only when one is actually resolved.
+ *
+ * Second gap (this file also covers it): the own-bot filter and the
+ * external/guest bail-out only rule out Archie's own bot and external/guest
+ * accounts — neither catches a DIFFERENT internal bot (e.g. a bug-tracker or
+ * webhook integration with its own Slack bot user) that `@mentions` Archie.
+ * Such a bot resolves to a same-team, non-restricted account and would
+ * otherwise be captured as `requested_by`. `authorInfo.isBot` (Slack
+ * `users.info.is_bot`) is the reliable signal for that case, so
+ * `captureTaskRequester` must skip capture whenever it's `true`.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -70,6 +79,12 @@ function makeFakeTask(requestedBy?: unknown): FakeTask {
 }
 
 const humanInfo = { name: 'egor', realName: 'Egor Sharapov', teamId: 'T1' };
+const humanInfoExplicitlyNotBot = { ...humanInfo, isBot: false };
+// Same-team, non-restricted — an internal bug-tracker/webhook bot's own Slack
+// bot user resolves exactly like this, passing both the own-bot filter
+// (different bot id) and the external/guest bail-out (same team, not
+// restricted). `isBot` is the only signal left to catch it.
+const internalBotInfo = { name: 'bugtracker', realName: 'Bug Tracker', teamId: 'T1', isBot: true };
 
 describe('captureTaskRequester', () => {
   beforeEach(() => vi.clearAllMocks());
@@ -85,7 +100,23 @@ describe('captureTaskRequester', () => {
       teamId: 'T1',
       isRestricted: undefined,
       isUltraRestricted: undefined,
+      isBot: undefined,
     });
+  });
+
+  it('still captures a human when isBot is explicitly false', () => {
+    const task = makeFakeTask();
+    captureTaskRequester(task as unknown as Task, 'U_HUMAN', humanInfoExplicitlyNotBot);
+    expect(task.setRequester).toHaveBeenCalledTimes(1);
+    expect(task.setRequester).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'U_HUMAN', isBot: false }),
+    );
+  });
+
+  it('SOC2: skips capture (leaves requested_by unset) when the resolved identity is a different internal bot', () => {
+    const task = makeFakeTask();
+    captureTaskRequester(task as unknown as Task, 'B0BUGBOT', internalBotInfo);
+    expect(task.setRequester).not.toHaveBeenCalled();
   });
 
   it('is a no-op once requested_by is already set (set-once)', () => {

@@ -810,15 +810,20 @@ async function handleSlackEvent(event: {
  * root), so a bot-authored root followed by a human @mention would otherwise
  * permanently misattribute the task to the bot.
  *
- * `event.user` is the id of the human who triggered this handler — by the time
- * either call site reaches this, the own-bot filter (`routeSlackEvent`) and the
- * external/guest bail-out above have already run, so it's a confirmed internal
- * human. `authorInfo` is the same lookup already performed for that bail-out;
+ * `event.user` is the id of the account that triggered this handler — by the
+ * time either call site reaches this, the own-bot filter (`routeSlackEvent`)
+ * and the external/guest bail-out above have already run, so it's confirmed
+ * internal. Those guards do NOT rule out a *different* internal bot though: a
+ * bug-tracker/webhook bot with its own Slack bot user resolves to a same-team,
+ * non-restricted account and would otherwise pass every prior check. `isBot`
+ * (Slack `users.info.is_bot`, part of `authorInfo`) is the only reliable signal
+ * for that, so it's checked here as the last gate before capture.
+ * `authorInfo` is the same lookup already performed for the bail-out above;
  * reused here rather than re-fetched.
  *
  * No-ops if `requested_by` is already set (set-once, enforced by
- * `Task.setRequester`), or if the identity can't be resolved — a missing
- * trailer is better than a wrong one.
+ * `Task.setRequester`), if the identity can't be resolved, or if the resolved
+ * identity is itself a bot — a missing trailer is better than a wrong one.
  *
  * Exported for regression testing (Task-level tests can't otherwise verify
  * this call site's guard logic without booting the full Bolt app).
@@ -828,7 +833,7 @@ export function captureTaskRequester(
   userId: string | undefined,
   authorInfo: Awaited<ReturnType<typeof getUserInfo>> | undefined,
 ): void {
-  if (task.metadata.requested_by || !userId || !authorInfo) return;
+  if (task.metadata.requested_by || !userId || !authorInfo || authorInfo.isBot === true) return;
   const author: SlackAuthor = {
     id: userId,
     username: authorInfo.name,
@@ -836,6 +841,7 @@ export function captureTaskRequester(
     teamId: authorInfo.teamId,
     isRestricted: authorInfo.isRestricted,
     isUltraRestricted: authorInfo.isUltraRestricted,
+    isBot: authorInfo.isBot,
   };
   task.setRequester(author);
 }
@@ -947,6 +953,7 @@ async function handleSlackEdit(event: any): Promise<void> {
     teamId: authorInfo?.teamId,
     isRestricted: authorInfo?.isRestricted,
     isUltraRestricted: authorInfo?.isUltraRestricted,
+    isBot: authorInfo?.isBot,
   };
 
   const recorded = await task.appendSlackEdit(channelKey, author, editedTs, newText);
