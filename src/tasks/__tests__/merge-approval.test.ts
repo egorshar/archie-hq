@@ -30,7 +30,13 @@ vi.mock('../../system/logger.js', () => ({
 
 vi.mock('../../system/event-bus.js', () => ({ emitEvent: vi.fn() }));
 
+vi.mock('../../system/backends.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../system/backends.js')>();
+  return { ...actual, isMergeDisabled: vi.fn().mockReturnValue(false) };
+});
+
 import { Task } from '../task.js';
+import { isMergeDisabled } from '../../system/backends.js';
 import { getGitHubClient } from '../../connectors/github/client.js';
 import { appendAgentFinding } from '../persistence.js';
 import { AGENT_PROMPTS } from '../../agents/prompts.js';
@@ -108,6 +114,9 @@ function deny(task: FakeTask, expected: { github: string; pr_number: number }) {
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(getGitHubClient).mockReturnValue(mockGitHubClient as any);
+  // clearAllMocks wipes call history but not implementations — reset the merge
+  // gate to enabled so the disable-merge test's override doesn't leak forward.
+  vi.mocked(isMergeDisabled).mockReturnValue(false);
 });
 
 describe('handleMergeApproval', () => {
@@ -126,6 +135,28 @@ describe('handleMergeApproval', () => {
     expect(mockGitHubClient.mergePullRequest).toHaveBeenCalledWith('org/backend', 1);
     expect(appendAgentFinding).toHaveBeenCalledWith(
       'task-123', 'system', expect.stringContaining('merged on user approval by Dana'), 'completion',
+    );
+    expect(task.sendMessage).toHaveBeenCalledWith(AGENT_PROMPTS.existingTask, 'pm-agent');
+  });
+
+  it('never merges when ARCHIE_DISABLE_MERGE is on: slot cleared, no GitHub call, honest finding, PM reactivated', async () => {
+    vi.mocked(isMergeDisabled).mockReturnValue(true);
+    // A clean PR that would otherwise merge-now — proves the guard, not PR state.
+    mockGitHubClient.getPRStatus.mockResolvedValue({
+      state: 'open', mergeable: true, mergeableState: 'clean', approved: true,
+    });
+    const task = makeFakeTask(pendingSlot(PR1), reposWithPR(PR1));
+
+    const disposition = await approve(task, PR1);
+
+    expect(disposition).toBe('resolved');
+    // Slot consumed (so the persistent Slack button cannot be replayed) but no merge.
+    expect(task.metadata.pending_merge_approval).toBeUndefined();
+    expect(mockGitHubClient.mergePullRequest).not.toHaveBeenCalled();
+    expect(mockGitHubClient.getPRStatus).not.toHaveBeenCalled();
+    expect(armedFlag(task)).toBeUndefined();
+    expect(appendAgentFinding).toHaveBeenCalledWith(
+      'task-123', 'system', expect.stringContaining('merging is disabled'), 'decision',
     );
     expect(task.sendMessage).toHaveBeenCalledWith(AGENT_PROMPTS.existingTask, 'pm-agent');
   });

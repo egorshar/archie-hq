@@ -668,9 +668,15 @@ async function handleSlackEvent(event: {
   // No agent spawn, no task creation, no reactions, no log entries. The
   // redacted history will be appended lazily the next time an internal user
   // triggers the handler (fetchSlackThread re-reads full history and redacts).
+  //
+  // Kept in scope past this block (not just the bail-out) so the confirmed-human
+  // identity it resolves can also seed `requested_by` below (SOC2: the
+  // requester must be the actual triggering human, never a thread's first
+  // message — which can be an internal integration bot).
+  let authorInfo: Awaited<ReturnType<typeof getUserInfo>> | undefined;
   if (event.user) {
     try {
-      const authorInfo = await getUserInfo(event.user);
+      authorInfo = await getUserInfo(event.user);
       if (isExternalUser(authorInfo)) {
         logger.system(`Skipping event from external/guest user ${event.user}`);
         return;
@@ -757,6 +763,7 @@ async function handleSlackEvent(event: {
 
     // Thread reply to an existing task — route to it
     await task.append(thread);
+    captureTaskRequester(task, event.user, authorInfo);
     if (isAckable) task.ackMessage(channelKey, event.ts);
     if (!task.metadata.title) {
       generateTitleAndSync(task, thread).catch((err) =>
@@ -774,6 +781,7 @@ async function handleSlackEvent(event: {
     // lands here — its root author isn't the bot — so it stays ignored, as before.
     const task = await Task.create();
     await task.append(thread);
+    captureTaskRequester(task, event.user, authorInfo);
     // Ack the triggering message. For @mention/DM the :eyes: was already added
     // before the thread fetch; for a reply to a bot-started thread, add it now.
     if (!isAckable && thread.rootAuthorWasBot) addReaction(event.channel, event.ts, 'eyes');
@@ -792,6 +800,50 @@ async function handleSlackEvent(event: {
     await dispatchChannelMessageTriggers(event, thread.channel.name);
   }
   // Otherwise: a reply in a human-started thread the bot wasn't part of — ignore
+}
+
+/**
+ * SOC2: seed `requested_by` from the confirmed triggering human — never from
+ * thread content. `thread.messages[0]` (the naive source this replaces) can be
+ * an internal integration bot's synthesized `SlackAuthor`: `fetchSlackThread`
+ * deliberately keeps bug-tracker/webhook bot messages (including as a thread
+ * root), so a bot-authored root followed by a human @mention would otherwise
+ * permanently misattribute the task to the bot.
+ *
+ * `event.user` is the id of the account that triggered this handler — by the
+ * time either call site reaches this, the own-bot filter (`routeSlackEvent`)
+ * and the external/guest bail-out above have already run, so it's confirmed
+ * internal. Those guards do NOT rule out a *different* internal bot though: a
+ * bug-tracker/webhook bot with its own Slack bot user resolves to a same-team,
+ * non-restricted account and would otherwise pass every prior check. `isBot`
+ * (Slack `users.info.is_bot`, part of `authorInfo`) is the only reliable signal
+ * for that, so it's checked here as the last gate before capture.
+ * `authorInfo` is the same lookup already performed for the bail-out above;
+ * reused here rather than re-fetched.
+ *
+ * No-ops if `requested_by` is already set (set-once, enforced by
+ * `Task.setRequester`), if the identity can't be resolved, or if the resolved
+ * identity is itself a bot — a missing trailer is better than a wrong one.
+ *
+ * Exported for regression testing (Task-level tests can't otherwise verify
+ * this call site's guard logic without booting the full Bolt app).
+ */
+export function captureTaskRequester(
+  task: Task,
+  userId: string | undefined,
+  authorInfo: Awaited<ReturnType<typeof getUserInfo>> | undefined,
+): void {
+  if (task.metadata.requested_by || !userId || !authorInfo || authorInfo.isBot === true) return;
+  const author: SlackAuthor = {
+    id: userId,
+    username: authorInfo.name,
+    realName: authorInfo.realName,
+    teamId: authorInfo.teamId,
+    isRestricted: authorInfo.isRestricted,
+    isUltraRestricted: authorInfo.isUltraRestricted,
+    isBot: authorInfo.isBot,
+  };
+  task.setRequester(author);
 }
 
 /**
@@ -901,6 +953,7 @@ async function handleSlackEdit(event: any): Promise<void> {
     teamId: authorInfo?.teamId,
     isRestricted: authorInfo?.isRestricted,
     isUltraRestricted: authorInfo?.isUltraRestricted,
+    isBot: authorInfo?.isBot,
   };
 
   const recorded = await task.appendSlackEdit(channelKey, author, editedTs, newText);

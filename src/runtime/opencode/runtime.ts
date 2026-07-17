@@ -73,6 +73,17 @@ function isErrorResult(res: unknown): boolean {
 }
 
 /**
+ * opencode session ids are `ses_…`. A task first run under the Claude/Anthropic
+ * runtime persists a UUID session_id into the shared session store; handing that
+ * UUID to opencode's session API throws at session setup ("Expected a string
+ * starting with \"ses\", got \"<uuid>\"") and every turn 500s. Treat any
+ * foreign-shaped id as absent so the loop mints a fresh opencode session.
+ */
+function isOpencodeSessionId(id: string | undefined): id is string {
+  return typeof id === 'string' && id.startsWith('ses_');
+}
+
+/**
  * Run ONE turn via `session.promptAsync` (returns immediately, HTTP 204) and
  * await completion off the SSE stream (`session.idle` → the turn-completion
  * registry), NOT the HTTP response — so a long turn can't trip undici's headers
@@ -245,6 +256,14 @@ export class OpencodeRuntime implements AgentRuntime {
     // request to abort; instead we unblock the in-flight `await turn`
     // (turn-completion registry) and tell opencode to abort the running turn
     // server-side.
+    // Drop a stored session_id that isn't opencode-shaped — e.g. a Claude UUID
+    // from a task first run under the Anthropic runtime (cross-runtime resume).
+    // opencode rejects it at session setup, so clearing it lets the loop mint a
+    // fresh `ses_` session (persisted back to agent.session.session_id below).
+    if (agent.session.session_id && !isOpencodeSessionId(agent.session.session_id)) {
+      logger.warn(def.id, `discarding non-opencode session id "${agent.session.session_id}" (foreign runtime) — minting a fresh opencode session`);
+      agent.session.session_id = undefined;
+    }
     let currentSessionId: string | undefined = agent.session.session_id;
     let clientRef: OpencodeClient | undefined;
 

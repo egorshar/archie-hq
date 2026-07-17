@@ -14,6 +14,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('../../../system/backends.js', () => ({
   getRepoHost: vi.fn(),
+  isMergeDisabled: vi.fn().mockReturnValue(false),
 }));
 
 vi.mock('../../../tasks/task.js', () => ({

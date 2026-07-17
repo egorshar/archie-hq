@@ -32,8 +32,23 @@ export function resolveAgentRuntimeKind(): AgentRuntimeKind {
   return raw as AgentRuntimeKind;
 }
 
-export function getBackendMatrix(): { repoHost: string; runtime: string } {
-  return { repoHost: resolveRepoHostKind(), runtime: resolveAgentRuntimeKind() };
+/**
+ * SOC2 lockdown: when ARCHIE_DISABLE_MERGE is truthy, agents cannot merge to a
+ * default branch at all (MRs only). Single source of truth — every merge gate
+ * calls this; nothing else reads the env var. The authoritative block is GitLab
+ * branch protection; this keeps Archie's behavior consistent with it.
+ */
+export function isMergeDisabled(): boolean {
+  const raw = (process.env.ARCHIE_DISABLE_MERGE ?? '').trim().toLowerCase();
+  return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
+}
+
+export function getBackendMatrix(): { repoHost: string; runtime: string; merge: 'enabled' | 'disabled' } {
+  return {
+    repoHost: resolveRepoHostKind(),
+    runtime: resolveAgentRuntimeKind(),
+    merge: isMergeDisabled() ? 'disabled' : 'enabled',
+  };
 }
 
 const REQUIRED_GITLAB_ENV = ['GITLAB_BASE_URL', 'GITLAB_TOKEN', 'GITLAB_WEBHOOK_SECRET'] as const;

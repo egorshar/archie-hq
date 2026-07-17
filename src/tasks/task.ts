@@ -11,7 +11,7 @@ import { CLI_CHANNEL_KEY } from '../types/task.js';
 import type { AgentDef } from '../types/agent.js';
 import { isPmAgent, isRepoAgent } from '../types/agent.js';
 import { modelDisplayLabel, modelChangingAgentIds } from '../agents/model-label.js';
-import { getAgentRuntime } from '../system/backends.js';
+import { getAgentRuntime, isMergeDisabled } from '../system/backends.js';
 import { prCardFingerprint, prCardTitlePlain } from '../system/pr-card-format.js';
 import { getGitHubClient } from '../connectors/github/client.js';
 import { createKeyedLock } from '../system/keyed-lock.js';
@@ -55,6 +55,7 @@ import {
 } from './persistence.js';
 import { getIsShuttingDown } from '../system/shutdown.js';
 import { scheduleIdleCheck } from './recovery.js';
+import { captureRequester } from './requested-by.js';
 import { scanAgentDefs, getAgentDef, getVisiblePeerIdsForSender, synthesizeDynamicAgentDef } from '../agents/registry.js';
 import type { AttachedRepo } from '../types/task.js';
 import { syncPlugins } from '../system/plugin-sync.js';
@@ -371,6 +372,23 @@ export class Task {
     existing.last_processed_ts = thread.currentMessageTs;
     this.debouncedSave();
     return { linkedNewThread: false };
+  }
+
+  /**
+   * SOC2: record the requesting human, set-once.
+   *
+   * Callers must pass the actual human who triggered task creation/engagement
+   * (e.g. the Slack event's `event.user`, resolved to a `SlackAuthor`) — NEVER
+   * a thread's first message, which can be an internal integration bot
+   * (bug-tracker/webhook) that `fetchSlackThread` deliberately keeps and
+   * synthesizes a `SlackAuthor` for. `captureRequester` is set-once, so a call
+   * after `requested_by` is already populated is a no-op.
+   */
+  setRequester(author: SlackAuthor): void {
+    const next = captureRequester(this.metadata.requested_by, { kind: 'slack', author });
+    if (next === this.metadata.requested_by) return;
+    this.metadata.requested_by = next;
+    this.debouncedSave();
   }
 
   /**
@@ -1332,6 +1350,27 @@ export class Task {
     this.agentProcesses.get(pending.requested_by as AgentName)?.clearPendingTeardown();
 
     const prRef = `${pending.github}#${pending.pr_number}`;
+
+    // Merge is disabled deployment-wide (defense-in-depth for a stale approval:
+    // a slot armed before the flag was set — plus its persistent Slack button —
+    // must not merge under lockdown, mirroring the merge.ts executor no-op). The
+    // slot is already consumed above, so this click cannot merge and cannot be
+    // replayed. Report honestly and reactivate the PM.
+    if (isMergeDisabled()) {
+      logger.warn(
+        'task',
+        `Merge approval for ${prRef} on task ${this.taskId} ignored — merging is disabled (ARCHIE_DISABLE_MERGE)`,
+      );
+      this.debouncedSave();
+      await appendAgentFinding(
+        this.taskId,
+        'system',
+        `Merge approval resolved but PR ${prRef} was not merged: merging is disabled in this deployment — a human merges in GitLab`,
+        'decision',
+      );
+      await this.sendMessage(AGENT_PROMPTS.existingTask, 'pm-agent');
+      return 'resolved';
+    }
     const bySuffix = approver?.name ? ` by ${approver.name}` : '';
     let findingType: 'completion' | 'decision';
     let finding: string;

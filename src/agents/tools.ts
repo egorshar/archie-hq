@@ -17,7 +17,7 @@ import type { AgentName, FindingType, AttachedRepo, SlackThreadMessage } from '.
 import type { Task } from '../tasks/task.js';
 import type { Agent } from './agent.js';
 import { getVisiblePeerIdsForSender, findAgentDefsContainingRepo, synthesizeDynamicAgentDef, isAutoMergeRepo } from './registry.js';
-import { getRepoHost } from '../system/backends.js';
+import { getRepoHost, isMergeDisabled } from '../system/backends.js';
 import { parseCheckRef } from '../connectors/github/client.js';
 import { parseGitLabCheckRef } from '../connectors/gitlab/status-map.js';
 import { gitExec } from '../connectors/github/repo-clone.js';
@@ -2833,6 +2833,21 @@ export const WRITE_REPO_TOOLS: readonly string[] = [
   'create_branch',
 ];
 
+/** Repo-tool specs active under the current config. When merge is disabled
+ * (ARCHIE_DISABLE_MERGE), `merge_pull_request` is dropped entirely — neither the
+ * Claude SDK server nor the opencode bridge exposes it, so agents can only open
+ * MRs. */
+export function activeRepoToolSpecs(): readonly RepoToolSpec[] {
+  return isMergeDisabled()
+    ? REPO_TOOL_SPECS.filter((s) => s.name !== 'merge_pull_request')
+    : REPO_TOOL_SPECS;
+}
+
+/** Test/introspection helper: the active repo-tool names under current config. */
+export function activeRepoToolNames(): string[] {
+  return activeRepoToolSpecs().map((s) => s.name);
+}
+
 /**
  * Build the repo-tool handler map keyed by tool name — shared by the SDK MCP
  * server (below) and the opencode bridge (`bridge/server.ts`), which dispatches
@@ -2840,7 +2855,7 @@ export const WRITE_REPO_TOOLS: readonly string[] = [
  */
 export function createRepoToolHandlers(agent: Agent, task: Task): Record<string, (args: unknown) => Promise<ToolResult>> {
   const handlers: Record<string, (args: unknown) => Promise<ToolResult>> = {};
-  for (const spec of REPO_TOOL_SPECS) {
+  for (const spec of activeRepoToolSpecs()) {
     handlers[spec.name] = (args: unknown) => spec.handler(agent, task, args);
   }
   return handlers;
@@ -2854,7 +2869,7 @@ export function createRepoToolsMcpServer(agent: Agent, task: Task) {
   return createSdkMcpServer({
     name: 'repo-tools',
     version: '1.0.0',
-    tools: REPO_TOOL_SPECS.map((spec) =>
+    tools: activeRepoToolSpecs().map((spec) =>
       tool(spec.name, spec.description, spec.schema, (args: any) => spec.handler(agent, task, args)),
     ),
   });

@@ -33,6 +33,14 @@ export interface SlackAuthor {
   teamId?: string;
   isRestricted?: boolean;
   isUltraRestricted?: boolean;
+  /**
+   * True when this identity is a Slack bot user (`users.info.is_bot`), or when
+   * synthesized directly from a known `bot_id`/`bot_profile` on a message.
+   * Undefined/false means "known human" or "unknown" — callers that must never
+   * attribute an action to a bot (e.g. SOC2 `requested_by` capture) should treat
+   * only `isBot === true` as the disqualifying signal, not its absence.
+   */
+  isBot?: boolean;
 }
 
 /** An emoji reaction present on a Slack message (snapshot at fetch time). */
@@ -309,6 +317,12 @@ export interface TaskMetadata {
    * user — in which case authoring falls back to the bot (the prior behaviour).
    */
   edit_approved_by?: { id: string; name: string; email?: string };
+  /**
+   * The human who requested this task (first human message). Stamped as the
+   * `Requested-by:` commit trailer for SOC2 traceability. Set once at task
+   * creation; never an agent. `source: 'cli'` when opened from the CLI.
+   */
+  requested_by?: { id: string; name: string; source: 'slack' | 'cli' };
   /**
    * The single pending merge-approval request (written by `merge_pull_request`
    * on a non-auto repo, cleared on every resolution — approve or deny). A

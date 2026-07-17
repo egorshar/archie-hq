@@ -31,7 +31,8 @@ describe('backends config resolver', () => {
   it('reports the resolved matrix', () => {
     delete process.env.REPO_HOST;
     delete process.env.AGENT_RUNTIME;
-    expect(getBackendMatrix()).toEqual({ repoHost: 'github', runtime: 'claude' });
+    delete process.env.ARCHIE_DISABLE_MERGE;
+    expect(getBackendMatrix()).toEqual({ repoHost: 'github', runtime: 'claude', merge: 'enabled' });
   });
 
   it('accepts AGENT_RUNTIME=opencode when a model route is configured', () => {

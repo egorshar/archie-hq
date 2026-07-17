@@ -23,8 +23,12 @@
  * registry entry has `readOnly: true`, BEFORE the handler ever runs. The
  * `GET /tools` manifest is NOT session-scoped — opencode's plugin fetches it
  * once at plugin load, before any session exists — so it always lists every
- * repo tool (including writes); RO enforcement lives entirely in the dispatch
- * rejection below, not in what the manifest advertises.
+ * repo tool for every session (including writes); RO enforcement lives
+ * entirely in the dispatch rejection below, not in what the manifest
+ * advertises. Merge is the one exception: the manifest is built from
+ * `activeRepoToolSpecs()` (`tools.ts`), so `merge_pull_request` is omitted
+ * entirely when `ARCHIE_DISABLE_MERGE` is set — matching the dispatch handler
+ * map, which is built from the same filtered set.
  *
  * Security: binds to 127.0.0.1 only, requires a bearer token (constant-time
  * compared) on every request (including `GET /tools`), and dispatches ONLY
@@ -43,7 +47,7 @@ import {
   requestMaxModeHandler,
   createRepoToolHandlers,
   WRITE_REPO_TOOLS,
-  REPO_TOOL_SPECS,
+  activeRepoToolSpecs,
   createCommsHandlers,
   createOrchestrationHandlers,
   createSchedulingHandlers,
@@ -227,12 +231,19 @@ function specsToDescriptors(specs: readonly NamedToolSpec[]): ToolDescriptor[] {
   }));
 }
 
-// Repo-tool descriptors, derived from the same `REPO_TOOL_SPECS` the Claude
-// SDK MCP server and the opencode bridge dispatch both use — single source of
-// truth, no hand-maintained second copy that can drift. The `/tools` manifest
-// is not session-scoped (see file header), so this always lists every repo
-// tool, including writes; RO enforcement lives entirely in the dispatch
-// rejection in `handleToolRequest`.
+// Repo-tool descriptors, derived from `activeRepoToolSpecs()` — the same
+// merge-filtered spec set the Claude SDK MCP server and the opencode bridge
+// dispatch both use (`createRepoToolHandlers`/`createRepoToolsMcpServer` in
+// `tools.ts`) — single source of truth, no hand-maintained second copy that
+// can drift. The `/tools` manifest is not session-scoped (see file header),
+// so this always lists every repo tool for every session, including writes;
+// RO enforcement lives entirely in the dispatch rejection in
+// `handleToolRequest`. Merge, however, IS filtered here: when
+// `ARCHIE_DISABLE_MERGE` is set, `activeRepoToolSpecs()` drops
+// `merge_pull_request` for every caller, so the manifest never advertises a
+// tool the dispatch handler map (also built from `activeRepoToolSpecs()`) would
+// then reject — an opencode agent under merge lockdown never sees
+// `merge_pull_request` at all.
 //
 // Computed lazily (not at module top level): this module sits in an existing
 // import cycle (`tools.ts` -> `system/backends.ts` -> opencode's `llm-one-shot.ts`
@@ -240,11 +251,13 @@ function specsToDescriptors(specs: readonly NamedToolSpec[]): ToolDescriptor[] {
 // is not guaranteed to be populated yet at the moment this module first
 // evaluates. Deferring to first call (and caching) sidesteps the ordering
 // hazard entirely — by the time any HTTP request is handled, both modules
-// have fully loaded. The comms/orchestration/scheduling caches below apply the
-// same lazy-and-cache treatment for the same reason.
+// have fully loaded. `isMergeDisabled()` reads a boot-constant env var
+// (`ARCHIE_DISABLE_MERGE`), so caching the filtered result for the process
+// lifetime is safe — it cannot flip mid-run. The comms/orchestration/scheduling
+// caches below apply the same lazy-and-cache treatment for the same reason.
 let repoToolDescriptorsCache: ToolDescriptor[] | null = null;
 function getRepoToolDescriptors(): ToolDescriptor[] {
-  if (!repoToolDescriptorsCache) repoToolDescriptorsCache = specsToDescriptors(REPO_TOOL_SPECS);
+  if (!repoToolDescriptorsCache) repoToolDescriptorsCache = specsToDescriptors(activeRepoToolSpecs());
   return repoToolDescriptorsCache;
 }
 

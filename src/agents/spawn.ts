@@ -18,6 +18,7 @@ import type { Agent } from './agent.js';
 import type { Task } from '../tasks/task.js';
 import { isRepoAgent, isPmAgent } from '../types/agent.js';
 import { buildCommitAuthorEnv } from './commit-author.js';
+import { buildCommitTrailers, writeCommitTrailerHook } from './commit-trailers.js';
 import { resolveAgentModel, resolveAgentEffort } from './model-label.js';
 import { linkAgentSkills } from './skill-linking.js';
 import {
@@ -53,18 +54,28 @@ import { buildSandboxConfig, createFilesystemGuardHooks, TRUSTED_PACKAGE_REGISTR
 import { applyOAuthBindings } from '../system/oauth/inject.js';
 import { enrichPromptWithMemory, isMemoryEnabled, isInjectionEnabled } from '../memory/index.js';
 import { runtimePromptVars } from './prompt-runtime-vars.js';
-import { getAgentRuntime } from '../system/backends.js';
+import { getAgentRuntime, isMergeDisabled } from '../system/backends.js';
 
 // ---- Prompt generation (per agent kind) ----
 
+/** A prompt line telling agents not to merge, when merge is disabled. Empty
+ * otherwise. Kept as a pure exported helper so it's unit-testable and appended
+ * identically to the repo-agent and PM prompts. */
+export function mergeDisabledNote(): string {
+  return isMergeDisabled()
+    ? '\n\nMerging is disabled in this deployment: open the merge request and stop. Do not attempt to merge, and do not tell the user you will merge — a human handles merges in GitLab.'
+    : '';
+}
+
 async function generatePMPrompt(task: Task): Promise<string> {
   const pmDef = task.team.find(isPmAgent);
-  return loadPrompt('pm-agent', {
+  const prompt = await loadPrompt('pm-agent', {
     ...runtimePromptVars(getAgentRuntime().kind),
     TEAM_LIST: pmDef?.pmConfig?.teamList ?? '',
     TEAM_EXPERTISE: pmDef?.pmConfig?.teamExpertise ?? '',
     PM_INTEGRATIONS: pmDef?.pmConfig?.pmIntegrations ?? '',
   });
+  return `${prompt}${mergeDisabledNote()}`;
 }
 
 async function generateRepoAgentPrompt(agent: Agent, task: Task): Promise<string> {
@@ -88,7 +99,7 @@ async function generateRepoAgentPrompt(agent: Agent, task: Task): Promise<string
 
   const layers = [corePrompt, repoPrompt];
   if (def.agentPrompt) layers.push(def.agentPrompt);
-  return layers.join('\n\n');
+  return `${layers.join('\n\n')}${mergeDisabledNote()}`;
 }
 
 async function generatePluginAgentPrompt(agent: Agent, task: Task): Promise<string> {
@@ -130,16 +141,16 @@ async function setupAgentWorkspace(taskId: string, agent: Agent): Promise<string
 
   // Write .claude/settings.json (picked up by the SDK via settingSources: ['project']).
   //
-  // attribution.commit replaces Claude Code's default commit trailer: we swap the
-  // harness-default "Co-Authored-By: Claude <model>" line for Archie (the GitHub
-  // App bot) so commits credit Archie as co-author, not the model. sessionUrl:false
-  // drops the Claude-Session trailer too. When the bot identity isn't configured
-  // the empty string simply hides the trailer. Plugin hooks are merged in when set.
+  // attribution.commit disables Claude Code's default commit trailer (the
+  // harness-default "Co-Authored-By: Claude <model>" line): the prepare-commit-msg
+  // git hook (see commit-trailers.ts) is now the single cross-runtime source of the
+  // Co-Authored-By/Requested-by trailers, so leaving this non-empty would double the
+  // Co-Authored-By line on the Claude path. sessionUrl:false drops the Claude-Session
+  // trailer too. Plugin hooks are merged in when set.
   const settingsPath = join(claudeDir, 'settings.json');
-  const archie = getGitHubAppIdentity();
   const settings: Record<string, unknown> = {
     attribution: {
-      commit: archie ? `Co-Authored-By: ${archie.name} <${archie.email}>` : '',
+      commit: '',
       sessionUrl: false,
     },
   };
@@ -421,6 +432,11 @@ Shared folder: ${sharedPath} [READ-ONLY]
       }
 
       await configureGitIdentity(clonePath);
+      // SOC2: stamp Co-Authored-By (bot) + Requested-by (initiator) on every commit,
+      // via a git hook — the single cross-runtime source (Claude SDK + opencode both
+      // run `git commit` in the clone). The commit author stays the edit-mode approver.
+      const trailers = buildCommitTrailers(getGitHubAppIdentity(), task.metadata.requested_by);
+      await writeCommitTrailerHook(clonePath, trailers);
       // Post-checkout hook (every spawn, fresh or reused clone): run the
       // operator-defined ARCHIE_REPO_POSTCHECKOUT command in the clone for repos
       // whose frontmatter opts in (e.g. write .npmrc + `npx ai-context sync`).
