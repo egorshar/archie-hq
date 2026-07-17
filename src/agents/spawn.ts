@@ -18,6 +18,7 @@ import type { Agent } from './agent.js';
 import type { Task } from '../tasks/task.js';
 import { isRepoAgent, isPmAgent } from '../types/agent.js';
 import { buildCommitAuthorEnv } from './commit-author.js';
+import { buildCommitTrailers, writeCommitTrailerHook } from './commit-trailers.js';
 import { resolveAgentModel, resolveAgentEffort } from './model-label.js';
 import { linkAgentSkills } from './skill-linking.js';
 import {
@@ -140,16 +141,16 @@ async function setupAgentWorkspace(taskId: string, agent: Agent): Promise<string
 
   // Write .claude/settings.json (picked up by the SDK via settingSources: ['project']).
   //
-  // attribution.commit replaces Claude Code's default commit trailer: we swap the
-  // harness-default "Co-Authored-By: Claude <model>" line for Archie (the GitHub
-  // App bot) so commits credit Archie as co-author, not the model. sessionUrl:false
-  // drops the Claude-Session trailer too. When the bot identity isn't configured
-  // the empty string simply hides the trailer. Plugin hooks are merged in when set.
+  // attribution.commit disables Claude Code's default commit trailer (the
+  // harness-default "Co-Authored-By: Claude <model>" line): the prepare-commit-msg
+  // git hook (see commit-trailers.ts) is now the single cross-runtime source of the
+  // Co-Authored-By/Requested-by trailers, so leaving this non-empty would double the
+  // Co-Authored-By line on the Claude path. sessionUrl:false drops the Claude-Session
+  // trailer too. Plugin hooks are merged in when set.
   const settingsPath = join(claudeDir, 'settings.json');
-  const archie = getGitHubAppIdentity();
   const settings: Record<string, unknown> = {
     attribution: {
-      commit: archie ? `Co-Authored-By: ${archie.name} <${archie.email}>` : '',
+      commit: '',
       sessionUrl: false,
     },
   };
@@ -431,6 +432,11 @@ Shared folder: ${sharedPath} [READ-ONLY]
       }
 
       await configureGitIdentity(clonePath);
+      // SOC2: stamp Co-Authored-By (bot) + Requested-by (initiator) on every commit,
+      // via a git hook — the single cross-runtime source (Claude SDK + opencode both
+      // run `git commit` in the clone). The commit author stays the edit-mode approver.
+      const trailers = buildCommitTrailers(getGitHubAppIdentity(), task.metadata.requested_by);
+      await writeCommitTrailerHook(clonePath, trailers);
       // Post-checkout hook (every spawn, fresh or reused clone): run the
       // operator-defined ARCHIE_REPO_POSTCHECKOUT command in the clone for repos
       // whose frontmatter opts in (e.g. write .npmrc + `npx ai-context sync`).
