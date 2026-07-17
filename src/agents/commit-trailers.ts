@@ -9,11 +9,23 @@ export function buildCommitTrailers(
   requester: { id: string; name: string; source: string } | undefined,
 ): string[] {
   const lines: string[] = [];
-  if (bot) lines.push(`Co-Authored-By: ${bot.name} <${bot.email}>`);
+  if (bot) lines.push(`Co-Authored-By: ${oneLine(bot.name)} <${oneLine(bot.email)}>`);
   if (requester) {
-    lines.push(requester.source === 'cli' ? 'Requested-by: cli' : `Requested-by: ${requester.name} (@${requester.id})`);
+    lines.push(
+      requester.source === 'cli'
+        ? 'Requested-by: cli'
+        : `Requested-by: ${oneLine(requester.name)} (@${oneLine(requester.id)})`,
+    );
   }
   return lines;
+}
+
+/** Collapse any control chars (newlines, tabs, …) to single spaces: a git
+ * trailer is one line, and the hook's `grep -qxF` idempotency check matches
+ * whole lines, so an embedded newline in an (externally-sourced) name would
+ * defeat de-duplication and re-append the trailer on every amend/rebase. */
+function oneLine(s: string): string {
+  return s.replace(/\p{Cc}+/gu, ' ').trim();
 }
 
 /** A `prepare-commit-msg` hook that appends each trailer once (idempotent) and

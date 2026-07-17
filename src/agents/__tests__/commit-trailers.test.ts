@@ -19,6 +19,16 @@ describe('buildCommitTrailers', () => {
     expect(t.every((l) => !l.startsWith('Co-Authored-By'))).toBe(true);
     expect(t).toContain('Requested-by: cli');
   });
+  it('keeps every trailer on a single line even when a name carries newlines/tabs', () => {
+    const t = buildCommitTrailers(
+      { name: 'Archie', email: 'archie@x.com' },
+      { id: 'U1', name: 'Egor\nSharapov\tJr', source: 'slack' },
+    );
+    // A trailer with an embedded newline would be split by `printf`/`grep -qxF`,
+    // defeating idempotency — every rendered trailer must be exactly one line.
+    expect(t.every((l) => !l.includes('\n'))).toBe(true);
+    expect(t).toContain('Requested-by: Egor Sharapov Jr (@U1)');
+  });
 });
 
 describe('prepare-commit-msg hook (real git)', () => {
