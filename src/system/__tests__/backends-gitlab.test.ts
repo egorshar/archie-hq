@@ -29,6 +29,7 @@ describe('backends resolver — gitlab', () => {
   it('reports the resolved matrix for gitlab', () => {
     process.env.REPO_HOST = 'gitlab';
     delete process.env.AGENT_RUNTIME;
-    expect(getBackendMatrix()).toEqual({ repoHost: 'gitlab', runtime: 'claude' });
+    delete process.env.ARCHIE_DISABLE_MERGE;
+    expect(getBackendMatrix()).toEqual({ repoHost: 'gitlab', runtime: 'claude', merge: 'enabled' });
   });
 });
