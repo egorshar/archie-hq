@@ -11,7 +11,7 @@ import { CLI_CHANNEL_KEY } from '../types/task.js';
 import type { AgentDef } from '../types/agent.js';
 import { isPmAgent, isRepoAgent } from '../types/agent.js';
 import { modelDisplayLabel, modelChangingAgentIds } from '../agents/model-label.js';
-import { getAgentRuntime } from '../system/backends.js';
+import { getAgentRuntime, isMergeDisabled } from '../system/backends.js';
 import { prCardFingerprint, prCardTitlePlain } from '../system/pr-card-format.js';
 import { getGitHubClient } from '../connectors/github/client.js';
 import { createKeyedLock } from '../system/keyed-lock.js';
@@ -1350,6 +1350,27 @@ export class Task {
     this.agentProcesses.get(pending.requested_by as AgentName)?.clearPendingTeardown();
 
     const prRef = `${pending.github}#${pending.pr_number}`;
+
+    // Merge is disabled deployment-wide (defense-in-depth for a stale approval:
+    // a slot armed before the flag was set — plus its persistent Slack button —
+    // must not merge under lockdown, mirroring the merge.ts executor no-op). The
+    // slot is already consumed above, so this click cannot merge and cannot be
+    // replayed. Report honestly and reactivate the PM.
+    if (isMergeDisabled()) {
+      logger.warn(
+        'task',
+        `Merge approval for ${prRef} on task ${this.taskId} ignored — merging is disabled (ARCHIE_DISABLE_MERGE)`,
+      );
+      this.debouncedSave();
+      await appendAgentFinding(
+        this.taskId,
+        'system',
+        `Merge approval resolved but PR ${prRef} was not merged: merging is disabled in this deployment — a human merges in GitLab`,
+        'decision',
+      );
+      await this.sendMessage(AGENT_PROMPTS.existingTask, 'pm-agent');
+      return 'resolved';
+    }
     const bySuffix = approver?.name ? ` by ${approver.name}` : '';
     let findingType: 'completion' | 'decision';
     let finding: string;
