@@ -323,12 +323,6 @@ export class Task {
     const channelId = `slack:${thread.channel.id}:${thread.threadId}`;
     const existing = this.metadata.channels[channelId] as SlackChannel | undefined;
 
-    // SOC2: record the requesting human once (first human message).
-    if (!this.metadata.requested_by && !thread.rootAuthorWasBot && thread.messages[0]?.user) {
-      this.metadata.requested_by = captureRequester(this.metadata.requested_by, { kind: 'slack', author: thread.messages[0].user });
-      this.debouncedSave();
-    }
-
     // Redaction policy: when the channel is shared and the message author is
     // external, drop content and don't download files. Author info is logged.
     const writeMessage = async (msg: typeof thread.messages[number]): Promise<void> => {
@@ -378,6 +372,23 @@ export class Task {
     existing.last_processed_ts = thread.currentMessageTs;
     this.debouncedSave();
     return { linkedNewThread: false };
+  }
+
+  /**
+   * SOC2: record the requesting human, set-once.
+   *
+   * Callers must pass the actual human who triggered task creation/engagement
+   * (e.g. the Slack event's `event.user`, resolved to a `SlackAuthor`) — NEVER
+   * a thread's first message, which can be an internal integration bot
+   * (bug-tracker/webhook) that `fetchSlackThread` deliberately keeps and
+   * synthesizes a `SlackAuthor` for. `captureRequester` is set-once, so a call
+   * after `requested_by` is already populated is a no-op.
+   */
+  setRequester(author: SlackAuthor): void {
+    const next = captureRequester(this.metadata.requested_by, { kind: 'slack', author });
+    if (next === this.metadata.requested_by) return;
+    this.metadata.requested_by = next;
+    this.debouncedSave();
   }
 
   /**
