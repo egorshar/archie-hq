@@ -21,8 +21,8 @@
 #   3. generate: the Claude Code Action writes ONLY the dated entries (one section
 #      per active day) to new-entry.md; a step captures it into the `entry` job output.
 #   4. publish: scripts/changelog-insert.mjs splices each entry into its
-#      reverse-chronological slot below [Unreleased], leaving structure and the
-#      bottom snapshot alone.
+#      reverse-chronological slot below the intro header, leaving structure and
+#      the bottom snapshot alone.
 #   5. publish: commit straight to main with [skip ci] so it doesn't trigger a rebuild.
 #
 # Security:

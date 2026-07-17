@@ -3,8 +3,8 @@
 // Used by .github/workflows/daily-changelog.yml: the workflow gathers each
 // undocumented day's changes, has Claude write the dated entries to a file,
 // and this script splices them into CHANGELOG.md deterministically — so the
-// file structure (the [Unreleased] section and the bottom "Before this log"
-// snapshot) is never touched by the model.
+// file structure (the intro header and the bottom "Before this log" snapshot)
+// is never touched by the model.
 //
 // The entry file may contain SEVERAL "## YYYY-MM-DD" sections (one per
 // backfilled day). Each section is validated and inserted independently into
