@@ -12,6 +12,7 @@ import { type AgentDef, type RepoEntry, isRepoAgent, isPmAgent } from '../types/
 import type { DynamicAgentSpec } from '../types/task.js';
 import { getPlugins, getRootMcpConfig, getPmOverlay, type LoadedMcpConfig, type PluginAgentDef } from '../system/plugin-loader.js';
 import { PLUGINS_DATA_DIR } from '../system/workdir.js';
+import { isMergeDisabled } from '../system/backends.js';
 import { existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -197,6 +198,7 @@ export function findAgentDefsContainingRepo(githubRepo: string): AgentDef[] {
  * effect on the next merge check after a rescan.
  */
 export function isAutoMergeRepo(github: string): boolean {
+  if (isMergeDisabled()) return false;
   const defs = findAgentDefsContainingRepo(github);
   if (defs.length === 0) return false;
   const flags = defs.flatMap((d) =>
