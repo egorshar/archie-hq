@@ -53,18 +53,28 @@ import { buildSandboxConfig, createFilesystemGuardHooks, TRUSTED_PACKAGE_REGISTR
 import { applyOAuthBindings } from '../system/oauth/inject.js';
 import { enrichPromptWithMemory, isMemoryEnabled, isInjectionEnabled } from '../memory/index.js';
 import { runtimePromptVars } from './prompt-runtime-vars.js';
-import { getAgentRuntime } from '../system/backends.js';
+import { getAgentRuntime, isMergeDisabled } from '../system/backends.js';
 
 // ---- Prompt generation (per agent kind) ----
 
+/** A prompt line telling agents not to merge, when merge is disabled. Empty
+ * otherwise. Kept as a pure exported helper so it's unit-testable and appended
+ * identically to the repo-agent and PM prompts. */
+export function mergeDisabledNote(): string {
+  return isMergeDisabled()
+    ? '\n\nMerging is disabled in this deployment: open the merge request and stop. Do not attempt to merge, and do not tell the user you will merge — a human handles merges in GitLab.'
+    : '';
+}
+
 async function generatePMPrompt(task: Task): Promise<string> {
   const pmDef = task.team.find(isPmAgent);
-  return loadPrompt('pm-agent', {
+  const prompt = await loadPrompt('pm-agent', {
     ...runtimePromptVars(getAgentRuntime().kind),
     TEAM_LIST: pmDef?.pmConfig?.teamList ?? '',
     TEAM_EXPERTISE: pmDef?.pmConfig?.teamExpertise ?? '',
     PM_INTEGRATIONS: pmDef?.pmConfig?.pmIntegrations ?? '',
   });
+  return `${prompt}${mergeDisabledNote()}`;
 }
 
 async function generateRepoAgentPrompt(agent: Agent, task: Task): Promise<string> {
@@ -88,7 +98,7 @@ async function generateRepoAgentPrompt(agent: Agent, task: Task): Promise<string
 
   const layers = [corePrompt, repoPrompt];
   if (def.agentPrompt) layers.push(def.agentPrompt);
-  return layers.join('\n\n');
+  return `${layers.join('\n\n')}${mergeDisabledNote()}`;
 }
 
 async function generatePluginAgentPrompt(agent: Agent, task: Task): Promise<string> {
