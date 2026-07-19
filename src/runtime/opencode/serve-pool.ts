@@ -24,6 +24,7 @@ import type { Agent } from '../../agents/agent.js';
 import type { Task } from '../../tasks/task.js';
 import { logger } from '../../system/logger.js';
 import { WORKDIR } from '../../system/workdir.js';
+import { safePathSegment } from '../../system/path-safety.js';
 import {
   startEmbeddedServer, prepareServeRoot, SERVE_PERMISSION, type OpencodeClient,
 } from './embedded-server.js';
@@ -87,8 +88,8 @@ let poolGeneration = 0;
 const EVICT_BOOT_WAIT_MS = 30_000;
 
 const poolKey = (taskId: string, agentId: string): string => `${taskId}:${agentId}`;
-const taskServeRoot = (taskId: string): string => join(WORKDIR, 'opencode-server', taskId);
-const syntheticRoot = (taskId: string, agentId: string): string => join(taskServeRoot(taskId), agentId);
+const taskServeRoot = (taskId: string): string => join(WORKDIR, 'opencode-server', safePathSegment(taskId, 'taskId'));
+const syntheticRoot = (taskId: string, agentId: string): string => join(taskServeRoot(taskId), safePathSegment(agentId, 'agentId'));
 
 /** Parse `15m` / `30s` / `2h` / bare-ms. Invalid → null (caller applies default). */
 function parseDurationMs(raw: string | undefined): number | null {

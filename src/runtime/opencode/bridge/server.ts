@@ -528,8 +528,11 @@ async function handleToolRequest(
     const result = await handler(args);
     sendJson(res, 200, { ok: true, result: unwrapToolResult(result) });
   } catch (e) {
-    const message = e instanceof Error ? e.message : String(e);
-    sendJson(res, 200, { ok: false, error: message });
+    // An unexpected handler throw (expected tool failures return their own
+    // `err(...)` result). Log the detail server-side; return a generic message
+    // over the bridge so internal error/stack detail isn't echoed to the child.
+    logger.warn('opencode-bridge', `tool "${toolName}" handler threw`, e);
+    sendJson(res, 200, { ok: false, error: `tool "${toolName}" failed` });
   }
 }
 
