@@ -1,0 +1,109 @@
+import type { AgentDef } from '../../types/agent.js';
+import { resolveAgentModel } from '../../agents/model-label.js';
+
+/**
+ * Resolve a logical model name (as the LlmOneShot callers pass — 'haiku',
+ * 'sonnet', …) to an opencode { providerID, modelID }.
+ *
+ * Resolution order:
+ *   1. `provider/model` passthrough when the name already contains '/'.
+ *   2. env `ARCHIE_OPENCODE_MODEL_<UPPER(name)>` (value is `provider/model`).
+ *   3. env `ARCHIE_OPENCODE_MODEL_DEFAULT`.
+ *   4. throw — no wrong-model guessing; the message names the env vars to set.
+ */
+
+export interface OpencodeModelRef {
+  providerID: string;
+  modelID: string;
+}
+
+function splitRef(spec: string): OpencodeModelRef {
+  const idx = spec.indexOf('/');
+  return { providerID: spec.slice(0, idx), modelID: spec.slice(idx + 1) };
+}
+
+export function resolveOpencodeModel(model: string): OpencodeModelRef {
+  if (model.includes('/')) return splitRef(model);
+
+  const perLogical = process.env[`ARCHIE_OPENCODE_MODEL_${model.toUpperCase()}`];
+  if (perLogical && perLogical.includes('/')) return splitRef(perLogical);
+
+  const fallback = process.env.ARCHIE_OPENCODE_MODEL_DEFAULT;
+  if (fallback && fallback.includes('/')) return splitRef(fallback);
+
+  throw new Error(
+    `Cannot resolve opencode model for "${model}". Set ARCHIE_OPENCODE_MODEL_${model.toUpperCase()} ` +
+      `or ARCHIE_OPENCODE_MODEL_DEFAULT to a "provider/model" id (e.g. anthropic/claude-haiku-4-5).`,
+  );
+}
+
+/**
+ * Resolve the opencode route for a specific agent — the per-role routing seam.
+ * Reuses the Claude runtime's per-agent alias (`resolveAgentModel`: PM → 'opus',
+ * others → 'sonnet[1m]', or the agent's declared `def.model`), strips the
+ * Claude-only `[1m]` 1M-context marker (opencode routes have no such concept),
+ * and maps the alias to a `{ providerID, modelID }` via `resolveOpencodeModel`
+ * (which falls back to ARCHIE_OPENCODE_MODEL_DEFAULT). Throws only if neither the
+ * tier nor DEFAULT is set — which cannot happen in a booted server, since
+ * server.ts resolves the 'default' route for config.model at boot.
+ *
+ * When `maxMode` is true the alias comes from the max-mode resolution
+ * (`resolveAgentModel(def, true)`): a per-agent `maxMode.model` override, or —
+ * for repo/dynamic agents — `ARCHIE_MAX_MODE_MODEL`. Point `ARCHIE_MAX_MODE_MODEL`
+ * at an opencode `provider/model` route (e.g. `openrouter/z-ai/glm-5.2`) and
+ * `resolveOpencodeModel` passes it straight through; a bare Claude alias with no
+ * matching `ARCHIE_OPENCODE_MODEL_<TIER>` falls back to _DEFAULT.
+ */
+export function resolveAgentOpencodeModel(def: AgentDef, maxMode = false): OpencodeModelRef {
+  const alias = resolveAgentModel(def, maxMode).replace(/\[1m\]$/i, '');
+  return resolveOpencodeModel(alias);
+}
+
+/**
+ * A real opencode route can wrap the underlying claude id behind provider
+ * segments — e.g. `openrouter/anthropic/claude-haiku-4-5` (providerID
+ * `openrouter`, modelID `anthropic/claude-haiku-4-5`, since resolveOpencodeModel
+ * splits at only the FIRST `/`). `modelDisplayLabel`'s beautify() only strips a
+ * leading `^(anthropic\/)?claude-`, so anything before that (`openrouter/`)
+ * would otherwise pass through raw in the footer. Matches from wherever the
+ * `(anthropic/)?claude-` shape starts, to the end of the string.
+ */
+const CLAUDE_ID_IN_ROUTE_RE = /(anthropic\/)?claude-.*/;
+
+/**
+ * The server-global model route as a `provider/model` string, for the footer.
+ * config.model is server-wide in opencode, so this reflects the
+ * single default route. Returns null when unresolved (never throws — the footer
+ * is best-effort). When the route contains a claude id, this trims any
+ * provider-wrapper prefix so it begins at `anthropic/claude-`/`claude-`, letting
+ * modelDisplayLabel() beautify it (e.g. `openrouter/anthropic/claude-haiku-4-5`
+ * → `anthropic/claude-haiku-4-5` → beautifies to `Haiku 4.5`). Non-claude routes
+ * (e.g. `openrouter/openai/gpt-4o`) pass through unchanged.
+ */
+export function opencodeFooterModel(): string | null {
+  try {
+    const m = resolveOpencodeModel('default');
+    const route = `${m.providerID}/${m.modelID}`;
+    const match = CLAUDE_ID_IN_ROUTE_RE.exec(route);
+    return match ? match[0] : route;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The opencode route a specific agent will run on, as a beautify-ready string
+ * for the footer (any provider-wrapper prefix trimmed so a claude id begins at
+ * `anthropic/claude-`/`claude-`, matching opencodeFooterModel's trimming).
+ * Returns null when unresolved (never throws — the footer is best-effort).
+ */
+export function opencodeAgentRoute(def: AgentDef, maxMode = false): string | null {
+  try {
+    const m = resolveAgentOpencodeModel(def, maxMode);
+    const route = `${m.providerID}/${m.modelID}`;
+    const match = CLAUDE_ID_IN_ROUTE_RE.exec(route);
+    return match ? match[0] : route;
+  } catch {
+    return null;
+  }
+}

@@ -49,7 +49,7 @@ describe('scanAgentDefs — RepoEntry.autoMerge resolution', () => {
     const defs = scanAgentDefs();
     const backend = defs.find((d) => d.id === 'backend-agent')!;
     expect(isRepoAgent(backend)).toBe(true);
-    expect(backend.repo!.repos).toEqual([{ github: 'org/backend', baseBranch: 'main', autoMerge: false }]);
+    expect(backend.repo!.repos).toEqual([{ github: 'org/backend', baseBranch: 'main', autoMerge: false, postCheckout: false }]);
   });
 
   it('carries autoMerge: true through the registry copy', () => {
@@ -63,7 +63,8 @@ describe('scanAgentDefs — RepoEntry.autoMerge resolution', () => {
   });
 });
 
-function repoAgentDef(key: string, repos: RepoEntry[]): AgentDef {
+function repoAgentDef(key: string, repos: Array<Omit<RepoEntry, 'postCheckout'> & { postCheckout?: boolean }>): AgentDef {
+  const resolved: RepoEntry[] = repos.map((r) => ({ ...r, postCheckout: r.postCheckout ?? false }));
   return {
     id: `${key}-agent`,
     key,
@@ -71,7 +72,7 @@ function repoAgentDef(key: string, repos: RepoEntry[]): AgentDef {
     expertise: 'e',
     pluginName: 'engineering',
     visibility: 'global',
-    repo: { repos, primary: repos[0].github },
+    repo: { repos: resolved, primary: resolved[0].github },
   } as AgentDef;
 }
 

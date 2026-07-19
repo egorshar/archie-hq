@@ -262,7 +262,7 @@ describe('merge_pull_request', () => {
 
     const agent = makeAgent({
       id: 'mobile-agent',
-      repo: { repos: [{ github: 'org/mobile', baseBranch: 'main', autoMerge: false }], primary: 'org/mobile' },
+      repo: { repos: [{ github: 'org/mobile', baseBranch: 'main', autoMerge: false, postCheckout: false }], primary: 'org/mobile' },
     });
     const tool = getRepoTool(agent, makeTask(), 'merge_pull_request');
     await tool({ pr_number: 7 }, {});

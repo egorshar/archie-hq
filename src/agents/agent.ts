@@ -1,16 +1,16 @@
 /**
  * Agent Class
  *
- * Each agent owns its runtime state: definition, message queue, SDK handle, session.
+ * Each agent owns its runtime state: definition, message queue, runtime handle, session.
  * Created lazily by Task on first message to that agent.
- * Spawned by spawnAgent() from spawn.ts.
+ * Spawned via the AgentRuntime seam (getAgentRuntime().spawn); the Claude runtime
+ * implements it with spawnAgent() from spawn.ts.
  */
 
 import type { AgentDef, AgentHandle, McpToolMeta } from '../types/agent.js';
 import type { AgentName, AgentSessionState } from '../types/task.js';
 import type { SandboxOptions } from './sandbox.js';
 import { MessageQueue } from './message-queue.js';
-import { spawnAgent } from './spawn.js';
 import { logger } from '../system/logger.js';
 
 export class Agent {
@@ -159,12 +159,13 @@ export class Agent {
 
     const hadSession = !!this.session.session_id;
 
-    // Spawn the SDK process. spawnAgent marks the agent active up-front (before
-    // MCP/clone setup that can throw); if that setup fails, undo the optimistic
-    // active mark so the agent doesn't linger "active" forever — which would wedge
-    // quiescence/idle detection (the task would never park or recover).
+    // Spawn via the active AgentRuntime. The runtime marks the agent active
+    // up-front (before MCP/clone setup that can throw); if that setup fails, undo
+    // the optimistic active mark so the agent doesn't linger "active" forever —
+    // which would wedge quiescence/idle detection (the task would never park or recover).
     try {
-      await spawnAgent(this, task);
+      const { getAgentRuntime } = await import('../system/backends.js');
+      await getAgentRuntime().spawn(this, task);
     } catch (err) {
       task.updateAgentState(this.def.id, false);
       throw err;

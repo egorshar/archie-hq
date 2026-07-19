@@ -204,6 +204,14 @@ describe('preflight', () => {
   it('passes with a non-empty key', () => {
     expect(preflight('ANTHROPIC_API_KEY=sk-ant-xxx\nPORT=3000\n')).toEqual([]);
   });
+
+  it('does not require ANTHROPIC_API_KEY under AGENT_RUNTIME=opencode with a model route', () => {
+    expect(preflight('AGENT_RUNTIME=opencode\nARCHIE_OPENCODE_MODEL_DEFAULT=openrouter/anthropic/claude-haiku-4.5\n')).toEqual([]);
+  });
+
+  it('fails under AGENT_RUNTIME=opencode when no ARCHIE_OPENCODE_MODEL_* route is set', () => {
+    expect(preflight('AGENT_RUNTIME=opencode\nPORT=3000\n').join()).toContain('ARCHIE_OPENCODE_MODEL');
+  });
 });
 
 // ---- Orchestration: compose-up failure never reaches the health poll ----

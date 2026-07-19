@@ -92,6 +92,16 @@ export interface RepoEntry {
    * behavior; `false` requires an explicit user approval to merge.
    */
   autoMerge: boolean;
+  /**
+   * Per-repo opt-in for the orchestrator's post-checkout hook. Resolved
+   * (non-optional) — default `false`. When `true` AND the operator has set the
+   * `ARCHIE_REPO_POSTCHECKOUT` env command, that command runs in this repo's
+   * clone right after checkout (see `runRepoPostCheckout`). This flag chooses
+   * only WHICH repos the operator-defined command runs for — it never carries
+   * the command itself (which stays operator/env-controlled, since the hook
+   * runs in the secret-holding orchestrator process).
+   */
+  postCheckout: boolean;
 }
 
 /**

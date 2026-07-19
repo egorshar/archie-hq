@@ -47,7 +47,17 @@ const DEFAULT_POLL_INTERVAL_MS = 5000;
 /** Validate boot preconditions from already-read inputs. Returns human-readable errors, empty when OK. */
 export function preflight(dotenvText: string | undefined): string[] {
   if (dotenvText === undefined) {
-    return ['.env not found at the repo root — copy .env.example and set ANTHROPIC_API_KEY'];
+    return ['.env not found at the repo root — copy .env.example and set ANTHROPIC_API_KEY (claude runtime) or AGENT_RUNTIME=opencode with an ARCHIE_OPENCODE_MODEL_* route'];
+  }
+  // Runtime-aware: the opencode runtime routes models via ARCHIE_OPENCODE_MODEL_*
+  // and authenticates its embedded server via opencode's own provider config/env,
+  // so ANTHROPIC_API_KEY is not required (mirrors assertOpencodeEnv in backends.ts).
+  const runtime = (dotenvText.match(/^\s*AGENT_RUNTIME\s*=\s*["']?([^\s"'#]+)/m)?.[1] ?? 'claude').toLowerCase();
+  if (runtime === 'opencode') {
+    if (!/^\s*ARCHIE_OPENCODE_MODEL_\w+\s*=\s*["']?[^\s"'#]+/m.test(dotenvText)) {
+      return ['AGENT_RUNTIME=opencode requires at least one ARCHIE_OPENCODE_MODEL_* route (e.g. ARCHIE_OPENCODE_MODEL_DEFAULT) in .env'];
+    }
+    return [];
   }
   const m = dotenvText.match(/^\s*ANTHROPIC_API_KEY\s*=\s*["']?([^\s"'#]+)/m);
   if (!m) {

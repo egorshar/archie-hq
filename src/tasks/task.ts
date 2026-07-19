@@ -10,7 +10,8 @@ import type { AgentName, SlackAuthor, SlackChannel, SlackThread, SlackReaction, 
 import { CLI_CHANNEL_KEY } from '../types/task.js';
 import type { AgentDef } from '../types/agent.js';
 import { isPmAgent, isRepoAgent } from '../types/agent.js';
-import { modelDisplayLabel, resolveAgentModel, modelChangingAgentIds } from '../agents/model-label.js';
+import { modelDisplayLabel, modelChangingAgentIds } from '../agents/model-label.js';
+import { getAgentRuntime } from '../system/backends.js';
 import { prCardFingerprint, prCardTitlePlain } from '../system/pr-card-format.js';
 import { getGitHubClient } from '../connectors/github/client.js';
 import { createKeyedLock } from '../system/keyed-lock.js';
@@ -64,7 +65,7 @@ import { logger } from '../system/logger.js';
 import { emitEvent } from '../system/event-bus.js';
 import { TaskStatusController, isStatusEnabled } from './status.js';
 import { setSlackThreadStatus } from '../connectors/slack/status.js';
-import { agentDomainLabel, deriveActivityFromEvent } from '../agents/activity.js';
+import { agentDomainLabel, deriveActivity } from '../agents/activity.js';
 
 // ---- Global state ----
 
@@ -658,28 +659,33 @@ export class Task {
    * process spawns). As specialists join, the set grows (e.g. `Opus 5 + Sonnet 5 (1M)`).
    */
   private collectModelsUsed(): string[] {
+    // Runtime-agnostic: PM first, then each spawned agent, mapping each def to
+    // the active runtime's pre-beautify footer token (skipping unresolved ones)
+    // and deduping in order. The runtime owns HOW a model is labelled (Claude
+    // alias vs opencode route) — this method never imports a runtime module.
+    // maxMode (the task-lifetime upgrade) is threaded through so the footer
+    // reflects any max-mode model swap.
     const maxMode = this.metadata.max_mode === true;
-    const modelFor = (def: AgentDef): string => {
+    const runtime = getAgentRuntime();
+    const modelFor = (def: AgentDef): string | null => {
+      const token = runtime.footerModelToken(def, maxMode);
       const resolved = this.resolvedModels.get(def.id);
-      const alias = resolveAgentModel(def, maxMode);
-      if (!resolved) return alias;
+      if (!resolved) return token;
       // The SDK's concrete id carries no `[1m]` suffix; re-attach it when the
-      // configured alias asked for the 1M window so the `(1M)` marker survives.
-      return /\[1m\]$/i.test(alias) && !/\[1m\]$/i.test(resolved) ? `${resolved}[1m]` : resolved;
+      // runtime's token asked for the 1M window so the `(1M)` marker survives.
+      return token && /\[1m\]$/i.test(token) && !/\[1m\]$/i.test(resolved) ? `${resolved}[1m]` : resolved;
     };
     const raw: string[] = [];
     const pmDef = this.team.find((d) => isPmAgent(d));
-    if (pmDef) raw.push(modelFor(pmDef));
-    for (const a of this.agentProcesses.values()) raw.push(modelFor(a.def));
-    if (raw.length === 0) raw.push('opus');
+    if (pmDef) { const t = modelFor(pmDef); if (t) raw.push(t); }
+    for (const a of this.agentProcesses.values()) { const t = modelFor(a.def); if (t) raw.push(t); }
     const seen = new Set<string>();
     const out: string[] = [];
-    for (const m of raw) {
-      if (seen.has(m)) continue;
-      seen.add(m);
-      out.push(m);
-    }
-    return out;
+    for (const m of raw) { if (seen.has(m)) continue; seen.add(m); out.push(m); }
+    if (out.length > 0) return out;
+    // Nothing resolved (e.g. before any agent spawns) → the runtime's default.
+    const fallback = runtime.footerModelDefaultToken();
+    return fallback ? [fallback] : [];
   }
 
   // ---- PR cards ----------------------------------------------------------
@@ -833,19 +839,20 @@ export class Task {
   }
 
   /**
-   * Feed an agent's SDK event into the status indicator. Called once per event
-   * from the spawn loop; it inspects tool_use blocks and, when one maps to a
-   * surfaceable action, records the agent's current activity. No-op for events
-   * without a status-worthy tool call.
+   * Record an agent's tool call on the status indicator. Builds the agent's
+   * ActivityContext and maps (toolName, input) → a surfaceable phrase. No-op for
+   * an unknown agent or a non-surfaced tool. Runtime-agnostic: the Claude spawn
+   * loop feeds it via noteActivityFromEvent; the opencode event consumer calls it
+   * directly with the opencode tool name.
    */
-  noteActivityFromEvent(agentId: string, event: unknown): void {
+  noteActivity(agentId: string, toolName: string, input: unknown): void {
     const agent = this.agentProcesses.get(agentId as AgentName);
     if (!agent) return;
     const def = agent.def;
     const isPm = isPmAgent(def);
     const domain = agentDomainLabel(def);
     const editMode = isRepoAgent(def) && this.metadata.edit_allowed === true;
-    const phrase = deriveActivityFromEvent(event, {
+    const phrase = deriveActivity(toolName, input, {
       isPm,
       editMode,
       domain,
@@ -857,6 +864,21 @@ export class Task {
       },
     });
     if (phrase) this.statusController.note(agentId, isPm, domain, phrase);
+  }
+
+  /**
+   * Feed an agent's SDK `assistant` event into the status indicator. A single
+   * event can carry several parallel tool_use blocks; the last surfaced one wins.
+   */
+  noteActivityFromEvent(agentId: string, event: unknown): void {
+    const e = event as { type?: string; message?: { content?: unknown } } | null;
+    if (!e || e.type !== 'assistant' || !Array.isArray(e.message?.content)) return;
+    for (const block of e.message.content) {
+      const b = block as { type?: string; name?: string; input?: unknown };
+      if (b?.type === 'tool_use' && typeof b.name === 'string') {
+        this.noteActivity(agentId, b.name, b.input ?? {});
+      }
+    }
   }
 
   /**
@@ -959,6 +981,15 @@ export class Task {
       if (midTurn) a.handle?.abort();
     }
 
+    // Let the runtime release per-task process state (opencode: close this
+    // task's serve children + rm synthetic serve roots). Best-effort — a hook
+    // failure must never block teardown.
+    try {
+      await getAgentRuntime().onTaskTeardown?.(this.taskId);
+    } catch (err) {
+      logger.warn('task', `runtime task-teardown hook failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
     // Clean up clones to free disk space (only when not in edit mode)
     if (this.metadata.edit_allowed !== true) {
       await this.cleanupClones();
@@ -1002,6 +1033,15 @@ export class Task {
       const midTurn = a.session.active;
       a.queue.stop();
       if (midTurn) a.handle?.abort();
+    }
+
+    // Let the runtime release per-task process state (opencode: close this
+    // task's serve children + rm synthetic serve roots). Best-effort — a hook
+    // failure must never block teardown.
+    try {
+      await getAgentRuntime().onTaskTeardown?.(this.taskId);
+    } catch (err) {
+      logger.warn('task', `runtime task-teardown hook failed: ${err instanceof Error ? err.message : String(err)}`);
     }
 
     // Clean up clones to free disk space (only when not in edit mode).

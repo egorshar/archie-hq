@@ -100,6 +100,13 @@ export interface PluginRepoEntry {
    * (a YAML typo like `"true"`) fails safe to manual-approval merges.
    */
   autoMerge?: boolean;
+  /**
+   * Per-repo opt-in for the orchestrator's post-checkout hook. Strict-boolean
+   * parse (only literal `true`). Chooses WHETHER the operator-defined
+   * `ARCHIE_REPO_POSTCHECKOUT` command runs for this repo — it never carries a
+   * command (that stays operator/env-controlled; see `runRepoPostCheckout`).
+   */
+  postCheckout?: boolean;
 }
 
 export interface PluginAgentDef {
@@ -318,6 +325,7 @@ function scanPlugins(): LoadedPlugin[] {
               github: entry.github,
               baseBranch: typeof entry.baseBranch === 'string' ? entry.baseBranch : undefined,
               autoMerge: entry.autoMerge === true,
+              postCheckout: entry.postCheckout === true,
             };
           });
           let primary: string;
@@ -340,6 +348,7 @@ function scanPlugins(): LoadedPlugin[] {
               github: repoMeta.github,
               baseBranch: typeof repoMeta.baseBranch === 'string' ? repoMeta.baseBranch : undefined,
               autoMerge: repoMeta.autoMerge === true,
+              postCheckout: repoMeta.postCheckout === true,
             }],
             primary: repoMeta.github,
           };

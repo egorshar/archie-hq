@@ -8,7 +8,7 @@
 
 import { describe, it, expect } from 'vitest';
 import type { AgentDef } from '../../types/agent.js';
-import { agentDomainLabel, deriveActivity, deriveActivityFromEvent } from '../activity.js';
+import { agentDomainLabel, deriveActivity } from '../activity.js';
 
 function def(partial: Partial<AgentDef>): AgentDef {
   return {
@@ -170,26 +170,28 @@ describe('deriveActivity', () => {
   });
 });
 
-describe('deriveActivityFromEvent', () => {
-  const sub = { isPm: false, editMode: false, domain: 'mobile' };
+describe('lowercase built-in tool aliases (opencode)', () => {
+  const ctx = { isPm: false, editMode: false, domain: 'backend' } as const;
 
-  it('returns the last surfaced tool phrase from an assistant event', () => {
-    const event = {
-      type: 'assistant',
-      message: {
-        content: [
-          { type: 'text', text: 'thinking' },
-          { type: 'tool_use', name: 'Read', input: {} },
-          { type: 'tool_use', name: 'mcp__repo-tools__create_pull_request', input: {} },
-        ],
-      },
-    };
-    expect(deriveActivityFromEvent(event, sub)).toBe('opening a mobile pull request');
+  it('maps lowercase read/grep/glob to the reading phrase', () => {
+    expect(deriveActivity('read', {}, ctx)).toBe('digging into the backend');
+    expect(deriveActivity('grep', {}, ctx)).toBe('digging into the backend');
+    expect(deriveActivity('glob', {}, ctx)).toBe('digging into the backend');
   });
 
-  it('returns null for non-assistant events and plain-string content', () => {
-    expect(deriveActivityFromEvent({ type: 'result' }, sub)).toBeNull();
-    expect(deriveActivityFromEvent({ type: 'assistant', message: { content: 'hi' } }, sub)).toBeNull();
-    expect(deriveActivityFromEvent(null, sub)).toBeNull();
+  it('maps lowercase edit/write/patch/multiedit to the changes phrase', () => {
+    expect(deriveActivity('edit', {}, ctx)).toBe('making changes to the backend');
+    expect(deriveActivity('write', {}, ctx)).toBe('making changes to the backend');
+    expect(deriveActivity('patch', {}, ctx)).toBe('making changes to the backend');
+    expect(deriveActivity('multiedit', {}, ctx)).toBe('making changes to the backend');
+  });
+
+  it('maps lowercase bash to the checks phrase (read-only specialist)', () => {
+    expect(deriveActivity('bash', {}, ctx)).toBe('running some checks on the backend');
+  });
+
+  it('leaves capitalized Claude names working unchanged', () => {
+    expect(deriveActivity('Read', {}, ctx)).toBe('digging into the backend');
+    expect(deriveActivity('Bash', {}, ctx)).toBe('running some checks on the backend');
   });
 });

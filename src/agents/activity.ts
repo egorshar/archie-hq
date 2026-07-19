@@ -77,6 +77,26 @@ function normalizePluginDomain(plugin: string): string {
 }
 
 /**
+ * opencode emits built-in tool names lowercased (`read`, `grep`, `bash`, …).
+ * Normalize them to the canonical Claude-cased names this module keys on, so a
+ * single tool→phrase table serves both runtimes. Harmless to the Claude path,
+ * which never emits these lowercase forms. Non-listed names pass through
+ * unchanged (MCP / bridged tools are matched later by their own branches).
+ */
+const BUILTIN_TOOL_ALIASES: Record<string, string> = {
+  read: 'Read',
+  grep: 'Grep',
+  glob: 'Glob',
+  edit: 'Edit',
+  write: 'Write',
+  patch: 'Edit',
+  multiedit: 'MultiEdit',
+  bash: 'Bash',
+  webfetch: 'WebFetch',
+  todowrite: 'TodoWrite',
+};
+
+/**
  * Map a single tool call to a status fragment, or null when the call is not
  * worth surfacing (internal bookkeeping, delegating, posting to the user — the
  * status for those is handled by the caller's lifecycle, not here).
@@ -86,6 +106,7 @@ export function deriveActivity(
   input: unknown,
   ctx: ActivityContext,
 ): string | null {
+  toolName = BUILTIN_TOOL_ALIASES[toolName] ?? toolName;
   const here = ctx.domain ? `the ${ctx.domain}` : 'this';
 
   // ---- Built-in SDK tools (bare names) ----
@@ -137,28 +158,6 @@ export function deriveActivity(
 
   // External integrations (plugin MCP servers) — phrase from metadata, no map.
   return integrationPhrase(toolName, server, here, ctx);
-}
-
-/**
- * Walk an SDK `assistant` event and return the fragment for its last surfaced
- * tool call (a single event can carry several parallel tool_use blocks). Returns
- * null when the event has no status-worthy tool call.
- */
-export function deriveActivityFromEvent(event: unknown, ctx: ActivityContext): string | null {
-  const e = event as { type?: string; message?: { content?: unknown } } | null;
-  if (!e || e.type !== 'assistant') return null;
-  const content = e.message?.content;
-  if (!Array.isArray(content)) return null;
-
-  let phrase: string | null = null;
-  for (const block of content) {
-    if (block && (block as { type?: string }).type === 'tool_use') {
-      const b = block as { name: string; input?: unknown };
-      const p = deriveActivity(b.name, b.input ?? {}, ctx);
-      if (p) phrase = p;
-    }
-  }
-  return phrase;
 }
 
 // ---- helpers ----

@@ -5,15 +5,15 @@
  * Slack messages: classifies intent (new_task, existing_task, cancel_task, noop).
  */
 
-import { query } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import pc from "picocolors";
 import type { TriageResult, SlackThread } from "../types/index.js";
 import { findTaskByThread } from "../tasks/persistence.js";
 import { SESSIONS_DIR } from "./workdir.js";
-import { processAgentEventForLogging, logger } from "./logger.js";
+import { logger } from "./logger.js";
 import { loadPrompt } from "../utils/prompt-loader.js";
+import { getLlmOneShot } from "./backends.js";
 
 /**
  * Slack triage schema - allows Slack-specific actions
@@ -43,66 +43,36 @@ async function runTriage<T extends z.ZodType>(
   const jsonSchema = zodToJsonSchema(schema as any, { $refStrategy: "none" });
   const sessionsDir = SESSIONS_DIR;
 
-  let result: z.infer<T> | null = null;
-
   logger.system(`Running triage-agent for ${logLabel}...`);
 
-  for await (const event of query({
+  const raw = await getLlmOneShot().json({
     prompt: input,
-    options: {
-      model: 'haiku',
-      systemPrompt,
-      cwd: sessionsDir,
-      executable: "node",
-      // pathToClaudeCodeExecutable: process.env.CLAUDE_PATH || "claude",
-      env: {
-        NODE_ENV: process.env.NODE_ENV || "development",
-        ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
-        // Forward CA-trust to the spawned CLI (TLS-intercepting proxy); no-op when unset.
-        ...(process.env.NODE_USE_SYSTEM_CA ? { NODE_USE_SYSTEM_CA: process.env.NODE_USE_SYSTEM_CA } : {}),
-        ...(process.env.NODE_EXTRA_CA_CERTS ? { NODE_EXTRA_CA_CERTS: process.env.NODE_EXTRA_CA_CERTS } : {}),
-        PATH: process.env.PATH,
-      },
-      allowedTools: ["Glob", "Grep", "Read"],
-      outputFormat: {
-        type: "json_schema",
-        schema: jsonSchema,
-      },
-    },
-  })) {
-    processAgentEventForLogging(event, "triage-agent", [sessionsDir]);
+    model: "haiku",
+    systemPrompt,
+    cwd: sessionsDir,
+    allowedTools: ["Glob", "Grep", "Read"],
+    jsonSchema,
+  });
 
-    if (event.type === "result") {
-      if (event.subtype === "success" && event.structured_output) {
-        const parsed = schema.safeParse(event.structured_output);
-        if (parsed.success) {
-          result = parsed.data;
-          const data = parsed.data as any;
-          const decision = {
-            action: data.action,
-            taskId: data.task_id || "(none)",
-            confidence: data.confidence,
-            reasoning: data.reasoning,
-          };
-          const label = pc.yellow("[triage-agent]");
-          console.log(`${label} ${pc.yellow(`[${logLabel}]`)}:`, decision);
-        } else {
-          logger.error("triage-agent", "Validation failed", parsed.error);
-        }
-      } else if (event.subtype === "error_max_structured_output_retries") {
-        logger.error(
-          "triage-agent",
-          "Failed to produce valid structured output after retries"
-        );
-      } else if (event.subtype === "error_during_execution") {
-        logger.error("triage-agent", "Error during execution", event.errors);
-      }
-    }
+  const parsed = raw === null ? null : schema.safeParse(raw);
+
+  if (parsed && parsed.success) {
+    const data = parsed.data as any;
+    const decision = {
+      action: data.action,
+      taskId: data.task_id || "(none)",
+      confidence: data.confidence,
+      reasoning: data.reasoning,
+    };
+    const label = pc.yellow("[triage-agent]");
+    console.log(`${label} ${pc.yellow(`[${logLabel}]`)}:`, decision);
+    return parsed.data;
   }
 
-  // Return result or default fallback
-  if (result) {
-    return result;
+  if (raw === null) {
+    logger.error("triage-agent", "Failed to produce valid structured output");
+  } else if (parsed) {
+    logger.error("triage-agent", "Validation failed", parsed.error);
   }
 
   // Type-safe default based on schema - parse a minimal valid object

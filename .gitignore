@@ -38,6 +38,9 @@ workdir/
 claude-data/
 *.log
 
+# Generated opencode bridge plugin (embeds a live bearer token — never commit)
+.opencode/
+
 # OS
 .DS_Store
 Thumbs.db
