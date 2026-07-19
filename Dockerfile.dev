@@ -42,6 +42,21 @@ COPY package.json package-lock.json* ./
 # Install ALL dependencies (keep devDependencies for tsx)
 RUN npm ci
 
+# opencode CLI — installed ONLY when building for the opencode runtime. The
+# @opencode-ai/sdk embedded server spawns `opencode serve`, so the CLI must be
+# on PATH when AGENT_RUNTIME=opencode; the default claude runtime never needs
+# it, so skip the global install (and its build time / image weight) there. The
+# version is read from package.json's @opencode-ai/sdk pin, so it stays in sync
+# automatically and never needs a hardcoded bump. Build with
+# `--build-arg AGENT_RUNTIME=opencode` (docker-compose passes ${AGENT_RUNTIME}
+# from .env) to include it.
+ARG AGENT_RUNTIME=claude
+RUN if [ "$AGENT_RUNTIME" = "opencode" ]; then \
+      npm i -g opencode-ai@"$(node -p "require('./package.json').dependencies['@opencode-ai/sdk']")"; \
+    else \
+      echo "AGENT_RUNTIME=$AGENT_RUNTIME — skipping opencode CLI install"; \
+    fi
+
 # Copy tsconfig (needed for tsx) and the scripts build config
 COPY tsconfig.json tsconfig.scripts.json ./
 

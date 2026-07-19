@@ -57,7 +57,7 @@ describe('resolveAgentModel', () => {
     expect(resolveAgentModel(def({ model: 'opus[1m]' }))).toBe('opus[1m]');
   });
 
-  const repo = { repos: [{ github: 'o/r', baseBranch: 'main', autoMerge: false }], primary: 'o/r' };
+  const repo = { repos: [{ github: 'o/r', baseBranch: 'main', autoMerge: false, postCheckout: false }], primary: 'o/r' };
 
   it('max mode: leaves the model unchanged without a frontmatter or env override', () => {
     // the built-in max-mode default is effort-only, so the model is untouched
@@ -82,7 +82,7 @@ describe('resolveAgentModel', () => {
 });
 
 describe('resolveAgentEffort', () => {
-  const repo = { repos: [{ github: 'o/r', baseBranch: 'main', autoMerge: false }], primary: 'o/r' };
+  const repo = { repos: [{ github: 'o/r', baseBranch: 'main', autoMerge: false, postCheckout: false }], primary: 'o/r' };
   const def = (over: Partial<AgentDef>): AgentDef => ({
     id: 'x-agent', key: 'x', role: '', expertise: '', pluginName: 'p', ...over,
   } as AgentDef);
@@ -119,7 +119,7 @@ describe('resolveAgentEffort', () => {
 });
 
 describe('modelChangingAgentIds', () => {
-  const repo = { repos: [{ github: 'o/r', baseBranch: 'main', autoMerge: false }], primary: 'o/r' };
+  const repo = { repos: [{ github: 'o/r', baseBranch: 'main', autoMerge: false, postCheckout: false }], primary: 'o/r' };
   const def = (over: Partial<AgentDef>): AgentDef => ({
     id: 'x-agent', key: 'x', role: '', expertise: '', pluginName: 'p', ...over,
   } as AgentDef);

@@ -22,7 +22,7 @@
  * silently connected to with the wrong transport class.
  */
 
-import { tool, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
+import { tool, createSdkMcpServer } from '../runtime/claude/sdk.js';
 import { z } from 'zod';
 import { readFile, stat } from 'fs/promises';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
