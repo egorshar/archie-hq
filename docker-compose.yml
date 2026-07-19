@@ -20,6 +20,12 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.dev
+      args:
+        # Install the opencode CLI into the image only when the opencode runtime
+        # is selected. Compose interpolates ${AGENT_RUNTIME} from .env (default
+        # claude), so setting AGENT_RUNTIME=opencode there makes `compose build`
+        # include the CLI with no extra flags.
+        AGENT_RUNTIME: ${AGENT_RUNTIME:-claude}
     restart: unless-stopped
     ports:
       - "${PORT:-3000}:${PORT:-3000}"
