@@ -1,5 +1,16 @@
-import { describe, it, expect, afterEach, vi } from 'vitest';
+import { describe, it, expect, afterEach, beforeAll, vi } from 'vitest';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, delimiter } from 'node:path';
 import { resolveAgentRuntimeKind, assertBackendConfig, getBackendMatrix, getAgentRuntime } from '../backends.js';
+
+// A temp dir holding a stub `opencode` binary, so the opencode PATH check in
+// assertBackendConfig can be satisfied deterministically regardless of the host.
+let opencodeBin: string;
+beforeAll(() => {
+  opencodeBin = mkdtempSync(join(tmpdir(), 'oc-bin-'));
+  writeFileSync(join(opencodeBin, 'opencode'), '#!/bin/sh\n', { mode: 0o755 });
+});
 
 const ORIG = { ...process.env };
 afterEach(() => {
@@ -23,10 +34,18 @@ describe('backends config resolver', () => {
     expect(getBackendMatrix()).toEqual({ runtime: 'claude' });
   });
 
-  it('accepts AGENT_RUNTIME=opencode when a model route is configured', () => {
+  it('accepts AGENT_RUNTIME=opencode when a model route is configured and the CLI is on PATH', () => {
     process.env.AGENT_RUNTIME = 'opencode';
     process.env.ARCHIE_OPENCODE_MODEL_DEFAULT = 'anthropic/claude-haiku-4-5';
+    process.env.PATH = `${opencodeBin}${delimiter}${process.env.PATH ?? ''}`;
     expect(() => assertBackendConfig()).not.toThrow();
+  });
+
+  it('rejects AGENT_RUNTIME=opencode when the opencode CLI is not on PATH, actionably', () => {
+    process.env.AGENT_RUNTIME = 'opencode';
+    process.env.ARCHIE_OPENCODE_MODEL_DEFAULT = 'anthropic/claude-haiku-4-5';
+    process.env.PATH = ''; // no directory on PATH contains an `opencode` binary
+    expect(() => assertBackendConfig()).toThrow(/opencode` CLI on PATH/);
   });
 
   it('rejects AGENT_RUNTIME=opencode with no model route, actionably', () => {

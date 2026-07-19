@@ -5,6 +5,8 @@
  * never branch on the runtime. Fails fast with actionable messages at boot.
  */
 
+import { existsSync } from 'node:fs';
+import { delimiter, join } from 'node:path';
 import type { AgentRuntime } from '../ports/agent-runtime.js';
 import type { LlmOneShot } from '../ports/llm-one-shot.js';
 import { claudeSdkRuntime } from '../runtime/claude/runtime.js';
@@ -26,10 +28,21 @@ export function getBackendMatrix(): { runtime: string } {
   return { runtime: resolveAgentRuntimeKind() };
 }
 
+/** True when an `opencode` executable is resolvable on PATH. */
+function opencodeCliOnPath(): boolean {
+  const dirs = (process.env.PATH ?? '').split(delimiter).filter(Boolean);
+  return dirs.some((dir) => existsSync(join(dir, 'opencode')));
+}
+
 /**
  * The runtime routes logical model names via ARCHIE_OPENCODE_MODEL_<TIER> /
  * _DEFAULT (see runtime/opencode/model.ts). Require at least one so model
- * resolution can't fail at spawn with no route configured.
+ * resolution can't fail at spawn with no route configured. Also require the
+ * `opencode` CLI on PATH — the embedded server spawns `opencode serve`, and its
+ * absence otherwise surfaces only at first agent spawn (a serve-spawn ENOENT),
+ * not at boot. The Docker images install the CLI only when built for the
+ * opencode runtime (AGENT_RUNTIME build arg), so a claude-built image run with
+ * AGENT_RUNTIME=opencode trips exactly this check.
  */
 function assertOpencodeEnv(): void {
   const hasRoute = Object.keys(process.env).some((k) => k.startsWith('ARCHIE_OPENCODE_MODEL_'));
@@ -37,6 +50,14 @@ function assertOpencodeEnv(): void {
     throw new Error(
       'AGENT_RUNTIME=opencode requires a model route: set ARCHIE_OPENCODE_MODEL_DEFAULT ' +
       '(or a per-tier ARCHIE_OPENCODE_MODEL_<TIER>, e.g. ARCHIE_OPENCODE_MODEL_OPUS) to a "provider/model" value.',
+    );
+  }
+  if (!opencodeCliOnPath()) {
+    throw new Error(
+      'AGENT_RUNTIME=opencode requires the `opencode` CLI on PATH, but it was not found. ' +
+      'The embedded server spawns `opencode serve`. In Docker, build the image for the opencode runtime ' +
+      '(set AGENT_RUNTIME=opencode at build time — docker compose reads it from .env); for a local install, ' +
+      'run `npm install -g opencode-ai@<version matching @opencode-ai/sdk>`.',
     );
   }
 }
