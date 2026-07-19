@@ -114,7 +114,7 @@ async function generatePluginAgentPrompt(agent: Agent, task: Task): Promise<stri
 // ---- Plugin agent workspace setup ----
 
 async function setupAgentWorkspace(taskId: string, agent: Agent): Promise<string> {
-  const agentWorkspace = join(getTaskPath(taskId), 'agents', agent.def.key);
+  const agentWorkspace = join(getTaskPath(safePathSegment(taskId, 'taskId')), 'agents', safePathSegment(agent.def.key, 'agent key'));
   await mkdir(agentWorkspace, { recursive: true });
 
   const claudeDir = join(agentWorkspace, '.claude');
