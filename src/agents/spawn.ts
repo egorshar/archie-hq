@@ -11,6 +11,7 @@
  */
 
 import { join } from 'path';
+import { safePathSegment } from '../system/path-safety.js';
 import { mkdir, symlink, readdir, writeFile, stat, rm } from 'fs/promises';
 import { existsSync } from 'fs';
 import { randomUUID } from 'node:crypto';
@@ -385,7 +386,7 @@ Shared folder: ${sharedPath} [READ-ONLY]
       const baseRepoPath = att.base_path || getBaseCachePath(att.github);
       att.base_path = baseRepoPath;
       const baseObjectsPath = join(baseRepoPath, '.git', 'objects');
-      const desiredClonePath = getAgentClonePath(taskId, def.id, att.github);
+      const desiredClonePath = getAgentClonePath(safePathSegment(taskId, 'taskId'), safePathSegment(def.id, 'agentId'), att.github);
 
       let clonePath: string;
       if (att.clone_path && await cloneExists(att.clone_path)) {
@@ -531,7 +532,7 @@ export async function spawnAgent(agent: Agent, task: Task): Promise<void> {
   // Only create for new tasks. Old tasks recovering won't have <taskId>/claude/
   // on disk — skip to avoid breaking their sandbox config during transition.
 
-  const claudeBaseDir = join(getTaskPath(taskId), 'claude', def.key);
+  const claudeBaseDir = join(getTaskPath(safePathSegment(taskId, 'taskId')), 'claude', safePathSegment(def.key, 'agent key'));
   const claudeConfigDir = join(claudeBaseDir, 'session');
   const claudeTmpDir = join(claudeBaseDir, 'tmp');
   const hasClaudeDirs = existsSync(claudeBaseDir);

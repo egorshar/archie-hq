@@ -12,6 +12,7 @@ import { existsSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { join } from 'node:path';
+import { safePathSegment } from '../../system/path-safety.js';
 import { logger } from '../../system/logger.js';
 import { SERVE_ARGS } from './embedded-server.js';
 import type { Agent } from '../../agents/agent.js';
@@ -172,7 +173,7 @@ export function agentHomeDir(taskId: string, agentId: string): string {
   // it in a sibling `_home/<agentId>` keeps it out of every serve cwd (repo
   // agents' cwd is the clone, already a separate tree; `_home` is never itself
   // a serve cwd — those are keyed by real agent ids).
-  return join(WORKDIR, 'opencode-server', taskId, '_home', agentId);
+  return join(WORKDIR, 'opencode-server', safePathSegment(taskId, 'taskId'), '_home', safePathSegment(agentId, 'agentId'));
 }
 
 function providerHostsOrThrow(providerID: string): string[] {

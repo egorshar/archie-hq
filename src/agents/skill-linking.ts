@@ -8,6 +8,7 @@
 import { rm, mkdir, readdir, stat, symlink } from 'fs/promises';
 import { existsSync } from 'fs';
 import { join } from 'path';
+import { safePathSegment } from '../system/path-safety.js';
 
 /**
  * (Re)build a skills dir as symlinks into the given source dirs, sources first
@@ -28,7 +29,8 @@ export async function linkAgentSkills(agentSkillsDir: string, skillSources: stri
   await mkdir(agentSkillsDir, { recursive: true });
   for (const skillsPath of skillSources) {
     for (const skillEntry of await readdir(skillsPath, { withFileTypes: true })) {
-      const entryPath = join(skillsPath, skillEntry.name);
+      const entryName = safePathSegment(skillEntry.name, 'skill name');
+      const entryPath = join(skillsPath, entryName);
       // Mount real skill dirs AND symlinks that resolve to a dir. A skill can be
       // vendored as a git submodule and exposed via a symlink (e.g. the
       // data-analytics data-context); readdir's Dirent.isDirectory() is false
@@ -38,7 +40,7 @@ export async function linkAgentSkills(agentSkillsDir: string, skillSources: stri
         isDir = await stat(entryPath).then((s) => s.isDirectory()).catch(() => false);
       }
       if (!isDir) continue;
-      const target = join(agentSkillsDir, skillEntry.name);
+      const target = join(agentSkillsDir, entryName);
       // The dir was just cleared, so any link present here was created earlier
       // in THIS build — first source to claim a name wins.
       if (!existsSync(target)) {
