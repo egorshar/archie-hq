@@ -6,6 +6,12 @@ import { fetchTaskDetail, fetchTaskEvents, sendMessage, sendApproval } from '../
 import { MessageInput } from './MessageInput.js';
 import type { PrCardData } from '../../types/task.js';
 import { prCardSubtitle, CLI_PR_CARD_EMOJI } from '../../system/pr-card-format.js';
+import { renderMarkdown } from '../markdown.js';
+
+// Agent (non-PM) traffic recedes to a real mid-gray. The named `gray` color is
+// ANSI bright-black, which reads as near-black on a dark terminal; a hex value
+// renders a visible gray on truecolor terminals.
+const AGENT_GRAY = '#8a8a8a';
 
 /**
  * Render a PR card from a `pr_card` event's data. Two lines: a colored title row
@@ -44,6 +50,36 @@ function formatMessageParts(from: string, to: string, destination?: string): { l
   const label = destination ? `${from} in ${destination}` : from;
   const mention = from !== to && to !== 'user' ? ` @${to}` : '';
   return { label, mention };
+}
+
+/**
+ * Which log entries are shown in full by default vs. folded. Visible: the
+ * PM↔user conversation and actionable/tracked items. Foldable: inter-agent
+ * chatter, findings, and background tasks. Pure + exported for unit testing.
+ */
+export function classifyEvent(type: string, from?: string, to?: string): 'visible' | 'foldable' {
+  if (type === 'message') {
+    // A message is part of the PM↔user conversation (shown in full) when it's
+    // addressed to the user, or its sender is a human rather than an agent.
+    // Agents are `<name>-agent`; a human sender is `cli` or a real name. So an
+    // inter-agent message (agent→agent/pm) is the only foldable message.
+    return to === 'user' || isUserSender(from) ? 'visible' : 'foldable';
+  }
+  if (type === 'agent:log' || type === 'agent:bg_task') return 'foldable';
+  return 'visible'; // approvals, pr_card, reminders, and anything else
+}
+
+/** Non-human, non-agent senders that appear in the message stream: CI/webhook
+ * events (`from:'ci'`) and system notices (`from:'system'`, e.g. the wall-clock
+ * pause). These are neither agents (they don't end in `-agent`) nor the user. */
+const NON_USER_SENDERS = new Set(['ci', 'system']);
+
+/** A message sender that is a human — the CLI operator (`cli`) or a named
+ * person (Slack real name) — as opposed to an agent (`<name>-agent`) or a
+ * system/CI sender. Used to both classify and visually mark the user's own
+ * messages. */
+export function isUserSender(from?: string): boolean {
+  return !!from && !from.endsWith('-agent') && !NON_USER_SENDERS.has(from);
 }
 
 function formatDateTime(iso: string): string {
@@ -108,7 +144,7 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
   const [eventCursor, setEventCursor] = useState(0);
   const [fallbackLines, setFallbackLines] = useState<string[]>([]); // knowledge.log for old tasks
   const [inputActive, setInputActive] = useState(true);
-  const [focusedApprovalLine, setFocusedApprovalLine] = useState<number | null>(null);
+  const [focusedLine, setFocusedLine] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string>('');
   // Live "Archie is …" indicator — the same line pushed to Slack, mirrored here
@@ -121,14 +157,17 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
   const scrollRef = useRef<ScrollViewRef>(null);
   const autoScroll = useRef(true); // stick to bottom unless user scrolls up
   const [linesBelow, setLinesBelow] = useState(0);
+  const [expandedFolds, setExpandedFolds] = useState<Set<string>>(new Set());
   const escapeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Reserve lines: header(1) + agents(1) + margin(1) + indicator/gap(2) + input(1)
   const reservedLines = 6;
   const logHeight = Math.max(5, termHeight - reservedLines);
+  // Wrap width for rendered markdown (leave a small margin inside the log box).
+  const mdWidth = Math.max(40, (stdout?.columns ?? 80) - 2);
 
   // Build log lines with inline approvals
-  const logLines: { node: React.ReactNode; approval?: { approvalType: 'edit_mode' | 'research_budget' | 'merge' | 'trigger' | 'max_mode'; eventIndex: number; github?: string; pr_number?: number; ref?: string } }[] = [];
+  const logLines: { node?: React.ReactNode; approval?: { approvalType: 'edit_mode' | 'research_budget' | 'merge' | 'trigger' | 'max_mode'; eventIndex: number; github?: string; pr_number?: number; ref?: string }; fold?: { id: string; summary: React.ReactNode; full: React.ReactNode } }[] = [];
 
   // Fold pr_card events so a card renders once, at its most recent `post`
   // (anchor), showing the latest merged state. `update` events refresh the data
@@ -145,25 +184,69 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
     }
   });
 
+  const FOLD_MIN_CHARS = 80;
+  const oneLine = (s: string, n = FOLD_MIN_CHARS): string => {
+    const flat = s.replace(/\s+/g, ' ').trim();
+    return flat.length > n ? flat.slice(0, n) + '…' : flat;
+  };
+  // A foldable entry that's already short (fits the one-line summary without
+  // truncation) is shown inline instead of collapsed — there's nothing to hide.
+  const isShort = (s: string): boolean => s.replace(/\s+/g, ' ').trim().length <= FOLD_MIN_CHARS;
+
   if (events.length > 0) {
     events.forEach((event, idx) => {
       switch (event.type) {
-        case 'message':
-          logLines.push({
-            node: (() => { const p = formatMessageParts(event.data.from as string, event.data.to as string, event.data.destination as string | undefined); const footer = event.data.footer as string | undefined; return <><Text dimColor>[{p.label}]</Text>{p.mention ? <Text color="cyan">{p.mention}</Text> : null} {event.data.message as string}{footer ? <Text dimColor>{'\n'}{footer}</Text> : null}</>; })(),
-          });
+        case 'message': {
+          const p = formatMessageParts(event.data.from as string, event.data.to as string, event.data.destination as string | undefined);
+          const footer = event.data.footer as string | undefined;
+          const body = event.data.message as string;
+          const fromStr = event.data.from as string;
+          const fromUser = isUserSender(fromStr);
+          const isPm = fromStr === 'pm-agent';
+          const mentionSuffix = p.mention ? ` @${event.data.to}` : '';
+          const mentionNode = p.mention ? <Text color="cyan">{p.mention}</Text> : null;
+          const mdBody = <><Text>{renderMarkdown(body, mdWidth)}</Text>{footer ? <Text dimColor>{'\n'}{footer}</Text> : null}</>;
+          if (classifyEvent('message', fromStr, event.data.to as string) === 'visible') {
+            // The user↔PM conversation: prominent colored label (user green, PM
+            // cyan) + markdown-rendered body.
+            const label = fromUser
+              ? <Text color="green" bold>[{fromStr === 'cli' ? 'you' : p.label}]</Text>
+              : isPm
+                ? <Text color="cyan" bold>[{p.label}]</Text>
+                : <Text color={AGENT_GRAY}>[{p.label}]</Text>;
+            logLines.push({ node: <>{label}{mentionNode} {mdBody}</> });
+          } else if (isShort(body)) {
+            // Short agent-to-agent traffic: shown inline, receded to flat gray
+            // (unrendered — it's a one-liner of noise, no need for markdown).
+            logLines.push({ node: <Text color={AGENT_GRAY}>[{p.label}]{mentionSuffix} {body}{footer ? `\n${footer}` : ''}</Text> });
+          } else {
+            // Long agent traffic: gray one-line summary; expanding it (an
+            // explicit "I want to read this") shows the full markdown body.
+            const summary = <Text color={AGENT_GRAY}>▸ [{p.label}]{mentionSuffix} {oneLine(body)} (Enter to expand)</Text>;
+            const expanded = <><Text color={AGENT_GRAY}>▾ [{p.label}]{mentionSuffix}</Text> {mdBody}</>;
+            logLines.push({ fold: { id: String(idx), summary, full: expanded } });
+          }
           break;
+        }
         case 'pr_card': {
           const cardId = event.data.cardId as string | undefined;
           if (!cardId || prCardAnchor.get(cardId) !== idx) break; // render once, at the anchor
           logLines.push({ node: renderPrCard(prCardLatest.get(cardId) ?? event.data) });
           break;
         }
-        case 'agent:log':
-          logLines.push({
-            node: <Text dimColor>[{event.agentName}] {event.data.finding as string}</Text>,
-          });
+        case 'agent:log': {
+          const finding = event.data.finding as string;
+          if (isShort(finding)) {
+            // Short finding — inline, flat gray, unrendered.
+            logLines.push({ node: <Text color={AGENT_GRAY}>[{event.agentName}] {finding}</Text> });
+          } else {
+            // Long finding — gray summary; expand for the full markdown body.
+            const summary = <Text color={AGENT_GRAY}>▸ [{event.agentName}] finding: {oneLine(finding)} (Enter to expand)</Text>;
+            const expanded = <><Text color={AGENT_GRAY}>▾ [{event.agentName}] </Text><Text>{renderMarkdown(finding, mdWidth)}</Text></>;
+            logLines.push({ fold: { id: String(idx), summary, full: expanded } });
+          }
           break;
+        }
         case 'agent:bg_task': {
           // One entry per background task, keyed by task_id: render the 'start' as
           // ⏳ running, and once the matching 'end' has arrived (events is rebuilt on
@@ -176,21 +259,26 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
           const desc = (event.data.description as string) || 'background task';
           if (ended) {
             const status = ended.data.status as string;
-            logLines.push({
-              node: <Text dimColor>{status === 'completed' ? '✅' : '❌'} [{event.agentName}] background task {status} — {desc}</Text>,
-            });
+            const node = <Text color={AGENT_GRAY}>{status === 'completed' ? '✅' : '❌'} [{event.agentName}] background task {status} — {desc}</Text>;
+            logLines.push({ node });
           } else {
-            logLines.push({
-              node: <Text color="yellow">⏳ [{event.agentName}] background task running — {desc}</Text>,
-            });
+            const node = <Text color="yellow">⏳ [{event.agentName}] background task running — {desc}</Text>;
+            logLines.push({ node });
           }
           break;
         }
         case 'approval:requested': {
           const resolved = isApprovalResolved(event, events);
-          if (resolved) {
+          // An approval is only actionable while it's the last thing awaiting
+          // you. If any later message or approval exists, the conversation moved
+          // on (e.g. you answered in chat rather than via y/n), so it's no
+          // longer active — render it settled and not focusable/auto-focusable.
+          const supersededByLater = events.slice(idx + 1).some(
+            (e) => e.type === 'message' || e.type === 'approval:requested',
+          );
+          if (resolved || supersededByLater) {
             logLines.push({
-              node: <Text dimColor>✅ {event.data.text as string} (resolved)</Text>,
+              node: <Text color={AGENT_GRAY}>[system] {event.data.text as string}{resolved ? ' (resolved)' : ''}</Text>,
             });
           } else {
             logLines.push({
@@ -232,21 +320,37 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
           break;
       }
     });
-  } else {
-    fallbackLines.forEach((line) => {
-      logLines.push({ node: <Text>{line}</Text> });
-    });
+  } else if (fallbackLines.length > 0) {
+    logLines.push({ node: <Text>{renderMarkdown(fallbackLines.join('\n'), mdWidth)}</Text> });
   }
 
-  // Collect line indices of pending approvals
-  const pendingApprovalLines = logLines
-    .map((l, i) => l.approval ? i : -1)
+  // Focusable rows: foldable rows and pending approvals (in display order).
+  const focusableLines = logLines
+    .map((l, i) => (l.fold || l.approval ? i : -1))
     .filter((i) => i >= 0);
 
-  // The approval at the focused line (if any)
-  const focusedApproval = focusedApprovalLine !== null
-    ? logLines[focusedApprovalLine]?.approval ?? null
+  const focusedApproval = focusedLine !== null
+    ? logLines[focusedLine]?.approval ?? null
     : null;
+  const focusedFold = focusedLine !== null
+    ? logLines[focusedLine]?.fold ?? null
+    : null;
+
+  // Newest pending approval (a blocking prompt that needs y/n), for auto-focus.
+  const pendingApprovalLines = focusableLines.filter((i) => logLines[i].approval);
+  const newestApprovalLine = pendingApprovalLines.length ? pendingApprovalLines[pendingApprovalLines.length - 1] : null;
+  const newestApprovalEventIndex = newestApprovalLine !== null ? logLines[newestApprovalLine].approval!.eventIndex : null;
+
+  // Auto-focus a pending approval the moment it appears (keyed by its event
+  // index, so this fires once per approval — it won't re-grab focus if the user
+  // Tabs away). Approvals block the task, so surfacing them for y/n takes
+  // priority over the input; auto-scroll (below) brings the row into view.
+  useEffect(() => {
+    if (newestApprovalLine === null) return;
+    setInputActive(false);
+    setFocusedLine(newestApprovalLine);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [newestApprovalEventIndex]);
 
   // Initial load: fetch metadata + events
   const loadInitial = useCallback(async () => {
@@ -335,6 +439,27 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
     }
   }, [liveEvents]);
 
+  // Keep the focused row in view: when focus moves (Tab/Shift+Tab) or a focused
+  // fold expands/collapses, scroll minimally so the row is fully visible. Runs
+  // after paint (setTimeout 0) so the ScrollView has re-measured item heights.
+  useEffect(() => {
+    if (focusedLine === null) return;
+    const t = setTimeout(() => {
+      const ref = scrollRef.current;
+      if (!ref) return;
+      const pos = ref.getItemPosition(focusedLine);
+      if (!pos) return;
+      const offset = ref.getScrollOffset();
+      const vh = ref.getViewportHeight();
+      if (pos.top < offset) {
+        ref.scrollTo(pos.top);
+      } else if (pos.top + pos.height > offset + vh) {
+        ref.scrollTo(pos.top + pos.height - vh);
+      }
+    }, 0);
+    return () => clearTimeout(t);
+  }, [focusedLine, expandedFolds]);
+
   // Handle reconnect — fetch missed events
   useEffect(() => {
     if (onConnect !== undefined && onConnect !== prevOnConnect.current) {
@@ -362,40 +487,67 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
         onBack();
       }, 50);
       return;
-    } else if (key.tab) {
-      // Tab cycles through: input → pending approvals → input
+    } else if (key.tab && key.shift) {
+      // Shift+Tab: the reverse of Tab — move focus downward (top→bottom).
+      // Checked before plain Tab since Shift+Tab also sets key.tab.
       if (inputActive) {
-        if (pendingApprovalLines.length > 0) {
+        if (focusableLines.length > 0) {
           setInputActive(false);
-          setFocusedApprovalLine(pendingApprovalLines[0]);
-        } else {
-          setInputActive(false);
-          setFocusedApprovalLine(null);
+          setFocusedLine(focusableLines[0]);
         }
-      } else if (focusedApprovalLine !== null) {
-        const currentIdx = pendingApprovalLines.indexOf(focusedApprovalLine);
-        const nextIdx = currentIdx + 1;
-        if (nextIdx < pendingApprovalLines.length) {
-          setFocusedApprovalLine(pendingApprovalLines[nextIdx]);
+      } else if (focusedLine !== null) {
+        const cur = focusableLines.indexOf(focusedLine);
+        if (cur >= 0 && cur < focusableLines.length - 1) {
+          setFocusedLine(focusableLines[cur + 1]);
         } else {
           setInputActive(true);
-          setFocusedApprovalLine(null);
+          setFocusedLine(null);
         }
       } else {
         setInputActive(true);
-        setFocusedApprovalLine(null);
+        setFocusedLine(null);
+      }
+    } else if (key.tab) {
+      // Tab cycles bottom→top: input → last focusable row → … → first → input.
+      // Starting from the bottom matches what the user sees first (newest
+      // entries are at the bottom of the log).
+      if (inputActive) {
+        // Nothing to browse → stay in the input rather than stranding focus.
+        if (focusableLines.length > 0) {
+          setInputActive(false);
+          setFocusedLine(focusableLines[focusableLines.length - 1]);
+        }
+      } else if (focusedLine !== null) {
+        const cur = focusableLines.indexOf(focusedLine);
+        if (cur > 0) {
+          setFocusedLine(focusableLines[cur - 1]);
+        } else {
+          setInputActive(true);
+          setFocusedLine(null);
+        }
+      } else {
+        setInputActive(true);
+        setFocusedLine(null);
       }
     } else if (!inputActive) {
-      // Scroll mode / approval handling
       if (input === 'q' || input === 'Q') exit();
       if (focusedApproval && (input === 'y' || input === 'Y')) {
         sendApproval(taskId, focusedApproval.approvalType, true, mergeIdentity(focusedApproval), focusedApproval.ref).catch((err: any) => setError(err.message));
-        setFocusedApprovalLine(null);
+        setFocusedLine(null);
         setInputActive(true);
       } else if (focusedApproval && (input === 'n' || input === 'N')) {
         sendApproval(taskId, focusedApproval.approvalType, false, mergeIdentity(focusedApproval), focusedApproval.ref).catch((err: any) => setError(err.message));
-        setFocusedApprovalLine(null);
+        setFocusedLine(null);
         setInputActive(true);
+      } else if (focusedFold && (key.return || key.rightArrow || key.leftArrow)) {
+        const id = focusedFold.id;
+        setExpandedFolds((prev) => {
+          const next = new Set(prev);
+          if (key.rightArrow) next.add(id);
+          else if (key.leftArrow) next.delete(id);
+          else next.has(id) ? next.delete(id) : next.add(id); // Enter toggles
+          return next;
+        });
       }
     }
 
@@ -410,14 +562,14 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
     // Scroll with arrows (always available) — clear focused approval when scrolling
     const scrollStep = key.meta ? 10 : 1;
     if (key.upArrow) {
-      setFocusedApprovalLine(null);
+      setFocusedLine(null);
       const refUp = scrollRef.current;
       if (refUp) {
         const current = refUp.getScrollOffset();
         refUp.scrollTo(Math.max(0, current - scrollStep));
       }
     } else if (key.downArrow) {
-      setFocusedApprovalLine(null);
+      setFocusedLine(null);
       const refDown = scrollRef.current;
       if (refDown) {
         const current = refDown.getScrollOffset();
@@ -503,9 +655,20 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
           }}
         >
           {logLines.map((line, i) => {
-            const isFocused = i === focusedApprovalLine;
+            const isFocused = i === focusedLine;
+            const node = line.fold
+              ? (expandedFolds.has(line.fold.id) ? line.fold.full : line.fold.summary)
+              : line.node;
             return (
-              <Text key={i} wrap="wrap" inverse={isFocused}>{line.node}</Text>
+              // Focus is shown by a leading cursor (❯), NOT by inverting the
+              // whole row — inverse fought the markdown ANSI colors and made an
+              // expanded message hard to read.
+              <Box key={i} marginBottom={1}>
+                {/* Fixed 2-col gutter (flexShrink:0 so a wrapping body can't
+                    collapse the cursor's trailing space); body grows + wraps. */}
+                <Box flexShrink={0}><Text color="cyan" bold>{isFocused ? '❯ ' : '  '}</Text></Box>
+                <Box flexGrow={1}><Text wrap="wrap">{node}</Text></Box>
+              </Box>
             );
           })}
         </ScrollView>
@@ -527,7 +690,7 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
         <MessageInput
           onSubmit={handleSendMessage}
           active={inputActive}
-          placeholder={inputActive ? 'Type message to PM...' : 'Press Tab to type...'}
+          placeholder={inputActive ? 'Type message to PM...' : 'Browsing messages — Tab to cycle, Tab past the top to type'}
         />
       </Box>
     </Box>
