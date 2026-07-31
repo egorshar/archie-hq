@@ -39,7 +39,7 @@ import {
   getAgentClonePath,
   appendUsageRecord,
 } from '../tasks/persistence.js';
-import { WORKDIR, getBaseCachePath, getPluginsHeadInfo } from '../system/workdir.js';
+import { WORKDIR, PLUGINS_DIR, getBaseCachePath, getPluginsHeadInfo } from '../system/workdir.js';
 import {
   createRecoverableInputGenerator,
 } from './message-queue.js';
@@ -243,7 +243,17 @@ export async function spawnAgent(agent: Agent, task: Task): Promise<void> {
   const tools = def.tools;
 
   const pluginPaths = def.pluginPath ? [def.pluginPath] : [];
-  const pluginReadPaths = [...pluginPaths, ...(def.pluginDataPath ? [def.pluginDataPath] : [])];
+  // plugins/vendor holds skill content shared across plugins (third-party skill
+  // packs vendored as submodules, symlinked from per-plugin skills/ dirs).
+  // Symlinked SKILL.md metadata loads in-process, but a skill's bundled scripts
+  // run via Bash under the OS sandbox, which resolves the symlink into this dir
+  // — without the carve-out those scripts die on a read denial.
+  const pluginVendorDir = join(PLUGINS_DIR, 'vendor');
+  const pluginReadPaths = [
+    ...pluginPaths,
+    ...(def.pluginPath && existsSync(pluginVendorDir) ? [pluginVendorDir] : []),
+    ...(def.pluginDataPath ? [def.pluginDataPath] : []),
+  ];
   const claudeReadDirs = useClaudeDirs ? [claudeConfigDir, claudeTmpDir] : [];
   const claudeWriteDirs = useClaudeDirs ? [claudeTmpDir] : [];
   const protectedWorkspaceFiles = [
