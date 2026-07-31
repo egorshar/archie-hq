@@ -39,6 +39,6 @@ describe('backends resolver — gitlab', () => {
 
   it('reports the resolved matrix for gitlab', () => {
     process.env.REPO_HOST = 'gitlab';
-    expect(getBackendMatrix()).toEqual({ repoHost: 'gitlab' });
+    expect(getBackendMatrix()).toEqual({ runtime: expect.any(String), repoHost: 'gitlab' });
   });
 });
