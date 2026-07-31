@@ -63,3 +63,6 @@ e2e-evidence/
 archie-data-*
 *.partial.*
 secrets/extra-ca.crt
+
+# CLI-managed dev server log (npm run cli)
+.archie-dev.log
