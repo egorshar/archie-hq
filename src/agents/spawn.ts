@@ -179,6 +179,31 @@ async function extractTaskUsernames(taskId: string): Promise<import('../memory/t
 // ---- Runtime-neutral launch context ----
 
 /**
+ * State-mutating repo-tools that must stay behind the read-only/edit-mode gate.
+ * These act on a real repo/CI system (push, PR mutation, branch creation, CI
+ * dispatch) and are only added to `disallowedTools` when `editAllowed` is false.
+ * Every write-capable repo-tools tool must be listed here — see the
+ * tool-contract test guarding this invariant.
+ */
+export const REPO_TOOLS_REQUIRING_EDIT_MODE = [
+  'mcp__repo-tools__push_branch',
+  'mcp__repo-tools__create_pull_request',
+  'mcp__repo-tools__update_pr',
+  'mcp__repo-tools__add_pr_comment',
+  'mcp__repo-tools__add_review_comment',
+  'mcp__repo-tools__reply_to_review_comment',
+  'mcp__repo-tools__resolve_review_thread',
+  'mcp__repo-tools__request_re_review',
+  'mcp__repo-tools__merge_pull_request',
+  'mcp__repo-tools__close_pull_request',
+  'mcp__repo-tools__create_branch',
+  // CI dispatch — triggers a real pipeline/feature-stand deploy, so it's a
+  // write action even though it doesn't touch git state directly.
+  'mcp__repo-tools__dispatch_workflow',
+  'mcp__repo-tools__run_manual_job',
+];
+
+/**
  * A single attached repository as mounted for a repo agent's spawn: its clone
  * location, the read-only base-repo objects path (for the alternates-based
  * sandbox allowlist), and the branch it's currently checked out to.
@@ -602,21 +627,7 @@ export async function spawnAgent(agent: Agent, task: Task): Promise<void> {
     mcpServers['repo-tools'] = createRepoToolsMcpServer(agent, task);
     disallowedTools = [
       ...disallowedTools,
-      ...(ctx.repo.editAllowed
-        ? []
-        : [
-            'mcp__repo-tools__push_branch',
-            'mcp__repo-tools__create_pull_request',
-            'mcp__repo-tools__update_pr',
-            'mcp__repo-tools__add_pr_comment',
-            'mcp__repo-tools__add_review_comment',
-            'mcp__repo-tools__reply_to_review_comment',
-            'mcp__repo-tools__resolve_review_thread',
-            'mcp__repo-tools__request_re_review',
-            'mcp__repo-tools__merge_pull_request',
-            'mcp__repo-tools__close_pull_request',
-            'mcp__repo-tools__create_branch',
-          ]),
+      ...(ctx.repo.editAllowed ? [] : REPO_TOOLS_REQUIRING_EDIT_MODE),
     ];
   }
 

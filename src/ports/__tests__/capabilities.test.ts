@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { CLAUDE_RUNTIME_CAPABILITIES, OPENCODE_RUNTIME_CAPABILITIES } from '../capabilities.js';
+import {
+  CLAUDE_RUNTIME_CAPABILITIES,
+  OPENCODE_RUNTIME_CAPABILITIES,
+  GITHUB_CAPABILITIES,
+  GITLAB_CAPABILITIES_DEFAULT,
+} from '../capabilities.js';
 
 describe('runtime capability descriptors', () => {
   it('claude runtime advertises all five capabilities', () => {
@@ -21,5 +26,31 @@ describe('runtime capability descriptors', () => {
     // the agent busy/idle accounting yet.
     expect(OPENCODE_RUNTIME_CAPABILITIES.effort).toBe(false);
     expect(OPENCODE_RUNTIME_CAPABILITIES.backgroundTasks).toBe(false);
+  });
+});
+
+describe('repo-host capability descriptors', () => {
+  it('github advertises reviews, security alerts, re-review; no native auto-merge', () => {
+    expect(GITHUB_CAPABILITIES.reviewStates).toBe(true);
+    expect(GITHUB_CAPABILITIES.securityAlerts).toBe(true);
+    expect(GITHUB_CAPABILITIES.reReviewRequest).toBe(true);
+    expect(GITHUB_CAPABILITIES.nativeAutoMerge).toBe(false);
+    expect(GITHUB_CAPABILITIES.workflowDispatch).toBe(false);
+    expect(GITHUB_CAPABILITIES.manualJobs).toBe(false);
+  });
+
+  it('gitlab defaults advertise workflowDispatch', () => {
+    expect(GITLAB_CAPABILITIES_DEFAULT.workflowDispatch).toBe(true);
+  });
+
+  it('gitlab defaults advertise manualJobs', () => {
+    expect(GITLAB_CAPABILITIES_DEFAULT.manualJobs).toBe(true);
+  });
+
+  it('gitlab advertises review states (synthesized) + native auto-merge; no security alerts / re-review', () => {
+    expect(GITLAB_CAPABILITIES_DEFAULT.reviewStates).toBe(true);
+    expect(GITLAB_CAPABILITIES_DEFAULT.securityAlerts).toBe(false);
+    expect(GITLAB_CAPABILITIES_DEFAULT.reReviewRequest).toBe(false);
+    expect(GITLAB_CAPABILITIES_DEFAULT.nativeAutoMerge).toBe(true);
   });
 });

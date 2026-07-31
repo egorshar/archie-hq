@@ -17,7 +17,9 @@ import type { AgentName, FindingType, AttachedRepo, SlackThreadMessage } from '.
 import type { Task } from '../tasks/task.js';
 import type { Agent } from './agent.js';
 import { getVisiblePeerIdsForSender, findAgentDefsContainingRepo, synthesizeDynamicAgentDef, isAutoMergeRepo } from './registry.js';
-import { getGitHubClient, parseCheckRef } from '../connectors/github/client.js';
+import { getRepoHost } from '../system/backends.js';
+import { parseCheckRef } from '../connectors/github/client.js';
+import { parseGitLabCheckRef } from '../connectors/gitlab/status-map.js';
 import { gitExec } from '../connectors/github/repo-clone.js';
 import { hydrateBranchState, findBranchStateByPR, assignPrNumber } from '../connectors/github/branch-state.js';
 import { taskBranchName } from '../connectors/github/branch-naming.js';
@@ -1193,7 +1195,7 @@ async function createPullRequestHandler(agent: Agent, task: Task, args: z.infer<
   const resolved = requireAttached(agent, task, args.github);
   if (!resolved.ok) return err(resolved.error);
 
-  const client = getGitHubClient();
+  const client = getRepoHost();
   if (!client) throw new Error('GitHub client not configured');
 
   const { github, attached } = resolved;
@@ -1221,7 +1223,7 @@ const getPRStatusArgsSchema = { pr_number: z.number().describe('The PR number'),
 async function getPRStatusHandler(agent: Agent, task: Task, args: z.infer<z.ZodObject<typeof getPRStatusArgsSchema>>): Promise<ToolResult> {
   const resolved = resolveGithub(agent, args.github);
   if (!resolved.ok) return err(resolved.error);
-  const client = getGitHubClient();
+  const client = getRepoHost();
   if (!client) throw new Error('GitHub client not configured');
   const status = await client.getPRStatus(resolved.github, args.pr_number);
   return {
@@ -1237,7 +1239,7 @@ const getPRChecksArgsSchema = { pr_number: z.number().describe('The PR number'),
 async function getPRChecksHandler(agent: Agent, task: Task, args: z.infer<z.ZodObject<typeof getPRChecksArgsSchema>>): Promise<ToolResult> {
   const resolved = resolveGithub(agent, args.github);
   if (!resolved.ok) return err(resolved.error);
-  const client = getGitHubClient();
+  const client = getRepoHost();
   if (!client) throw new Error('GitHub client not configured');
   const report = await client.listPRChecks(resolved.github, args.pr_number);
   if (report.entries.length === 0) {
@@ -1284,14 +1286,20 @@ async function getCheckRunHandler(agent: Agent, task: Task, args: z.infer<z.ZodO
   const resolved = resolveGithub(agent, args.github);
   if (!resolved.ok) return err(resolved.error);
   const githubRepo = resolved.github;
-  const client = getGitHubClient();
+  const client = getRepoHost();
   if (!client) throw new Error('GitHub client not configured');
 
   let parsed: { kind: 'check_run' | 'workflow_run'; id: number; owner?: string; repo?: string };
-  try {
-    parsed = parseCheckRef(args.ref);
-  } catch (e) {
-    return err(e instanceof Error ? e.message : String(e));
+  if (client.kind === 'gitlab') {
+    const gl = parseGitLabCheckRef(args.ref);
+    if (!gl) return err(`Could not parse a GitLab job/pipeline reference from "${args.ref}".`);
+    parsed = { kind: gl.kind === 'pipeline' ? 'workflow_run' : 'check_run', id: gl.id };
+  } else {
+    try {
+      parsed = parseCheckRef(args.ref);
+    } catch (e) {
+      return err(e instanceof Error ? e.message : String(e));
+    }
   }
 
   // Stay within this agent's repo: a URL pointing elsewhere is out of scope.
@@ -1394,8 +1402,11 @@ const listCodeScanningAlertsArgsSchema = {
 async function listCodeScanningAlertsHandler(agent: Agent, task: Task, args: z.infer<z.ZodObject<typeof listCodeScanningAlertsArgsSchema>>): Promise<ToolResult> {
   const resolved = resolveGithub(agent, args.github);
   if (!resolved.ok) return err(resolved.error);
-  const client = getGitHubClient();
+  const client = getRepoHost();
   if (!client) throw new Error('GitHub client not configured');
+  if (!client.capabilities().securityAlerts) {
+    return err(`Code scanning alerts are not available on this repo host (${client.kind}).`);
+  }
 
   let alerts;
   try {
@@ -1439,8 +1450,11 @@ const getCodeScanningAlertArgsSchema = {
 async function getCodeScanningAlertHandler(agent: Agent, task: Task, args: z.infer<z.ZodObject<typeof getCodeScanningAlertArgsSchema>>): Promise<ToolResult> {
   const resolved = resolveGithub(agent, args.github);
   if (!resolved.ok) return err(resolved.error);
-  const client = getGitHubClient();
+  const client = getRepoHost();
   if (!client) throw new Error('GitHub client not configured');
+  if (!client.capabilities().securityAlerts) {
+    return err(`Code scanning alerts are not available on this repo host (${client.kind}).`);
+  }
 
   let alert;
   try {
@@ -1479,12 +1493,117 @@ async function getCodeScanningAlertHandler(agent: Agent, task: Task, args: z.inf
   return ok(lines.join('\n'));
 }
 
+/**
+ * Normalize `dispatch_workflow` inputs to a flat string→string map.
+ *
+ * A caller can deliver `inputs` as a JSON STRING rather than an object — e.g. a
+ * tool transport that types the `z.record` loosely (as a free-form `any`), where
+ * the model then fills it with a *stringified* object. Feeding that straight to
+ * `Object.entries` yields per-character garbage variables, so the pipeline's
+ * US_BOT / REVIEW_*_BRANCH variables silently vanish and GitLab rejects it with
+ * `400 workflow:rules` (the FPP-516 failure). Accept either an object or a
+ * JSON-string object; coerce values to strings. Returns undefined when there is
+ * nothing to send.
+ */
+export function normalizeWorkflowInputs(raw: unknown): Record<string, string> | undefined {
+  if (raw == null) return undefined;
+  let obj: unknown = raw;
+  if (typeof raw === 'string') {
+    const s = raw.trim();
+    if (s === '') return undefined;
+    try {
+      obj = JSON.parse(s);
+    } catch {
+      throw new Error('`inputs` must be a JSON object of string key→value pairs (received an unparseable string).');
+    }
+  }
+  if (typeof obj !== 'object' || obj === null || Array.isArray(obj)) {
+    throw new Error('`inputs` must be a flat object of string key→value pairs.');
+  }
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
+    if (v != null) out[k] = String(v);
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+const dispatchWorkflowArgsSchema = {
+  // Deliberately NOT resolveGithub(agent, args.github): this tool dispatches on an arbitrary
+  // target repo (e.g. a central CI/infra repo) that the calling agent is not bound to, so the
+  // caller must pass the target repo directly rather than resolving against its own bound repos.
+  repo: z.string().describe('Repo "group/project" (GitLab) or "owner/name" (GitHub) to run the workflow in.'),
+  ref: z.string().describe('Branch/ref to run the workflow on, e.g. "ci-bot/us-trigger".'),
+  inputs: z.record(z.string(), z.string()).optional().describe('Flat key→value params (GitLab pipeline variables / GitHub workflow inputs).'),
+  workflow: z.string().optional().describe('GitHub only: the workflow file/id to dispatch. Ignored by GitLab.'),
+};
+
+const dispatchWorkflowDescription =
+  'Trigger a CI workflow run on a ref (GitHub workflow_dispatch; GitLab pipeline). ' +
+  'Use for actions like deploying a feature stand via a central pipeline. Pass the repo, the ref/branch to run, ' +
+  'and inputs as a flat string map (they map to GitLab pipeline variables / GitHub workflow inputs). ' +
+  'Returns the run/pipeline id and URL to watch.';
+
+async function dispatchWorkflowHandler(_agent: Agent, _task: Task, args: z.infer<z.ZodObject<typeof dispatchWorkflowArgsSchema>>): Promise<ToolResult> {
+  const client = getRepoHost();
+  if (!client) throw new Error('Repo host not configured');
+  if (!client.capabilities().workflowDispatch) {
+    return err(`Workflow dispatch is not available on this repo host (${client.kind}).`);
+  }
+  let inputs: Record<string, string> | undefined;
+  try {
+    inputs = normalizeWorkflowInputs(args.inputs);
+  } catch (e) {
+    return err(e instanceof Error ? e.message : String(e));
+  }
+  let res;
+  try {
+    res = await client.dispatchWorkflow(args.repo, args.ref, {
+      ...(inputs ? { inputs } : {}),
+      ...(args.workflow ? { workflow: args.workflow } : {}),
+    });
+  } catch (e) {
+    return err(e instanceof Error ? e.message : String(e));
+  }
+  return ok(`Dispatched workflow on ${args.repo}@${args.ref}` + (res.url ? ` — ${res.url}` : res.id != null ? ` (id ${res.id})` : ''));
+}
+
+const runManualJobArgsSchema = {
+  // Free target repo (not resolveGithub): the caller plays a job on an arbitrary repo's MR,
+  // not necessarily its own bound repo — same rationale as dispatch_workflow.
+  repo: z.string().describe('Repo "group/project" (GitLab) or "owner/name" (GitHub) whose MR pipeline holds the job.'),
+  pr_number: z.number().describe('The merge/pull request number whose pipeline holds the manual job.'),
+  job_name: z.string().describe('Exact name of the manual job to play, e.g. "Ready to prod".'),
+};
+
+const runManualJobDescription =
+  'Play a manual (gated) CI job by name in a merge/pull request\'s pipeline — e.g. a "Ready to prod" release-deploy job. ' +
+  'Pass the repo, the MR/PR number, and the exact job name. Runs in-process (no token in the agent). ' +
+  'Returns the played job\'s id, url, and status.';
+
+async function runManualJobHandler(_agent: Agent, _task: Task, args: z.infer<z.ZodObject<typeof runManualJobArgsSchema>>): Promise<ToolResult> {
+  const client = getRepoHost();
+  if (!client) throw new Error('Repo host not configured');
+  if (!client.capabilities().manualJobs) {
+    return err(`Running manual jobs is not available on this repo host (${client.kind}).`);
+  }
+  let res;
+  try {
+    res = await client.runManualJob(args.repo, args.pr_number, args.job_name);
+  } catch (e) {
+    return err(e instanceof Error ? e.message : String(e));
+  }
+  return ok(
+    `Played "${args.job_name}" on ${args.repo} !${args.pr_number}` +
+    (res.url ? ` — ${res.url}` : '') + (res.status ? ` (${res.status})` : ''),
+  );
+}
+
 const getPRReviewsArgsSchema = { pr_number: z.number().describe('The PR number'), github: githubArgSchema };
 
 async function getPRReviewsHandler(agent: Agent, task: Task, args: z.infer<z.ZodObject<typeof getPRReviewsArgsSchema>>): Promise<ToolResult> {
   const resolved = resolveGithub(agent, args.github);
   if (!resolved.ok) return err(resolved.error);
-  const client = getGitHubClient();
+  const client = getRepoHost();
   if (!client) throw new Error('GitHub client not configured');
   const reviews = await client.getPRReviews(resolved.github, args.pr_number);
   if (reviews.length === 0) {
@@ -1501,7 +1620,7 @@ const getPRCommentsArgsSchema = { pr_number: z.number().describe('The PR number'
 async function getPRCommentsHandler(agent: Agent, task: Task, args: z.infer<z.ZodObject<typeof getPRCommentsArgsSchema>>): Promise<ToolResult> {
   const resolved = resolveGithub(agent, args.github);
   if (!resolved.ok) return err(resolved.error);
-  const client = getGitHubClient();
+  const client = getRepoHost();
   if (!client) throw new Error('GitHub client not configured');
   const comments = await client.getPRComments(resolved.github, args.pr_number);
   if (comments.length === 0) {
@@ -1518,7 +1637,7 @@ const getReviewThreadsArgsSchema = { pr_number: z.number().describe('The PR numb
 async function getReviewThreadsHandler(agent: Agent, task: Task, args: z.infer<z.ZodObject<typeof getReviewThreadsArgsSchema>>): Promise<ToolResult> {
   const resolved = resolveGithub(agent, args.github);
   if (!resolved.ok) return err(resolved.error);
-  const client = getGitHubClient();
+  const client = getRepoHost();
   if (!client) throw new Error('GitHub client not configured');
   const threads = await client.getReviewThreads(resolved.github, args.pr_number);
   if (threads.length === 0) {
@@ -1550,7 +1669,7 @@ const listPRsArgsSchema = {
 async function listPRsHandler(agent: Agent, task: Task, args: z.infer<z.ZodObject<typeof listPRsArgsSchema>>): Promise<ToolResult> {
   const resolved = resolveGithub(agent, args.github);
   if (!resolved.ok) return err(resolved.error);
-  const client = getGitHubClient();
+  const client = getRepoHost();
   if (!client) throw new Error('GitHub client not configured');
   const prs = await client.listPRs(resolved.github, {
     state: args.state,
@@ -1572,7 +1691,7 @@ const getPRArgsSchema = { pr_number: z.number().describe('The PR number'), githu
 async function getPRHandler(agent: Agent, task: Task, args: z.infer<z.ZodObject<typeof getPRArgsSchema>>): Promise<ToolResult> {
   const resolved = resolveGithub(agent, args.github);
   if (!resolved.ok) return err(resolved.error);
-  const client = getGitHubClient();
+  const client = getRepoHost();
   if (!client) throw new Error('GitHub client not configured');
   const pr = await client.getPRDetails(resolved.github, args.pr_number);
   const text = [
@@ -1600,7 +1719,7 @@ const updatePRArgsSchema = {
 async function updatePRHandler(agent: Agent, task: Task, args: z.infer<z.ZodObject<typeof updatePRArgsSchema>>): Promise<ToolResult> {
   const resolved = resolveGithub(agent, args.github);
   if (!resolved.ok) return err(resolved.error);
-  const client = getGitHubClient();
+  const client = getRepoHost();
   if (!client) throw new Error('GitHub client not configured');
   await client.updatePR(resolved.github, args.pr_number, {
     title: args.title,
@@ -1619,7 +1738,7 @@ const addPRCommentArgsSchema = {
 async function addPRCommentHandler(agent: Agent, task: Task, args: z.infer<z.ZodObject<typeof addPRCommentArgsSchema>>): Promise<ToolResult> {
   const resolved = resolveGithub(agent, args.github);
   if (!resolved.ok) return err(resolved.error);
-  const client = getGitHubClient();
+  const client = getRepoHost();
   if (!client) throw new Error('GitHub client not configured');
   await client.addPRComment(resolved.github, args.pr_number, args.comment);
   return ok(`Added comment to PR #${args.pr_number} (${resolved.github})`);
@@ -1636,7 +1755,7 @@ const addReviewCommentArgsSchema = {
 async function addReviewCommentHandler(agent: Agent, task: Task, args: z.infer<z.ZodObject<typeof addReviewCommentArgsSchema>>): Promise<ToolResult> {
   const resolved = resolveGithub(agent, args.github);
   if (!resolved.ok) return err(resolved.error);
-  const client = getGitHubClient();
+  const client = getRepoHost();
   if (!client) throw new Error('GitHub client not configured');
   await client.addReviewComment(resolved.github, args.pr_number, args.path, args.line, args.comment);
   return ok(`Added review comment to ${args.path}:${args.line} on PR #${args.pr_number} (${resolved.github})`);
@@ -1652,7 +1771,7 @@ const replyToReviewCommentArgsSchema = {
 async function replyToReviewCommentHandler(agent: Agent, task: Task, args: z.infer<z.ZodObject<typeof replyToReviewCommentArgsSchema>>): Promise<ToolResult> {
   const resolved = resolveGithub(agent, args.github);
   if (!resolved.ok) return err(resolved.error);
-  const client = getGitHubClient();
+  const client = getRepoHost();
   if (!client) throw new Error('GitHub client not configured');
   await client.replyToReviewComment(resolved.github, args.pr_number, args.comment_id, args.comment);
   return ok(`Replied to review comment ${args.comment_id} on PR #${args.pr_number} (${resolved.github})`);
@@ -1667,7 +1786,7 @@ const resolveReviewThreadArgsSchema = {
 async function resolveReviewThreadHandler(agent: Agent, task: Task, args: z.infer<z.ZodObject<typeof resolveReviewThreadArgsSchema>>): Promise<ToolResult> {
   const resolved = resolveGithub(agent, args.github);
   if (!resolved.ok) return err(resolved.error);
-  const client = getGitHubClient();
+  const client = getRepoHost();
   if (!client) throw new Error('GitHub client not configured');
   await client.resolveReviewThread(resolved.github, args.pr_number, args.thread_id);
   return ok(`Resolved review thread ${args.thread_id} on PR #${args.pr_number} (${resolved.github})`);
@@ -1678,7 +1797,7 @@ const requestReReviewArgsSchema = { pr_number: z.number().describe('The PR numbe
 async function requestReReviewHandler(agent: Agent, task: Task, args: z.infer<z.ZodObject<typeof requestReReviewArgsSchema>>): Promise<ToolResult> {
   const resolved = resolveGithub(agent, args.github);
   if (!resolved.ok) return err(resolved.error);
-  const client = getGitHubClient();
+  const client = getRepoHost();
   if (!client) throw new Error('GitHub client not configured');
   await client.requestReReview(resolved.github, args.pr_number);
   return ok(`Requested re-review for PR #${args.pr_number} (${resolved.github})`);
@@ -1690,7 +1809,7 @@ const mergePRArgsSchema = { pr_number: z.number().describe('The PR number'), git
 async function mergePRHandler(agent: Agent, task: Task, args: z.infer<z.ZodObject<typeof mergePRArgsSchema>>): Promise<ToolResult> {
   const resolved = resolveGithub(agent, args.github);
   if (!resolved.ok) return err(resolved.error);
-  const client = getGitHubClient();
+  const client = getRepoHost();
   if (!client) throw new Error('GitHub client not configured');
 
   if (isAutoMergeRepo(resolved.github)) {
@@ -1798,7 +1917,7 @@ const closePRArgsSchema = { pr_number: z.number().describe('The PR number'), git
 async function closePRHandler(agent: Agent, task: Task, args: z.infer<z.ZodObject<typeof closePRArgsSchema>>): Promise<ToolResult> {
   const resolved = resolveGithub(agent, args.github);
   if (!resolved.ok) return err(resolved.error);
-  const client = getGitHubClient();
+  const client = getRepoHost();
   if (!client) throw new Error('GitHub client not configured');
   await client.closePullRequest(resolved.github, args.pr_number);
   return ok(`Closed PR #${args.pr_number} (${resolved.github})`);
@@ -2476,7 +2595,7 @@ export function createCommsHandlers(agent: Agent, task: Task): Record<string, (a
 const listAvailableReposArgsSchema = {};
 
 async function listAvailableReposHandler(_agent: Agent, task: Task, _args: z.infer<z.ZodObject<typeof listAvailableReposArgsSchema>>): Promise<ToolResult> {
-  const client = getGitHubClient();
+  const client = getRepoHost();
   if (!client) return err('GitHub client not configured');
 
   // Cache on the Task instance to avoid re-listing within a task.
@@ -2548,7 +2667,7 @@ async function spawnRepoAgentHandler(agent: Agent, task: Task, args: z.infer<z.Z
   }
 
   // Validate every requested repo is reachable; fill in default branches.
-  const client = getGitHubClient();
+  const client = getRepoHost();
   if (!client) return err('GitHub client not configured');
   const resolvedRepos: Array<{ github: string; baseBranch: string }> = [];
   for (const r of args.repos) {
@@ -2827,6 +2946,9 @@ export const REPO_TOOL_SPECS: readonly RepoToolSpec[] = [
     schema: getCodeScanningAlertArgsSchema,
     handler: getCodeScanningAlertHandler,
   },
+  // CI dispatch
+  { name: 'dispatch_workflow', description: dispatchWorkflowDescription, schema: dispatchWorkflowArgsSchema, handler: dispatchWorkflowHandler },
+  { name: 'run_manual_job', description: runManualJobDescription, schema: runManualJobArgsSchema, handler: runManualJobHandler },
   // PR write
   {
     name: 'push_branch',

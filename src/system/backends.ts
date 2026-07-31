@@ -1,31 +1,43 @@
 /**
- * Backend resolver (agent-runtime seam). Resolves AGENT_RUNTIME env into a
- * concrete AgentRuntime + LlmOneShot factory. Ships two runtimes — the Claude
- * Agent SDK (default) and opencode — behind a single resolver so call sites
- * never branch on the runtime. Fails fast with actionable messages at boot.
+ * Backend resolver. Resolves the pluggable-backend env selectors into concrete
+ * implementations behind stable accessors, so call sites never branch on which
+ * backend is active. Fails fast with actionable messages at boot.
+ *
+ * - AGENT_RUNTIME → AgentRuntime + LlmOneShot: `claude` (default) or `opencode`.
+ * - REPO_HOST → RepoHost: `github` (default) or `gitlab`.
  */
 
 import { existsSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
 import type { AgentRuntime } from '../ports/agent-runtime.js';
 import type { LlmOneShot } from '../ports/llm-one-shot.js';
+import type { RepoHost } from '../ports/repo-host.js';
 import { claudeSdkRuntime } from '../runtime/claude/runtime.js';
 import { claudeLlmOneShot } from '../runtime/claude/llm-one-shot.js';
 import { opencodeLlmOneShot } from '../runtime/opencode/llm-one-shot.js';
 import { opencodeRuntime } from '../runtime/opencode/runtime.js';
+import { getGitHubClient } from '../connectors/github/client.js';
+import { GitLabHost } from '../connectors/gitlab/client.js';
 import { logger } from './logger.js';
 
 export type AgentRuntimeKind = 'claude' | 'opencode';
+export type RepoHostKind = 'github' | 'gitlab';
 
 const SUPPORTED_RUNTIMES: AgentRuntimeKind[] = ['claude', 'opencode'];
+const SUPPORTED_REPO_HOSTS: RepoHostKind[] = ['github', 'gitlab'];
 
 export function resolveAgentRuntimeKind(): AgentRuntimeKind {
   const raw = (process.env.AGENT_RUNTIME ?? 'claude').trim().toLowerCase();
   return raw as AgentRuntimeKind;
 }
 
-export function getBackendMatrix(): { runtime: string } {
-  return { runtime: resolveAgentRuntimeKind() };
+export function resolveRepoHostKind(): RepoHostKind {
+  const raw = (process.env.REPO_HOST ?? 'github').trim().toLowerCase();
+  return raw as RepoHostKind;
+}
+
+export function getBackendMatrix(): { runtime: string; repoHost: string } {
+  return { runtime: resolveAgentRuntimeKind(), repoHost: resolveRepoHostKind() };
 }
 
 /** True when an `opencode` executable is resolvable on PATH. */
@@ -62,8 +74,17 @@ function assertOpencodeEnv(): void {
   }
 }
 
+const REQUIRED_GITLAB_ENV = ['GITLAB_BASE_URL', 'GITLAB_TOKEN', 'GITLAB_WEBHOOK_SECRET'] as const;
+
+function assertGitLabEnv(): void {
+  const missing = REQUIRED_GITLAB_ENV.filter((k) => !process.env[k]);
+  if (missing.length > 0) {
+    throw new Error(`REPO_HOST=gitlab requires ${missing.join(', ')} to be set.`);
+  }
+}
+
 /**
- * Validate the selected runtime is supported in this build. Throw with an
+ * Validate the selected backends are supported in this build. Throw with an
  * actionable message otherwise. Call once at boot (see index.ts).
  */
 export function assertBackendConfig(): void {
@@ -72,6 +93,11 @@ export function assertBackendConfig(): void {
     throw new Error(`AGENT_RUNTIME="${runtime}" is invalid. Supported values: ${SUPPORTED_RUNTIMES.join(', ')}.`);
   }
   if (runtime === 'opencode') assertOpencodeEnv();
+  const host = resolveRepoHostKind();
+  if (!SUPPORTED_REPO_HOSTS.includes(host)) {
+    throw new Error(`REPO_HOST="${host}" is invalid. Supported values: ${SUPPORTED_REPO_HOSTS.join(', ')}.`);
+  }
+  if (host === 'gitlab') assertGitLabEnv();
 }
 
 /**
@@ -99,4 +125,30 @@ export function getAgentRuntime(): AgentRuntime {
  */
 export function getLlmOneShot(): LlmOneShot {
   return resolveAgentRuntimeKind() === 'opencode' ? opencodeLlmOneShot : claudeLlmOneShot;
+}
+
+let gitlabSingleton: GitLabHost | null = null;
+export function getGitLabHost(): GitLabHost {
+  if (!gitlabSingleton) gitlabSingleton = new GitLabHost();
+  return gitlabSingleton;
+}
+
+/**
+ * The active RepoHost, or null when the host is unconfigured (e.g. GitHub App
+ * env absent — mirrors getGitHubClient() returning null; callers already handle
+ * a null host by disabling PR tools).
+ */
+export function getRepoHost(): RepoHost | null {
+  const host = resolveRepoHostKind();
+  switch (host) {
+    case 'github':
+      return getGitHubClient();
+    case 'gitlab':
+      return getGitLabHost();
+    default:
+      // Unsupported hosts are rejected by assertBackendConfig() at boot; return
+      // null defensively so a mis-sequenced call can't crash.
+      logger.warn('backends', `getRepoHost() called for unsupported host "${host}"`);
+      return null;
+  }
 }

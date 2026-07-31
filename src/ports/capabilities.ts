@@ -1,6 +1,7 @@
 /**
- * Capability descriptors (spec principle P3): where a runtime cannot match a
- * capability, the gap is declared here and degraded gracefully — never silent.
+ * Capability descriptors (spec principle P3): where a backend (agent runtime or
+ * repo host) cannot match a capability, the gap is declared here and degraded
+ * gracefully — never silent.
  */
 
 export interface RuntimeCapabilities {
@@ -56,4 +57,48 @@ export const OPENCODE_RUNTIME_CAPABILITIES: RuntimeCapabilities = {
   // busy/idle accounting the way the Claude SDK path does — a follow-up if
   // opencode agents start spawning subtasks.
   backgroundTasks: false,
+};
+
+export interface RepoHostCapabilities {
+  /** true: distinct approved / changes_requested review states (GitHub). false: approvals+notes only (GitLab). */
+  reviewStates: boolean;
+  /** code-scanning / security alerts available (GitHub, GitLab Ultimate). */
+  securityAlerts: boolean;
+  /** host-native "merge when pipeline succeeds" (GitLab). Archie orchestrates merges itself when false. */
+  nativeAutoMerge: boolean;
+  /** can request re-review from prior reviewers. */
+  reReviewRequest: boolean;
+  /** can dispatch a CI workflow run / trigger a pipeline (GitHub workflow_dispatch; GitLab pipeline trigger). */
+  workflowDispatch: boolean;
+  /** can play a manual/gated CI job by name in a change request's pipeline (GitLab manual jobs). */
+  manualJobs: boolean;
+}
+
+export const GITHUB_CAPABILITIES: RepoHostCapabilities = {
+  reviewStates: true,
+  securityAlerts: true,
+  nativeAutoMerge: false,
+  reReviewRequest: true,
+  workflowDispatch: false,
+  manualJobs: false,
+};
+
+/**
+ * GitLab capability defaults. reviewStates is true: GitLab has no native
+ * approved/changes_requested review objects, but Archie synthesizes those states
+ * from approvals and unresolved discussions (GitLabHost.getPRReviews), so
+ * consumers see the same distinct review states as GitHub. securityAlerts is
+ * false: there is no boot-time license probe in this PR, so
+ * code-scanning/vulnerability findings are never surfaced for GitLab.
+ * nativeAutoMerge is true (GitLab's native "merge when pipeline succeeds"),
+ * though this PR ships no webhook merge orchestration for GitLab. reReviewRequest
+ * is false: GitLab has no re-request-review primitive, so that call no-ops.
+ */
+export const GITLAB_CAPABILITIES_DEFAULT: RepoHostCapabilities = {
+  reviewStates: true,
+  securityAlerts: false,
+  nativeAutoMerge: true,
+  reReviewRequest: false,
+  workflowDispatch: true,
+  manualJobs: true,
 };

@@ -18,6 +18,7 @@ import 'dotenv/config';
 import { createRequire } from 'module';
 import http from 'node:http';
 import { readdirSync } from 'fs';
+import { cloneExists } from './connectors/github/repo-clone.js';
 const require = createRequire(import.meta.url);
 const express = require('express');
 
@@ -25,6 +26,7 @@ import type { Application, Request, Response } from 'express';
 
 import { mountSlackApp, type SlackLifecycle } from './connectors/slack/events.js';
 import { mountGitHubWebhook } from './connectors/github/events.js';
+import { mountGitLabWebhook } from './connectors/gitlab/events.js';
 import { mountApiRoutes } from './connectors/api/routes.js';
 import { mountOAuthRoutes } from './connectors/oauth/routes.js';
 import { getIsShuttingDown, setShuttingDown } from './system/shutdown.js';
@@ -43,7 +45,7 @@ import { initEventPersistence } from './tasks/persistence.js';
 import { initReminderScheduler } from './system/reminder-scheduler.js';
 import { initTriggerScheduler } from './system/trigger-scheduler.js';
 import { initMemory } from './memory/index.js';
-import { assertBackendConfig, getBackendMatrix, getAgentRuntime } from './system/backends.js';
+import { assertBackendConfig, getBackendMatrix, getAgentRuntime, resolveRepoHostKind } from './system/backends.js';
 
 /**
  * Application configuration
@@ -54,6 +56,7 @@ interface AppConfig {
   slackAppToken?: string;
   port: number;
   githubWebhookSecret?: string;
+  gitlabWebhookSecret?: string;
 }
 
 /**
@@ -65,6 +68,7 @@ function loadConfig(): AppConfig {
   const slackAppToken = process.env.SLACK_APP_TOKEN;
   const port = parseInt(process.env.PORT || '3000', 10);
   const githubWebhookSecret = process.env.GITHUB_WEBHOOK_SECRET;
+  const gitlabWebhookSecret = process.env.GITLAB_WEBHOOK_SECRET;
 
   if (!process.env.ANTHROPIC_API_KEY) {
     throw new Error('ANTHROPIC_API_KEY environment variable is required');
@@ -76,6 +80,7 @@ function loadConfig(): AppConfig {
     slackAppToken,
     port,
     githubWebhookSecret,
+    gitlabWebhookSecret,
   };
 }
 
@@ -95,7 +100,8 @@ async function main(): Promise<void> {
     const config = loadConfig();
 
     assertBackendConfig();
-    logger.system(`Backends: runtime=${getBackendMatrix().runtime}`);
+    const matrix = getBackendMatrix();
+    logger.system(`Backends: runtime=${matrix.runtime} repoHost=${matrix.repoHost}`);
 
     // Bootstrap: create workdir structure, clone/pull plugins
     await bootstrapWorkdir();
@@ -118,19 +124,27 @@ async function main(): Promise<void> {
     // be before any agent spawns so getProbeBaseUrl() is live at spawn time.
     startContextProbe();
 
-    // Clone repos declared by plugins (every entry across every repo agent,
-    // deduplicated by github identifier).
     const agentDefs = getAllAgentDefs();
     const repoDefs = agentDefs.filter(isRepoAgent);
-    const byGithub = new Map<string, { github: string; baseBranch: string }>();
-    for (const def of repoDefs) {
-      for (const entry of def.repo!.repos) {
-        if (!byGithub.has(entry.github)) {
-          byGithub.set(entry.github, { github: entry.github, baseBranch: entry.baseBranch });
+
+    // Repos may be cloned LAZILY on first agent spawn (setupSharedClone →
+    // ensureBaseCache).
+    // Set ARCHIE_EAGER_CLONE=false to not pre-warm every declared
+    // repo at startup.
+    if (process.env.ARCHIE_EAGER_CLONE !== 'false') {
+      const byGithub = new Map<string, { github: string; baseBranch: string }>();
+      for (const def of agentDefs.filter(isRepoAgent)) {
+        for (const entry of def.repo!.repos) {
+          if (!byGithub.has(entry.github)) {
+            byGithub.set(entry.github, { github: entry.github, baseBranch: entry.baseBranch });
+          }
         }
       }
+      logger.system(`Eager clone: pre-warming ${byGithub.size} declared repo(s)`);
+      await cloneRepos([...byGithub.values()]);
+    } else {
+      logger.system('Repos clone lazily on first agent spawn (set ARCHIE_EAGER_CLONE=true to pre-warm at startup)');
     }
-    await cloneRepos([...byGithub.values()]);
 
     // Log loaded plugins and agents
     const plugins = getPlugins();
@@ -167,8 +181,11 @@ async function main(): Promise<void> {
       logger.plain(`  [${def.pluginName}] ${def.id} (${def.visibility}) — ${def.role}`);
       const primary = def.repo!.primary;
       const primaryPath = join(REPOS_DIR, primary);
-      const gitName = await configureGitIdentity(primaryPath);
-      logger.plain(`    primary: ${primary} (${primaryPath})`);
+      // With lazy cloning the base repo may not exist yet — only configure the
+      // git identity if it's already cloned; otherwise it's set at spawn time.
+      const cloned = await cloneExists(primaryPath);
+      const gitName = cloned ? await configureGitIdentity(primaryPath) : null;
+      logger.plain(`    primary: ${primary} (${primaryPath})${cloned ? '' : ' [not cloned yet — lazy]'}`);
       if (gitName) {
         logger.plain(`    git: ${gitName}`);
       }
@@ -232,8 +249,14 @@ async function main(): Promise<void> {
     // Mount OAuth callback route (provider redirects land here)
     mountOAuthRoutes(app);
 
-    // Mount GitHub webhook (if configured)
-    if (config.githubWebhookSecret) {
+    // Mount the active repo host's webhook.
+    if (resolveRepoHostKind() === 'gitlab') {
+      if (config.gitlabWebhookSecret) {
+        mountGitLabWebhook(app, config.gitlabWebhookSecret);
+      } else {
+        logger.warn('Server', 'REPO_HOST=gitlab but GITLAB_WEBHOOK_SECRET is unset — GitLab webhook not mounted');
+      }
+    } else if (config.githubWebhookSecret) {
       mountGitHubWebhook(app, config.githubWebhookSecret);
     } else {
       logger.plain('GitHub App not configured — PR tools disabled');
