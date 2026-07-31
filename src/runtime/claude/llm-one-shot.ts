@@ -19,6 +19,7 @@
  */
 
 import type { LlmOneShot, LlmTextRequest, LlmJsonRequest } from '../../ports/llm-one-shot.js';
+import { claudeCredentialEnv } from '../../system/claude-credential.js';
 import { query } from './sdk.js';
 
 function buildOptions(req: LlmTextRequest): Record<string, unknown> {
@@ -27,7 +28,9 @@ function buildOptions(req: LlmTextRequest): Record<string, unknown> {
     executable: 'node',
     env: {
       NODE_ENV: process.env.NODE_ENV || 'development',
-      ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
+      // Resolved Claude credential (API key or subscription OAuth token) —
+      // whichever resolveClaudeCredential() found; see system/claude-credential.ts.
+      ...claudeCredentialEnv(),
       // Forward CA-trust to the spawned CLI (TLS-intercepting proxy); no-op when unset.
       // Adds TLS trust only — not tools/permissions — so the minimal-env invariant holds.
       ...(process.env.NODE_USE_SYSTEM_CA ? { NODE_USE_SYSTEM_CA: process.env.NODE_USE_SYSTEM_CA } : {}),

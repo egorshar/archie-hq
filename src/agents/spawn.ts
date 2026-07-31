@@ -12,6 +12,7 @@
 
 import { join } from 'path';
 import { safePathSegment } from '../system/path-safety.js';
+import { claudeCredentialEnv } from '../system/claude-credential.js';
 import { mkdir, symlink, readdir, writeFile, stat, rm } from 'fs/promises';
 import { existsSync } from 'fs';
 import { randomUUID } from 'node:crypto';
@@ -40,7 +41,7 @@ import {
   getAgentClonePath,
   appendUsageRecord,
 } from '../tasks/persistence.js';
-import { WORKDIR, getBaseCachePath, getPluginsHeadInfo } from '../system/workdir.js';
+import { WORKDIR, PLUGINS_DIR, getBaseCachePath, getPluginsHeadInfo } from '../system/workdir.js';
 import {
   createRecoverableInputGenerator,
 } from './message-queue.js';
@@ -266,7 +267,17 @@ export async function prepareAgentContext(
   const cwd = workspace;
 
   const pluginPaths = def.pluginPath ? [def.pluginPath] : [];
-  const pluginReadPaths = [...pluginPaths, ...(def.pluginDataPath ? [def.pluginDataPath] : [])];
+  // plugins/vendor holds skill content shared across plugins (third-party skill
+  // packs vendored as submodules, symlinked from per-plugin skills/ dirs).
+  // Symlinked SKILL.md metadata loads in-process, but a skill's bundled scripts
+  // run via Bash under the OS sandbox, which resolves the symlink into this dir
+  // — without the carve-out those scripts die on a read denial.
+  const pluginVendorDir = join(PLUGINS_DIR, 'vendor');
+  const pluginReadPaths = [
+    ...pluginPaths,
+    ...(def.pluginPath && existsSync(pluginVendorDir) ? [pluginVendorDir] : []),
+    ...(def.pluginDataPath ? [def.pluginDataPath] : []),
+  ];
   const protectedWorkspaceFiles = [
     join(workspace, '.claude', 'settings.json'),
     join(workspace, '.claude', 'skills'),
@@ -690,7 +701,7 @@ export async function spawnAgent(agent: Agent, task: Task): Promise<void> {
     // resolving to a literal `~` directory instead of the real home.
     env: {
       NODE_ENV: process.env.NODE_ENV || 'development',
-      ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
+      ...claudeCredentialEnv(),
       // CA-trust config for the spawned CLI. The SDK REPLACES env (see note
       // above), so without forwarding these an operator-provided CA (e.g. a
       // TLS-intercepting egress proxy) never reaches the child and its
