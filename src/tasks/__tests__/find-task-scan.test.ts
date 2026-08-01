@@ -122,4 +122,9 @@ describe('findTaskBy* fs scanners', () => {
 
     expect(await findTaskByBranch('sweatco/api', 'feature/z')).toBe('task-20260703-0010-real');
   });
+
+  it('findTaskByBranch resolves git-flow ticket branches (feature/SWEED-123-…)', async () => {
+    await writeTask('task-20260801-0002-flow', repoTask('feature/SWEED-123-fix-auth-flow'));
+    expect(await findTaskByBranch('sweatco/api', 'feature/SWEED-123-fix-auth-flow')).toBe('task-20260801-0002-flow');
+  });
 });
