@@ -748,6 +748,12 @@ describe('create_branch', () => {
     expect(result.content[0].text).toMatch(/requires `ticket`/);
   });
 
+  it('rejects slug passed without ticket', async () => {
+    const handler = getRepoTool(makeAgent(), makeBranchTask(), 'create_branch');
+    const result = await handler({ slug: 'fix-auth-flow' });
+    expect(result.content[0].text).toMatch(/requires `ticket`/);
+  });
+
   it('surfaces composeTicketBranchName validation errors', async () => {
     const handler = getRepoTool(makeAgent(), makeBranchTask(), 'create_branch');
     const result = await handler({ ticket: 'not_a_ticket' });
@@ -758,6 +764,16 @@ describe('create_branch', () => {
     const handler = getRepoTool(makeAgent(), makeBranchTask({ 'feature/SWEED-123': {} }), 'create_branch');
     const result = await handler({ ticket: 'SWEED-123' });
     expect(result.content[0].text).toMatch(/switch_branch/);
+  });
+
+  it('errors on collision on the auto-name path without a misleading slug suggestion', async () => {
+    // One existing branch → the next auto-generated name is `archie/task-123-2`
+    // (count-based numbering); pre-seed exactly that key to force the collision.
+    const task = makeBranchTask({ 'archie/task-123-2': {} });
+    const handler = getRepoTool(makeAgent(), task, 'create_branch');
+    const result = await handler({});
+    expect(result.content[0].text).toMatch(/switch_branch/);
+    expect(result.content[0].text).not.toMatch(/slug/);
   });
 
   it('keeps the auto archie/task-<id> name when no ticket is passed', async () => {
