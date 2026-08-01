@@ -118,7 +118,7 @@ All tools below are registered on the same `repo-tools` MCP server. Whether a to
 |---|---|
 | `push_branch` | Push commits from the local shared clone to origin via `git push -u origin HEAD:{branch}`. |
 | `create_pull_request` | Create a PR on GitHub. Stores the PR number in the current branch's `BranchState`. |
-| `create_branch` | Create a new branch (auto-named `archie/{taskId}` or `archie/{taskId}-N`) and switch to it. |
+| `create_branch` | Create a new branch and switch to it. Default: auto-named `archie/{taskId}` or `archie/{taskId}-N`; optionally pass `ticket` (+ `type`, `slug`) to compose a git-flow ticket branch like `feature/<JIRA_NAMESPACE>-<TICKET_NUM>[-slug]` for repos whose push rules reject `archie/*` names. |
 | `update_pr` | Update the title, description, and/or base branch of an existing PR (all fields optional). |
 | `add_pr_comment` | Add a general comment to a PR (issue comment). |
 | `add_review_comment` | Start a NEW review thread on a specific file and line. |

@@ -50,3 +50,46 @@ export function extractTaskIdFromBranch(branch: string | undefined): string | un
   const match = branch.match(BRANCH_TASK_ID_RE);
   return match ? match[1] : undefined;
 }
+
+/** Options for a git-flow ticket branch (`feature/PROJ-123-fix-auth-flow`). */
+export interface TicketBranchOpts {
+  /** Jira issue key, e.g. `PROJ-123` (any case; normalized to uppercase). */
+  ticket: string;
+  /** Git-flow branch type. Default: `feature`. */
+  type?: 'feature' | 'release' | 'hotfix';
+  /** Optional short description, sanitized to kebab-case and appended after the ticket. */
+  slug?: string;
+}
+
+const TICKET_RE = /^[A-Z][A-Z0-9]*-\d+$/;
+const SLUG_MAX_LENGTH = 48;
+
+/**
+ * Compose a git-flow ticket branch name: `<type>/<TICKET>` or
+ * `<type>/<TICKET>-<slug>`. Used by the `create_branch` tool when the agent
+ * passes a ticket, for repo hosts whose push rules reject `archie/*` names.
+ * Throws with an actionable message on invalid input. Deliberately produces
+ * names that `extractTaskIdFromBranch` does NOT match — attribution for these
+ * branches goes through the `findTaskByBranch` metadata scan instead.
+ */
+export function composeTicketBranchName(opts: TicketBranchOpts): string {
+  const ticket = opts.ticket.trim().toUpperCase();
+  if (!TICKET_RE.test(ticket)) {
+    throw new Error(`Invalid ticket "${opts.ticket}" — expected a Jira issue key like PROJ-123.`);
+  }
+  const type = opts.type ?? 'feature';
+  let name = `${type}/${ticket}`;
+  if (opts.slug !== undefined) {
+    const slug = opts.slug
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, SLUG_MAX_LENGTH)
+      .replace(/-+$/g, '');
+    if (!slug) {
+      throw new Error(`Slug "${opts.slug}" is empty after sanitization — use letters/numbers, or omit it.`);
+    }
+    name += `-${slug}`;
+  }
+  return name;
+}

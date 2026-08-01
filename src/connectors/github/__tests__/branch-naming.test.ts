@@ -11,6 +11,7 @@ import {
   BRANCH_PREFIX,
   taskBranchName,
   extractTaskIdFromBranch,
+  composeTicketBranchName,
 } from '../branch-naming.js';
 
 const TASK_ID = 'task-20260101-1823-abc123';
@@ -51,5 +52,48 @@ describe('extractTaskIdFromBranch', () => {
     expect(extractTaskIdFromBranch('main')).toBeUndefined();
     expect(extractTaskIdFromBranch('archie/not-a-task')).toBeUndefined();
     expect(extractTaskIdFromBranch(`release/${TASK_ID}`)).toBeUndefined();
+  });
+});
+
+describe('composeTicketBranchName', () => {
+  it('composes feature/<TICKET> by default', () => {
+    expect(composeTicketBranchName({ ticket: 'PROJ-123' })).toBe('feature/PROJ-123');
+  });
+
+  it('supports release and hotfix types', () => {
+    expect(composeTicketBranchName({ ticket: 'PROJ-123', type: 'release' })).toBe('release/PROJ-123');
+    expect(composeTicketBranchName({ ticket: 'PROJ-123', type: 'hotfix' })).toBe('hotfix/PROJ-123');
+  });
+
+  it('uppercases the ticket key', () => {
+    expect(composeTicketBranchName({ ticket: 'proj-123' })).toBe('feature/PROJ-123');
+  });
+
+  it('kebab-cases the slug and appends it', () => {
+    expect(composeTicketBranchName({ ticket: 'PROJ-123', slug: 'Fix Auth Flow!' })).toBe('feature/PROJ-123-fix-auth-flow');
+    expect(composeTicketBranchName({ ticket: 'PROJ-123', slug: '--weird__chars//here--' })).toBe('feature/PROJ-123-weird-chars-here');
+  });
+
+  it('caps the slug at 48 chars without a trailing dash', () => {
+    const long = 'a'.repeat(40) + ' ' + 'b'.repeat(40);
+    const name = composeTicketBranchName({ ticket: 'PROJ-123', slug: long });
+    const slug = name.replace('feature/PROJ-123-', '');
+    expect(slug.length).toBeLessThanOrEqual(48);
+    expect(slug.endsWith('-')).toBe(false);
+  });
+
+  it('rejects malformed tickets with an actionable message', () => {
+    expect(() => composeTicketBranchName({ ticket: 'PROJ' })).toThrow(/PROJ-123/);
+    expect(() => composeTicketBranchName({ ticket: '123-PROJ' })).toThrow(/PROJ-123/);
+    expect(() => composeTicketBranchName({ ticket: '' })).toThrow(/PROJ-123/);
+  });
+
+  it('rejects a slug that sanitizes to empty', () => {
+    expect(() => composeTicketBranchName({ ticket: 'PROJ-123', slug: '!!!' })).toThrow(/slug/i);
+  });
+
+  it('does not parse as a task branch (attribution stays on the scan path)', () => {
+    expect(extractTaskIdFromBranch('feature/PROJ-123')).toBeUndefined();
+    expect(extractTaskIdFromBranch('feature/PROJ-123-fix-auth-flow')).toBeUndefined();
   });
 });
