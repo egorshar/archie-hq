@@ -2750,6 +2750,84 @@ const spawnRepoAgentDescription = [
 ].join('\n');
 
 /**
+ * `attach_repos` — PM narrows which of a repo agent's DECLARED repos are
+ * mounted for THIS task (lazy repo mounting; see selectReposToMount in
+ * repo-mount.ts). Called before the first delegation, it creates attachment
+ * records for just the named repos; the agent's spawn then mounts only those
+ * instead of eager-mounting the full frontmatter list. Once an agent has
+ * spawned eagerly, attachments exist for every declared repo and this tool no
+ * longer narrows anything for it.
+ */
+const attachReposArgsSchema = {
+  agent_id: z.string().describe('Target repo agent id, e.g. "ai-engineer-agent"'),
+  repos: z.array(z.string()).min(1).describe(
+    'Repo identifiers ("org/repo") to mount for this task. Must be among the agent\'s declared repos.',
+  ),
+};
+
+async function attachReposHandler(agent: Agent, task: Task, args: z.infer<z.ZodObject<typeof attachReposArgsSchema>>): Promise<ToolResult> {
+  const def = task.team.find((d) => d.id === args.agent_id);
+  if (!def) {
+    return err(`Unknown agent "${args.agent_id}" — not in this task's team.`);
+  }
+  if (!def.repo) {
+    return err(`Agent "${args.agent_id}" is not a repo agent — nothing to attach.`);
+  }
+  const declared = def.repo.repos.map((r) => r.github);
+  const unknown = args.repos.filter((g) => !declared.includes(g));
+  if (unknown.length > 0) {
+    return err(
+      `Repo(s) not declared by ${args.agent_id}: ${unknown.join(', ')}. ` +
+      `Declared repos: ${declared.join(', ')}.`,
+    );
+  }
+
+  let attached = task.metadata.repositories[def.id];
+  if (!Array.isArray(attached)) {
+    attached = [];
+    task.metadata.repositories[def.id] = attached;
+  }
+  const added: string[] = [];
+  for (const github of args.repos) {
+    if (!attached.some((a) => a.github === github)) {
+      attached.push({ github });
+      added.push(github);
+    }
+  }
+  task.debouncedSave();
+
+  if (added.length > 0) {
+    await appendAgentFinding(
+      task.taskId,
+      agent.def.id as AgentName,
+      `Attached repos to ${def.id}: ${added.join(', ')}`,
+      'decision',
+    );
+  }
+
+  const primaryAttached = attached.some((a) => a.github === def.repo!.primary);
+  const primaryNote = primaryAttached
+    ? ''
+    : ` Note: the agent's primary (${def.repo.primary}) is NOT attached — its repo-tools calls must pass the github arg explicitly.`;
+  return ok(
+    `Attached to ${args.agent_id}: ${args.repos.join(', ')} ` +
+    `(${added.length} new, ${args.repos.length - added.length} already attached). ` +
+    `Its next spawn mounts only the attached repos.${primaryNote}`,
+  );
+}
+
+const attachReposDescription = [
+  'Restrict which of a repo agent\'s declared repos are mounted for this task.',
+  'Call BEFORE the first delegation to that agent: it then mounts only the',
+  'attached repos instead of every repo in its (possibly wide) declared list,',
+  'skipping the clone cost of repos this task does not touch.',
+  '',
+  'Only repos the agent declares are accepted. If you never call this, the',
+  'agent eager-mounts its full declared list, as before. After an eager spawn',
+  'the full list is already attached, so calling this later has no effect.',
+].join('\n');
+
+/**
  * One spec per not-yet-bridged orchestration tool. Mirrors `CommsToolSpec`
  * above — single source of truth for `createOrchestrationMcpServer` (Claude
  * SDK path) and `createOrchestrationHandlers` (opencode bridge path).
@@ -2787,6 +2865,7 @@ export const ORCHESTRATION_TOOL_SPECS: readonly OrchestrationToolSpec[] = [
   { name: 'get_task_usage', description: getTaskUsageDescription, schema: getTaskUsageArgsSchema, handler: getTaskUsageHandler },
   { name: 'list_available_repos', description: listAvailableReposDescription, schema: listAvailableReposArgsSchema, handler: listAvailableReposHandler },
   { name: 'spawn_repo_agent', description: spawnRepoAgentDescription, schema: spawnRepoAgentArgsSchema, handler: spawnRepoAgentHandler },
+  { name: 'attach_repos', description: attachReposDescription, schema: attachReposArgsSchema, handler: attachReposHandler },
   // Triggers (upstream PM-permissions rework).
   { name: 'propose_trigger', description: proposeTriggerDescription, schema: proposeTriggerArgsSchema, handler: proposeTriggerHandler },
   { name: 'list_triggers', description: listTriggersDescription, schema: listTriggersArgsSchema, handler: listTriggersHandler },

@@ -35,6 +35,7 @@ import { hydrateBranchState } from '../connectors/github/branch-state.js';
 import { taskBranchName } from '../connectors/github/branch-naming.js';
 import { createResearchMcpServer, createResearchPostToolHook, createResearchDefenseTagHook } from '../mcp/research-tools.js';
 import { buildPeerListForSender } from './registry.js';
+import { selectReposToMount } from './repo-mount.js';
 import {
   getSharedPath,
   getTaskPath,
@@ -396,22 +397,25 @@ Shared folder: ${sharedPath} [READ-ONLY]
       attached = [];
       metadata.repositories[def.id] = attached;
     }
-    // Eager mount: every repo the agent declares in frontmatter is mounted at
-    // spawn. Ensure each declared repo has an attachment record (preserving
-    // existing clone/branch state for repos already present — important for
-    // recovering an old task after its agent gained a new repo in frontmatter).
-    // We iterate the DECLARED list (not the metadata list) so a repo removed
-    // from frontmatter is simply no longer mounted; a stale metadata record for
-    // it is harmless and left in place.
-    for (const entry of def.repo!.repos) {
+    // Mount selection: eager by default (every declared repo), narrowed to the
+    // task's attached working set when the PM pre-attached repos via
+    // `attach_repos` — see selectReposToMount for the exact rules. Ensure each
+    // mounted repo has an attachment record (preserving existing clone/branch
+    // state for repos already present — important for recovering an old task
+    // after its agent gained a new repo in frontmatter). We select from the
+    // DECLARED list (not the metadata list) so a repo removed from frontmatter
+    // is simply no longer mounted; a stale metadata record for it is harmless
+    // and left in place.
+    const mountEntries = selectReposToMount(def.repo!.repos, attached.map((a) => a.github));
+    for (const entry of mountEntries) {
       if (!attached.some((a) => a.github === entry.github)) {
         attached.push({ github: entry.github });
       }
     }
 
-    // Set up each declared repo: prepare clone, hydrate branch state.
+    // Set up each mounted repo: prepare clone, hydrate branch state.
     const repoMounts: RepoMount[] = [];
-    for (const entry of def.repo!.repos) {
+    for (const entry of mountEntries) {
       const att = attached.find((a) => a.github === entry.github)!;
       const baseBranch = entry.baseBranch || 'main';
       // Prefer the base path the clone was actually built against — that's
