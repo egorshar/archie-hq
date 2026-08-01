@@ -22,7 +22,7 @@ import { parseCheckRef } from '../connectors/github/client.js';
 import { parseGitLabCheckRef } from '../connectors/gitlab/status-map.js';
 import { gitExec } from '../connectors/github/repo-clone.js';
 import { hydrateBranchState, findBranchStateByPR, assignPrNumber } from '../connectors/github/branch-state.js';
-import { taskBranchName } from '../connectors/github/branch-naming.js';
+import { taskBranchName, composeTicketBranchName } from '../connectors/github/branch-naming.js';
 import { appendAgentFinding, appendArtifactShared } from '../tasks/persistence.js';
 import { copyArtifactToShared, assertReadable } from './artifacts.js';
 import { aggregateTaskUsage, formatTaskUsageReport } from './task-usage.js';
@@ -1946,9 +1946,14 @@ function createSwitchBranchTool(agent: Agent, task: Task) {
 function createCreateBranchTool(agent: Agent, task: Task) {
   return tool(
     'create_branch',
-    'Create a new branch and switch to it. Branch name is auto-generated from the task ID. Returns the full branch name.',
+    'Create a new branch and switch to it. By default the name is auto-generated from the task ID (archie/task-...). ' +
+    'For repos whose git flow requires ticket branches, pass `ticket` (+ optional `type`, `slug`) to create e.g. feature/SWEED-123-fix-auth-flow. ' +
+    'Returns the full branch name.',
     {
       base: z.string().optional().describe('Base branch or commit (default: current HEAD)'),
+      ticket: z.string().optional().describe('Jira issue key (e.g. SWEED-123). When set, the branch is named <type>/<TICKET>[-<slug>] instead of the auto archie/task-<id> name.'),
+      type: z.enum(['feature', 'release', 'hotfix']).optional().describe('Git-flow branch type for ticket naming (default: feature). Requires `ticket`.'),
+      slug: z.string().optional().describe('Optional short description appended after the ticket, kebab-cased (e.g. "fix auth flow" → -fix-auth-flow). Requires `ticket`.'),
       github: githubArgSchema,
     },
     async (args) => {
@@ -1956,12 +1961,33 @@ function createCreateBranchTool(agent: Agent, task: Task) {
       if (!resolved.ok) return err(resolved.error);
       const { attached } = resolved;
 
-      // Count existing branches to generate unique name
-      const existing = Object.keys(attached.branch_states || {}).length;
-      const branchName = taskBranchName(task.taskId, existing);
+      let branchName: string;
+      if (args.ticket !== undefined) {
+        try {
+          branchName = composeTicketBranchName({ ticket: args.ticket, type: args.type, slug: args.slug });
+        } catch (e) {
+          return err(e instanceof Error ? e.message : String(e));
+        }
+      } else {
+        if (args.type !== undefined || args.slug !== undefined) {
+          return err('`type`/`slug` requires `ticket` — pass the Jira issue key too, or omit all three for the auto task branch name.');
+        }
+        // Count existing branches to generate unique name
+        const existing = Object.keys(attached.branch_states || {}).length;
+        branchName = taskBranchName(task.taskId, existing);
+      }
+
+      if (attached.branch_states && branchName in attached.branch_states) {
+        return err(`Branch ${branchName} already exists for this task — use switch_branch to resume it, or pass a different slug for a new branch.`);
+      }
 
       const base = args.base || 'HEAD';
-      await gitExec(attached.clone_path!, `checkout -b ${branchName} ${base}`);
+      try {
+        await gitExec(attached.clone_path!, `checkout -b ${branchName} ${base}`);
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        return err(`Failed to create ${branchName}: ${message}. If the branch already exists in the clone, use switch_branch instead.`);
+      }
 
       attached.branch_states ??= {};
       attached.branch_states[branchName] = {};
