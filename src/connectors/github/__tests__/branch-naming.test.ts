@@ -11,6 +11,7 @@ import {
   BRANCH_PREFIX,
   taskBranchName,
   extractTaskIdFromBranch,
+  composeTicketBranchName,
 } from '../branch-naming.js';
 
 const TASK_ID = 'task-20260101-1823-abc123';
@@ -51,5 +52,48 @@ describe('extractTaskIdFromBranch', () => {
     expect(extractTaskIdFromBranch('main')).toBeUndefined();
     expect(extractTaskIdFromBranch('archie/not-a-task')).toBeUndefined();
     expect(extractTaskIdFromBranch(`release/${TASK_ID}`)).toBeUndefined();
+  });
+});
+
+describe('composeTicketBranchName', () => {
+  it('composes feature/<TICKET> by default', () => {
+    expect(composeTicketBranchName({ ticket: 'SWEED-123' })).toBe('feature/SWEED-123');
+  });
+
+  it('supports release and hotfix types', () => {
+    expect(composeTicketBranchName({ ticket: 'SWEED-123', type: 'release' })).toBe('release/SWEED-123');
+    expect(composeTicketBranchName({ ticket: 'SWEED-123', type: 'hotfix' })).toBe('hotfix/SWEED-123');
+  });
+
+  it('uppercases the ticket key', () => {
+    expect(composeTicketBranchName({ ticket: 'sweed-123' })).toBe('feature/SWEED-123');
+  });
+
+  it('kebab-cases the slug and appends it', () => {
+    expect(composeTicketBranchName({ ticket: 'SWEED-123', slug: 'Fix Auth Flow!' })).toBe('feature/SWEED-123-fix-auth-flow');
+    expect(composeTicketBranchName({ ticket: 'SWEED-123', slug: '--weird__chars//here--' })).toBe('feature/SWEED-123-weird-chars-here');
+  });
+
+  it('caps the slug at 48 chars without a trailing dash', () => {
+    const long = 'a'.repeat(40) + ' ' + 'b'.repeat(40);
+    const name = composeTicketBranchName({ ticket: 'SWEED-123', slug: long });
+    const slug = name.replace('feature/SWEED-123-', '');
+    expect(slug.length).toBeLessThanOrEqual(48);
+    expect(slug.endsWith('-')).toBe(false);
+  });
+
+  it('rejects malformed tickets with an actionable message', () => {
+    expect(() => composeTicketBranchName({ ticket: 'SWEED' })).toThrow(/SWEED-123/);
+    expect(() => composeTicketBranchName({ ticket: '123-SWEED' })).toThrow(/SWEED-123/);
+    expect(() => composeTicketBranchName({ ticket: '' })).toThrow(/SWEED-123/);
+  });
+
+  it('rejects a slug that sanitizes to empty', () => {
+    expect(() => composeTicketBranchName({ ticket: 'SWEED-123', slug: '!!!' })).toThrow(/slug/i);
+  });
+
+  it('does not parse as a task branch (attribution stays on the scan path)', () => {
+    expect(extractTaskIdFromBranch('feature/SWEED-123')).toBeUndefined();
+    expect(extractTaskIdFromBranch('feature/SWEED-123-fix-auth-flow')).toBeUndefined();
   });
 });
