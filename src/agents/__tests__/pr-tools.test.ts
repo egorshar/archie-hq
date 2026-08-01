@@ -718,3 +718,52 @@ describe('findBranchStateByPR', () => {
     expect(findBranchStateByPR(attached, 42)).toBeUndefined();
   });
 });
+
+describe('create_branch', () => {
+  function makeBranchTask(branchStates: Record<string, object> = {}) {
+    return makeTask({
+      repositories: {
+        'backend-agent': [
+          { github: 'org/backend', clone_path: '/clones/backend', current_branch: 'main', branch_states: branchStates },
+        ],
+      },
+    } as any);
+  }
+
+  it('composes a git-flow name from ticket + slug, records and switches to it', async () => {
+    const task = makeBranchTask();
+    const handler = getRepoTool(makeAgent(), task, 'create_branch');
+
+    const result = await handler({ ticket: 'sweed-123', slug: 'Fix Auth Flow!' });
+
+    expect(result.content[0].text).toContain('feature/SWEED-123-fix-auth-flow');
+    const attached = (task.metadata.repositories as any)['backend-agent'][0];
+    expect(attached.branch_states['feature/SWEED-123-fix-auth-flow']).toEqual({});
+    expect(attached.current_branch).toBe('feature/SWEED-123-fix-auth-flow');
+  });
+
+  it('rejects type/slug passed without ticket', async () => {
+    const handler = getRepoTool(makeAgent(), makeBranchTask(), 'create_branch');
+    const result = await handler({ type: 'release' });
+    expect(result.content[0].text).toMatch(/requires `ticket`/);
+  });
+
+  it('surfaces composeTicketBranchName validation errors', async () => {
+    const handler = getRepoTool(makeAgent(), makeBranchTask(), 'create_branch');
+    const result = await handler({ ticket: 'not_a_ticket' });
+    expect(result.content[0].text).toMatch(/SWEED-123/);
+  });
+
+  it('errors on collision with an existing task branch, suggesting switch_branch', async () => {
+    const handler = getRepoTool(makeAgent(), makeBranchTask({ 'feature/SWEED-123': {} }), 'create_branch');
+    const result = await handler({ ticket: 'SWEED-123' });
+    expect(result.content[0].text).toMatch(/switch_branch/);
+  });
+
+  it('keeps the auto archie/task-<id> name when no ticket is passed', async () => {
+    const task = makeBranchTask();
+    const handler = getRepoTool(makeAgent(), task, 'create_branch');
+    const result = await handler({});
+    expect(result.content[0].text).toContain('archie/task-123');
+  });
+});
