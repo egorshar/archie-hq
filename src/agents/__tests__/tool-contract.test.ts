@@ -140,6 +140,7 @@ const PM_ORCHESTRATION_TOOLS = [
   'mcp__orchestration-tools__get_task_usage',
   'mcp__orchestration-tools__list_available_repos',
   'mcp__orchestration-tools__spawn_repo_agent',
+  'mcp__orchestration-tools__attach_repos',
   'mcp__orchestration-tools__propose_trigger',
   'mcp__orchestration-tools__list_triggers',
   'mcp__orchestration-tools__update_trigger',
