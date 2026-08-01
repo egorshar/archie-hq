@@ -1978,7 +1978,10 @@ function createCreateBranchTool(agent: Agent, task: Task) {
       }
 
       if (attached.branch_states && branchName in attached.branch_states) {
-        return err(`Branch ${branchName} already exists for this task — use switch_branch to resume it, or pass a different slug for a new branch.`);
+        const suggestion = args.ticket !== undefined
+          ? 'use switch_branch to resume it, or pass a different slug for a new branch.'
+          : 'use switch_branch to resume it.';
+        return err(`Branch ${branchName} already exists for this task — ${suggestion}`);
       }
 
       const base = args.base || 'HEAD';
