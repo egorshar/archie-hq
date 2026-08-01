@@ -10,9 +10,10 @@ import {
 vi.mock('../../../tasks/persistence.js', () => ({
   loadMetadata: vi.fn(),
   findTaskByPRNumber: vi.fn(),
+  findTaskByBranch: vi.fn(),
 }));
 
-import { loadMetadata, findTaskByPRNumber } from '../../../tasks/persistence.js';
+import { loadMetadata, findTaskByPRNumber, findTaskByBranch } from '../../../tasks/persistence.js';
 
 describe('verifyGitLabToken', () => {
   it('accepts a matching token, rejects a mismatch, rejects wrong length', () => {
@@ -185,6 +186,7 @@ describe('routeGitLabEvent', () => {
   beforeEach(() => {
     vi.mocked(loadMetadata).mockReset();
     vi.mocked(findTaskByPRNumber).mockReset();
+    vi.mocked(findTaskByBranch).mockReset();
     delete process.env.GITLAB_BOT_USERNAME;
   });
 
@@ -251,6 +253,19 @@ describe('routeGitLabEvent', () => {
       object_attributes: { id: 2, noteable_type: 'MergeRequest', note: 'thoughts?' },
     });
     expect(findTaskByPRNumber).toHaveBeenCalledWith('grp/proj', 42);
+    expect(result).toEqual({ action: 'direct', handler: 'existing_task', taskId: TASK_ID });
+  });
+
+  it('routes git-flow ticket branches via findTaskByBranch (extractTaskIdFromBranch deliberately misses)', async () => {
+    const TICKET_BRANCH = 'feature/SWEED-123-fix-auth-flow';
+    vi.mocked(findTaskByBranch).mockResolvedValue(TASK_ID);
+    vi.mocked(loadMetadata).mockResolvedValue({} as never);
+    const result = await routeGitLabEvent('merge_request', {
+      object_kind: 'merge_request', project, user: { username: 'dev1' },
+      object_attributes: { iid: 5, action: 'open', source_branch: TICKET_BRANCH },
+    });
+    expect(findTaskByBranch).toHaveBeenCalledWith('grp/proj', TICKET_BRANCH);
+    expect(findTaskByPRNumber).not.toHaveBeenCalled();
     expect(result).toEqual({ action: 'direct', handler: 'existing_task', taskId: TASK_ID });
   });
 

@@ -8,7 +8,7 @@
 
 import crypto from 'crypto';
 import { extractTaskIdFromBranch } from '../github/branch-naming.js';
-import { findTaskByPRNumber, loadMetadata } from '../../tasks/persistence.js';
+import { findTaskByBranch, findTaskByPRNumber, loadMetadata } from '../../tasks/persistence.js';
 import type { NormalizedEventContext, RepoHostEventSource } from '../../ports/repo-host-events.js';
 
 /**
@@ -195,6 +195,11 @@ export async function routeGitLabEvent(objectKind: string, payload: Obj): Promis
 
   const branch = extractBranchFromPayload(objectKind, payload);
   let taskId = extractTaskIdFromBranch(branch);
+  // Ticket-style branches (e.g. feature/SWEED-123-slug) deliberately don't
+  // parse via extractTaskIdFromBranch; fall back to the metadata scan.
+  if (!taskId && branch) {
+    taskId = (await findTaskByBranch(context.repo, branch)) ?? undefined;
+  }
   if (!taskId && context.prNumber) {
     taskId = (await findTaskByPRNumber(context.repo, context.prNumber)) ?? undefined;
   }
