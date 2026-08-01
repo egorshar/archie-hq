@@ -734,12 +734,12 @@ describe('create_branch', () => {
     const task = makeBranchTask();
     const handler = getRepoTool(makeAgent(), task, 'create_branch');
 
-    const result = await handler({ ticket: 'sweed-123', slug: 'Fix Auth Flow!' });
+    const result = await handler({ ticket: 'proj-123', slug: 'Fix Auth Flow!' });
 
-    expect(result.content[0].text).toContain('feature/SWEED-123-fix-auth-flow');
+    expect(result.content[0].text).toContain('feature/PROJ-123-fix-auth-flow');
     const attached = (task.metadata.repositories as any)['backend-agent'][0];
-    expect(attached.branch_states['feature/SWEED-123-fix-auth-flow']).toEqual({});
-    expect(attached.current_branch).toBe('feature/SWEED-123-fix-auth-flow');
+    expect(attached.branch_states['feature/PROJ-123-fix-auth-flow']).toEqual({});
+    expect(attached.current_branch).toBe('feature/PROJ-123-fix-auth-flow');
   });
 
   it('rejects type/slug passed without ticket', async () => {
@@ -757,12 +757,12 @@ describe('create_branch', () => {
   it('surfaces composeTicketBranchName validation errors', async () => {
     const handler = getRepoTool(makeAgent(), makeBranchTask(), 'create_branch');
     const result = await handler({ ticket: 'not_a_ticket' });
-    expect(result.content[0].text).toMatch(/SWEED-123/);
+    expect(result.content[0].text).toMatch(/PROJ-123/);
   });
 
   it('errors on collision with an existing task branch, suggesting switch_branch', async () => {
-    const handler = getRepoTool(makeAgent(), makeBranchTask({ 'feature/SWEED-123': {} }), 'create_branch');
-    const result = await handler({ ticket: 'SWEED-123' });
+    const handler = getRepoTool(makeAgent(), makeBranchTask({ 'feature/PROJ-123': {} }), 'create_branch');
+    const result = await handler({ ticket: 'PROJ-123' });
     expect(result.content[0].text).toMatch(/switch_branch/);
   });
 

@@ -257,7 +257,7 @@ describe('routeGitLabEvent', () => {
   });
 
   it('routes git-flow ticket branches via findTaskByBranch (extractTaskIdFromBranch deliberately misses)', async () => {
-    const TICKET_BRANCH = 'feature/SWEED-123-fix-auth-flow';
+    const TICKET_BRANCH = 'feature/PROJ-123-fix-auth-flow';
     vi.mocked(findTaskByBranch).mockResolvedValue(TASK_ID);
     vi.mocked(loadMetadata).mockResolvedValue({} as never);
     const result = await routeGitLabEvent('merge_request', {

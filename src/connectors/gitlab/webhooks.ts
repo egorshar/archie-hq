@@ -195,7 +195,7 @@ export async function routeGitLabEvent(objectKind: string, payload: Obj): Promis
 
   const branch = extractBranchFromPayload(objectKind, payload);
   let taskId = extractTaskIdFromBranch(branch);
-  // Ticket-style branches (e.g. feature/SWEED-123-slug) deliberately don't
+  // Ticket-style branches (e.g. feature/PROJ-123-slug) deliberately don't
   // parse via extractTaskIdFromBranch; fall back to the metadata scan.
   if (!taskId && branch) {
     taskId = (await findTaskByBranch(context.repo, branch)) ?? undefined;

@@ -35,7 +35,7 @@ describe('routeGitHubEvent', () => {
   });
 
   it('routes git-flow ticket branches via findTaskByBranch (extractTaskIdFromBranch deliberately misses)', async () => {
-    const TICKET_BRANCH = 'feature/SWEED-123-fix-auth-flow';
+    const TICKET_BRANCH = 'feature/PROJ-123-fix-auth-flow';
     vi.mocked(findTaskByBranch).mockResolvedValue(TASK_ID);
     vi.mocked(loadMetadata).mockResolvedValue({} as never);
     const result = await routeGitHubEvent('pull_request', {
@@ -67,7 +67,7 @@ describe('routeGitHubEvent', () => {
       repository,
       sender: { login: 'dev1' },
       action: 'opened',
-      pull_request: { number: 5, head: { ref: 'feature/SWEED-123-fix-auth-flow' } },
+      pull_request: { number: 5, head: { ref: 'feature/PROJ-123-fix-auth-flow' } },
     });
     expect(result).toMatchObject({ action: 'discard' });
     expect(loadMetadata).toHaveBeenCalledWith(TASK_ID);

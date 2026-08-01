@@ -1947,11 +1947,11 @@ function createCreateBranchTool(agent: Agent, task: Task) {
   return tool(
     'create_branch',
     'Create a new branch and switch to it. By default the name is auto-generated from the task ID (archie/task-...). ' +
-    'For repos whose git flow requires ticket branches, pass `ticket` (+ optional `type`, `slug`) to create e.g. feature/SWEED-123-fix-auth-flow. ' +
+    'For repos whose git flow requires ticket branches, pass `ticket` (+ optional `type`, `slug`) to create e.g. feature/PROJ-123-fix-auth-flow. ' +
     'Returns the full branch name.',
     {
       base: z.string().optional().describe('Base branch or commit (default: current HEAD)'),
-      ticket: z.string().optional().describe('Jira issue key (e.g. SWEED-123). When set, the branch is named <type>/<TICKET>[-<slug>] instead of the auto archie/task-<id> name.'),
+      ticket: z.string().optional().describe('Jira issue key (e.g. PROJ-123). When set, the branch is named <type>/<TICKET>[-<slug>] instead of the auto archie/task-<id> name.'),
       type: z.enum(['feature', 'release', 'hotfix']).optional().describe('Git-flow branch type for ticket naming (default: feature). Requires `ticket`.'),
       slug: z.string().optional().describe('Optional short description appended after the ticket, kebab-cased (e.g. "fix auth flow" → -fix-auth-flow). Requires `ticket`.'),
       github: githubArgSchema,

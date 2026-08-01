@@ -454,7 +454,7 @@ export async function routeGitHubEvent(
   const branch = extractBranchFromPayload(eventType, payload);
   let taskId = extractTaskIdFromBranch(branch);
 
-  // Ticket-style branches (e.g. feature/SWEED-123-slug) deliberately don't
+  // Ticket-style branches (e.g. feature/PROJ-123-slug) deliberately don't
   // parse via extractTaskIdFromBranch; fall back to the metadata branch_states
   // scan before the PR-number fallbacks below.
   if (!taskId && branch) {

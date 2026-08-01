@@ -51,9 +51,9 @@ export function extractTaskIdFromBranch(branch: string | undefined): string | un
   return match ? match[1] : undefined;
 }
 
-/** Options for a git-flow ticket branch (`feature/SWEED-123-fix-auth-flow`). */
+/** Options for a git-flow ticket branch (`feature/PROJ-123-fix-auth-flow`). */
 export interface TicketBranchOpts {
-  /** Jira issue key, e.g. `SWEED-123` (any case; normalized to uppercase). */
+  /** Jira issue key, e.g. `PROJ-123` (any case; normalized to uppercase). */
   ticket: string;
   /** Git-flow branch type. Default: `feature`. */
   type?: 'feature' | 'release' | 'hotfix';
@@ -75,7 +75,7 @@ const SLUG_MAX_LENGTH = 48;
 export function composeTicketBranchName(opts: TicketBranchOpts): string {
   const ticket = opts.ticket.trim().toUpperCase();
   if (!TICKET_RE.test(ticket)) {
-    throw new Error(`Invalid ticket "${opts.ticket}" — expected a Jira issue key like SWEED-123.`);
+    throw new Error(`Invalid ticket "${opts.ticket}" — expected a Jira issue key like PROJ-123.`);
   }
   const type = opts.type ?? 'feature';
   let name = `${type}/${ticket}`;
