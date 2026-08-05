@@ -23,7 +23,7 @@ import type { OpencodeClient } from './embedded-server.js';
 import { buildToolAllowlist } from './tool-allowlist.js';
 import { turnCompletion } from './turn-completion.js';
 import { opencodeAgentRoute, opencodeFooterModel } from './model.js';
-import type { AgentDef } from '../../types/agent.js';
+import { DEFAULT_MAX_TURNS, type AgentDef } from '../../types/agent.js';
 
 const SESSION_NOT_FOUND_RE = /session.*not.*found|not.*found.*session/i;
 
@@ -104,8 +104,12 @@ export async function runPromptTurn(args: {
   onSession?.(sessionId);
 
   // Register the completion waiter BEFORE firing so no idle/text event is missed.
+  // The waiter also carries this turn's step budget: opencode drives a turn to
+  // `session.idle` with no ceiling of its own, so without it a frontmatter
+  // `maxTurns` was accepted and silently ignored on this runtime.
+  const maxTurns = agent.def.maxTurns ?? DEFAULT_MAX_TURNS;
   const fire = async (sid: string): Promise<{ res: unknown; turn: Promise<string> }> => {
-    const turn = turnCompletion.waitForTurn(sid);
+    const turn = turnCompletion.waitForTurn(sid, maxTurns);
     try {
       const res = await client.session.promptAsync({ path: { id: sid }, body });
       return { res, turn };
