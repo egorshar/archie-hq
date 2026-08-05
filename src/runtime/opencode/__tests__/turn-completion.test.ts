@@ -62,3 +62,59 @@ describe('TurnCompletionRegistry', () => {
     await expect(second).resolves.toBe('');
   });
 });
+
+/**
+ * Step budget (maxTurns). opencode drives a turn to `session.idle` with no cap
+ * of its own, so an agent that keeps calling tools runs until it decides to
+ * stop — one research brief reached 139 API round-trips. The budget counts
+ * assistant messages (one per round-trip) and ends the turn when the agent
+ * spends more than its allowance.
+ */
+describe('TurnCompletionRegistry step budget', () => {
+  it('trips once when a turn spends more steps than its budget, and rejects the waiter', async () => {
+    const reg = new TurnCompletionRegistry();
+    const turn = reg.waitForTurn('S1', 2);
+    expect(reg.noteAssistantStep('S1', 'm1')).toBe(false);
+    expect(reg.noteAssistantStep('S1', 'm2')).toBe(false); // budget spent, not exceeded
+    expect(reg.noteAssistantStep('S1', 'm3')).toBe(true); // over budget → end the turn
+    await expect(turn).rejects.toThrow(/step budget|maxTurns/i);
+    // Only the first breach asks the caller to abort — the session is aborted once.
+    expect(reg.noteAssistantStep('S1', 'm4')).toBe(false);
+  });
+
+  it('counts one step per assistant message, however often it is updated', async () => {
+    const reg = new TurnCompletionRegistry();
+    const turn = reg.waitForTurn('S1', 2);
+    for (const id of ['m1', 'm1', 'm1', 'm2', 'm2']) reg.noteAssistantStep('S1', id);
+    expect(reg.noteAssistantStep('S1', 'm2')).toBe(false); // still two distinct steps
+    expect(reg.noteAssistantStep('S1', 'm3')).toBe(true);
+    await expect(turn).rejects.toThrow(/step budget|maxTurns/i);
+  });
+
+  it('never trips when the turn was registered without a budget', async () => {
+    const reg = new TurnCompletionRegistry();
+    const turn = reg.waitForTurn('S1');
+    for (let i = 0; i < 500; i++) expect(reg.noteAssistantStep('S1', `m${i}`)).toBe(false);
+    reg.completeTurn('S1');
+    await expect(turn).resolves.toBe('');
+  });
+
+  it('gives each turn a fresh budget — a spent turn does not starve the next brief', async () => {
+    const reg = new TurnCompletionRegistry();
+    const first = reg.waitForTurn('S1', 1);
+    reg.noteAssistantStep('S1', 'm1');
+    expect(reg.noteAssistantStep('S1', 'm2')).toBe(true);
+    await expect(first).rejects.toThrow(/step budget|maxTurns/i);
+
+    const second = reg.waitForTurn('S1', 1);
+    expect(reg.noteAssistantStep('S1', 'm3')).toBe(false); // budget starts over
+    reg.completeTurn('S1');
+    await expect(second).resolves.toBe('');
+  });
+
+  it('ignores steps for an unregistered session (no throw)', () => {
+    const reg = new TurnCompletionRegistry();
+    expect(() => reg.noteAssistantStep('nope', 'm1')).not.toThrow();
+    expect(reg.noteAssistantStep('nope', 'm1')).toBe(false);
+  });
+});

@@ -40,6 +40,7 @@ vi.mock('../../../agents/spawn.js', () => ({ prepareAgentContext }));
 import { MessageQueue } from '../../../agents/message-queue.js';
 import { OpencodeRuntime, isSessionNotFound, runPromptTurn } from '../runtime.js';
 import { turnCompletion } from '../turn-completion.js';
+import { DEFAULT_MAX_TURNS } from '../../../types/agent.js';
 
 /** Let runPromptTurn reach its `await turn` (after the mocked promptAsync microtasks). */
 const tick = () => new Promise((r) => setTimeout(r, 0));
@@ -503,6 +504,39 @@ describe('runPromptTurn (promptAsync + session.idle completion)', () => {
     turnCompletion.failTurn('S1', new Error('provider error')); // simulate session.error
 
     await expect(p).rejects.toThrow('provider error');
+  });
+
+  // The frontmatter budget only bites if the turn is registered with it — an
+  // agent declaring maxTurns had it silently ignored on this runtime.
+  it("registers the turn with the agent's declared maxTurns", async () => {
+    const promptAsync = vi.fn().mockResolvedValue({ data: {} });
+    const client = { session: { promptAsync, create: vi.fn() } } as any;
+    const agent = { def: { id: 'ui-researcher-agent', maxTurns: 2 }, session: { session_id: 'S1' } } as any;
+    const task = { taskId: 'T1' } as any;
+
+    const p = runPromptTurn({ client, agent, task, sessionId: 'S1', readOnly: false, body });
+    await tick();
+    turnCompletion.noteAssistantStep('S1', 'm1');
+    turnCompletion.noteAssistantStep('S1', 'm2');
+    expect(turnCompletion.noteAssistantStep('S1', 'm3')).toBe(true);
+
+    await expect(p).rejects.toThrow(/step budget|maxTurns/i);
+  });
+
+  it('falls back to the default budget when the agent declares none', async () => {
+    const promptAsync = vi.fn().mockResolvedValue({ data: {} });
+    const client = { session: { promptAsync, create: vi.fn() } } as any;
+    const agent = { def: { id: 'pm' }, session: { session_id: 'S1' } } as any;
+    const task = { taskId: 'T1' } as any;
+
+    const p = runPromptTurn({ client, agent, task, sessionId: 'S1', readOnly: false, body });
+    await tick();
+    for (let i = 0; i < DEFAULT_MAX_TURNS; i++) {
+      expect(turnCompletion.noteAssistantStep('S1', `m${i}`)).toBe(false);
+    }
+    expect(turnCompletion.noteAssistantStep('S1', 'one-too-many')).toBe(true);
+
+    await expect(p).rejects.toThrow(/step budget|maxTurns/i);
   });
 });
 
