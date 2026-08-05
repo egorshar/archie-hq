@@ -62,11 +62,40 @@ function safeStringify(v: unknown): string {
   }
 }
 
-/** Correlate one opencode event to a live turn and feed the status line. Never throws. */
-export function handleOpencodeEvent(ev: unknown, registry: SessionRegistry): void {
+/**
+ * Correlate one opencode event to a live turn and feed the status line. Never
+ * throws.
+ *
+ * `abortSession` is called when a turn runs past its step budget — see
+ * {@link TurnCompletionRegistry.noteAssistantStep}. It is optional so the
+ * pure-correlation paths (and tests) can omit it; a budgeted turn wired without
+ * it still ends on Archie's side, it just leaves opencode running.
+ */
+export function handleOpencodeEvent(
+  ev: unknown,
+  registry: SessionRegistry,
+  abortSession?: (sessionId: string) => void,
+): void {
   try {
     const e = ev as { type?: string; properties?: any } | null;
     if (!e || typeof e.type !== 'string') return;
+
+    // Step budget. Counted for EVERY session with a pending turn, registered in
+    // the status registry or not — the budget is about spend, and an
+    // unregistered session spends just as much.
+    if (e.type === 'message.updated') {
+      const info = e.properties?.info;
+      if (!info || info.role !== 'assistant') return;
+      if (typeof info.sessionID !== 'string' || typeof info.id !== 'string') return;
+      if (turnCompletion.noteAssistantStep(info.sessionID, info.id)) {
+        logger.warn(
+          'opencode',
+          `session ${info.sessionID} exceeded its step budget — aborting the turn`,
+        );
+        abortSession?.(info.sessionID);
+      }
+      return;
+    }
 
     if (e.type === 'session.idle') {
       const sid = e.properties?.sessionID;
@@ -121,10 +150,13 @@ export function startEventConsumer(client: OpencodeClient, registry: SessionRegi
   (async () => {
     try {
       const { stream } = await client.event.subscribe();
+      const abortSession = (sessionId: string) => {
+        client.session.abort({ path: { id: sessionId } }).catch(() => {});
+      };
       for await (const ev of stream as AsyncIterable<unknown>) {
         // stop() is best-effort: the loop unblocks on the next event / stream close.
         if (stopped) break;
-        handleOpencodeEvent(ev, registry);
+        handleOpencodeEvent(ev, registry, abortSession);
       }
     } catch (err) {
       if (!stopped) logger.warn('opencode', `event stream ended: ${(err as Error)?.message ?? err}`);
