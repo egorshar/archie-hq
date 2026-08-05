@@ -192,7 +192,18 @@ export interface AgentDef {
    */
   maxMode?: MaxModeSpec;
 
-  /** Maximum agentic turns before stopping (default: 100) */
+  /**
+   * Maximum agentic turns — API round-trips — before the agent is stopped
+   * (default: {@link DEFAULT_MAX_TURNS}). A safety net against a turn that
+   * never decides it is done, not a target to spend.
+   *
+   * The two runtimes count over different spans, because their turn primitives
+   * differ: the Claude SDK caps round-trips across the whole streamed query
+   * (the agent's lifetime in the task), while the opencode runtime caps them
+   * per prompt, so each brief the PM sends starts with a fresh allowance. Per
+   * prompt is the useful span for a safety net — it stops a runaway
+   * investigation without leaving the agent spent for the rest of the task.
+   */
   maxTurns?: number;
 
   /** True only for the PM coordinator agent (the core agent overlaid by the pm plugin) */
@@ -255,6 +266,12 @@ export interface AgentDef {
   /** Plugin hooks config (from plugin's hooks/hooks.json), written to .claude/settings.json */
   pluginHooks?: Record<string, any>;
 }
+
+/**
+ * Turn allowance for an agent that declares no `maxTurns`. Shared by both
+ * runtimes so the implicit ceiling cannot drift between them.
+ */
+export const DEFAULT_MAX_TURNS = 100;
 
 // ---- Capability predicates ----
 //

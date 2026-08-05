@@ -19,7 +19,7 @@ import { randomUUID } from 'node:crypto';
 import { query } from '../runtime/claude/sdk.js';
 import type { Agent } from './agent.js';
 import type { Task } from '../tasks/task.js';
-import { isRepoAgent, isPmAgent } from '../types/agent.js';
+import { isRepoAgent, isPmAgent, DEFAULT_MAX_TURNS } from '../types/agent.js';
 import { buildCommitAuthorEnv } from './commit-author.js';
 import { resolveAgentModel, resolveAgentEffort } from './model-label.js';
 import { linkAgentSkills } from './skill-linking.js';
@@ -737,7 +737,7 @@ export async function spawnAgent(agent: Agent, task: Task): Promise<void> {
     },
     resume: sessionId,
     abortController,
-    maxTurns: def.maxTurns ?? 100,
+    maxTurns: def.maxTurns ?? DEFAULT_MAX_TURNS,
     ...(effort ? { effort } : {}),
     permissionMode: 'bypassPermissions' as const,
     allowDangerouslySkipPermissions: true,

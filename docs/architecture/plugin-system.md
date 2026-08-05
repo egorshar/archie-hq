@@ -171,7 +171,7 @@ Fields:
 - **`expertise`** (string): Detailed expertise description, used in the agent's own prompt
 - **`model`** (string, optional): Model override. Defaults applied at spawn time in `src/agents/spawn.ts`: `opus` for the PM track, `sonnet` for repo and plugin tracks
 - **`effort`** (`'low' | 'medium' | 'high' | 'xhigh' | 'max'`, optional): Reasoning effort level passed to the SDK
-- **`maxTurns`** (number, optional): Cap on agentic turns per query (defaults to 100)
+- **`maxTurns`** (number, optional): Cap on agentic turns — API round-trips — before the agent is stopped (defaults to 100). A safety net against a turn that never decides it is done, honoured by both runtimes but over different spans: the Claude SDK counts across the whole streamed query (the agent's lifetime in the task), the opencode runtime counts per prompt, so each brief starts with a fresh allowance. Exceeding it ends the turn as an error, and the task's recovery loop re-engages the agent
 - **`metadata.archie.repo`** (object, optional): If present with a `github` field, classifies the agent as a repo agent with `github` (repo identifier) and optional `baseBranch`
 - **`mcpServers`** (string[], optional): MCP server names from the root `.mcp.json` that this agent should have access to
 - **`tools`** (string[], optional): Tool allowlist. When omitted, the SDK runs with `bypassPermissions` and all built-in/MCP tools are available; when set, it restricts the agent to exactly the listed entries (so MCP wildcards must be added explicitly)

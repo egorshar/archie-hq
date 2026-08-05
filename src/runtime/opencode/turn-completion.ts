@@ -24,6 +24,10 @@ interface Waiter {
   resolve: (text: string) => void;
   reject: (err: Error) => void;
   text: string[];
+  /** Round-trips this turn may spend; undefined = unbudgeted. */
+  maxTurns?: number;
+  /** Assistant message ids seen — one id is one round-trip, however often it updates. */
+  steps: Set<string>;
 }
 
 export class TurnCompletionRegistry {
@@ -35,16 +39,43 @@ export class TurnCompletionRegistry {
    * If a waiter is already pending for the session it is superseded (resolved
    * empty) so no promise is left dangling.
    */
-  waitForTurn(sessionId: string): Promise<string> {
+  waitForTurn(sessionId: string, maxTurns?: number): Promise<string> {
     this.cancelTurn(sessionId, 'superseded by a new turn');
     return new Promise<string>((resolve, reject) => {
-      this.waiters.set(sessionId, { resolve, reject, text: [] });
+      this.waiters.set(sessionId, { resolve, reject, text: [], maxTurns, steps: new Set() });
     });
   }
 
   /** Append a streamed assistant text chunk to the pending turn (no-op if none). */
   appendText(sessionId: string, text: string): void {
     this.waiters.get(sessionId)?.text.push(text);
+  }
+
+  /**
+   * Record one assistant message against the pending turn's step budget.
+   *
+   * An assistant message is one API round-trip, and `message.updated` fires
+   * repeatedly for the same message as it streams — so the id, not the event,
+   * is the unit. Returns true EXACTLY ONCE, on the step that takes the turn
+   * over its allowance: the waiter is rejected here, and the caller must abort
+   * the session server-side. Rejecting alone would only unblock Archie —
+   * opencode would carry on driving the turn, still spending tokens.
+   *
+   * False for an unbudgeted turn, an unknown session, a repeat of a step
+   * already counted, and every call after the breach (the session is aborted
+   * once).
+   */
+  noteAssistantStep(sessionId: string, messageId: string): boolean {
+    const w = this.waiters.get(sessionId);
+    if (!w || w.maxTurns === undefined) return false;
+    if (w.steps.has(messageId)) return false;
+    w.steps.add(messageId);
+    if (w.steps.size <= w.maxTurns) return false;
+    this.failTurn(
+      sessionId,
+      new Error(`opencode turn exceeded its step budget (maxTurns=${w.maxTurns} API round-trips)`),
+    );
+    return true;
   }
 
   /** session.idle: resolve the pending turn with its accumulated text (no-op if none). */
