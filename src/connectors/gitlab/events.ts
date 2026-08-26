@@ -104,7 +104,8 @@ async function maybeRefreshCrCards(objectKind: string, payload: Record<string, u
   }, CARD_REFRESH_DEBOUNCE_MS));
 }
 
-async function handleExistingTaskDirect(taskId: string, context: NormalizedEventContext): Promise<void> {
+/** Exported for the parity test that keeps this in step with the GitHub ingress. */
+export async function handleExistingTaskDirect(taskId: string, context: NormalizedEventContext): Promise<void> {
   const task = await Task.get(taskId);
 
   // Comment dedup for note events (guard against webhook redelivery), mirroring
@@ -132,5 +133,8 @@ async function handleExistingTaskDirect(taskId: string, context: NormalizedEvent
   }
 
   await appendGitHubEvent(taskId, context.repo, formatGitLabEvent(context));
-  await task.sendMessage(AGENT_PROMPTS.existingTask, 'pm-agent');
+  // Same prompt the GitHub ingress uses: it points the result at the repo agent
+  // that owns the branch, because PM has no `get_pr_checks` of its own to
+  // inspect with. The generic `existingTask` prompt read as news for PM to relay.
+  await task.sendMessage(AGENT_PROMPTS.githubInput, 'pm-agent');
 }
