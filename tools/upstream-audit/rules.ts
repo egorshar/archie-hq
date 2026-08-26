@@ -73,7 +73,9 @@ export const RULES: Rule[] = [
     why: 'New GitHub-only configuration key; GitLab may need a counterpart plus a line in assertBackendConfig().',
     lookAt: ['.env.example', 'src/system/backends.ts', 'docs/guides/gitlab-setup.md'],
     matchPath: /^\.env\.example$/,
-    matchAdded: /^GITHUB_[A-Z0-9_]+=/,
+    // Not just the GITHUB_ prefix: upstream ships GitHub-scoped keys under other
+    // names too (ARCHIE_GITHUB_LOGIN, ARCHIE_GITHUB_USER_ID).
+    matchAdded: /^[A-Z0-9_]*GITHUB_[A-Z0-9_]+=/,
   },
   {
     id: 'sdk-leak',

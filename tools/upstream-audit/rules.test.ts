@@ -66,6 +66,13 @@ describe('github-env', () => {
     expect(hits[0].evidence).toBe('GITHUB_ENTERPRISE_URL=https://ghe.example.com');
   });
 
+  test('flags a GitHub-scoped key that does not start with GITHUB_', () => {
+    const hits = scanDiff([file('.env.example', 'ARCHIE_GITHUB_LOGIN=archie-hq')], only('github-env'));
+
+    expect(hits).toHaveLength(1);
+    expect(hits[0].evidence).toBe('ARCHIE_GITHUB_LOGIN=archie-hq');
+  });
+
   test('ignores unrelated keys', () => {
     const hits = scanDiff([file('.env.example', 'SLACK_BOT_TOKEN=xoxb-...')], only('github-env'));
 
