@@ -5,9 +5,10 @@ vi.mock('../model.js', () => ({
   resolveOpencodeModel: vi.fn(() => ({ providerID: 'openrouter', modelID: 'z/glm' })),
 }));
 vi.mock('../../../system/plugin-loader.js', () => ({ getRootMcpConfig: () => ({ servers: { jira: { type: 'http', url: 'https://jira.example.com/mcp' } } }) }));
-vi.mock('../../../system/workdir.js', () => ({ WORKDIR: '/wd' }));
+vi.mock('../../../system/workdir.js', () => ({ WORKDIR: '/wd', CACHES_DIR: '/wd/caches' }));
 
 import { buildChildSandboxProfile, buildOneShotSandboxProfile, agentHomeDir, PROVIDER_EGRESS_HOSTS, PROVIDER_ENV_KEYS } from '../child-sandbox.js';
+import { TRUSTED_PACKAGE_REGISTRY_DOMAINS } from '../../../agents/sandbox.js';
 
 const fakeProxy = () => ({ url: 'http://127.0.0.1:9', mintCredential: () => ({ username: 'u', password: 'p' }), revokeCredential: () => {}, close: async () => {} });
 const agent = (over: any = {}) => ({
@@ -28,6 +29,15 @@ describe('buildChildSandboxProfile allowlist', () => {
       'openrouter.ai', 'github.com', 'registry.npmjs.org', 'registry.yarnpkg.com', 'jira.example.com', 'plugin.example.com',
     ]));
   });
+  // Asserted over the whole shared constant, not a sample of it: the two sandboxes
+  // are separate implementations of one policy, and upstream widening that list is
+  // exactly the drift a hardcoded sample would let through unnoticed.
+  it('carries EVERY registry the Claude sandbox trusts, so widening that list reaches opencode too', () => {
+    const p = buildChildSandboxProfile({ agent: agent(), task, cwd: '/clone', editAllowed: true, maxMode: false, proxy: fakeProxy() });
+
+    expect(p.allowlist).toEqual(expect.arrayContaining([...TRUSTED_PACKAGE_REGISTRY_DOMAINS]));
+  });
+
   it('read-only repo agent: NO package registries (parity with the Claude sandbox)', () => {
     const p = buildChildSandboxProfile({ agent: agent(), task, cwd: '/clone', editAllowed: false, maxMode: false, proxy: fakeProxy() });
     expect(p.allowlist).not.toContain('registry.npmjs.org');
@@ -53,6 +63,26 @@ describe('buildChildSandboxProfile env pruning', () => {
     expect(p.env.HTTPS_PROXY).toContain('127.0.0.1');
     expect(p.env.NO_PROXY).toContain('127.0.0.1');
     expect(p.env.SLACK_BOT_TOKEN).toBeUndefined();
+  });
+});
+
+describe('buildChildSandboxProfile package-manager cache', () => {
+  // The Claude sandbox points npm/yarn/corepack at the shared CACHES_DIR. Without the
+  // same vars the opencode child falls back to $HOME — writable here, so nothing errors,
+  // but every child then warms its own cache and the shared one it already rw-binds
+  // goes unused.
+  it('points package managers at the shared cache dir, the same one the Claude path uses', () => {
+    const p = buildChildSandboxProfile({ agent: agent(), task, cwd: '/clone', editAllowed: true, maxMode: false, proxy: fakeProxy() });
+
+    expect(p.env.npm_config_cache).toBe('/wd/caches/npm');
+    expect(p.env.YARN_CACHE_FOLDER).toBe('/wd/caches/yarn');
+    expect(p.env.COREPACK_HOME).toBe('/wd/caches/corepack');
+  });
+
+  it('keeps HOME per-agent, so the cache vars redirect the cache without moving the home', () => {
+    const p = buildChildSandboxProfile({ agent: agent(), task, cwd: '/clone', editAllowed: true, maxMode: false, proxy: fakeProxy() });
+
+    expect(p.env.HOME).toBe(agentHomeDir('t1', 'backend'));
   });
 });
 

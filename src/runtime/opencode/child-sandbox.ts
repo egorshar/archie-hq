@@ -19,7 +19,7 @@ import type { Agent } from '../../agents/agent.js';
 import type { Task } from '../../tasks/task.js';
 import { WORKDIR } from '../../system/workdir.js';
 import { resolveAgentOpencodeModel, resolveOpencodeModel } from './model.js';
-import { TRUSTED_PACKAGE_REGISTRY_DOMAINS } from '../../agents/sandbox.js';
+import { TRUSTED_PACKAGE_REGISTRY_DOMAINS, buildPackageManagerCacheEnv } from '../../agents/sandbox.js';
 import { getRootMcpConfig } from '../../system/plugin-loader.js';
 import { isRepoAgent } from '../../types/agent.js';
 import type { EgressProxyHandle } from './egress-proxy.js';
@@ -206,16 +206,24 @@ function declaredMcpHosts(def: Agent['def']): string[] {
 
 const BASE_ENV_KEYS = ['PATH', 'TERM', 'LANG', 'TZ'];
 
-/** Compose the pruned child env: base vars + LC_*, the per-agent HOME/XDG,
- * the proxy vars, and ONLY the route provider's key(s). Orchestrator secrets
- * (Slack/GitHub tokens) are dropped. OPENCODE_CONFIG_CONTENT is added by
- * startEmbeddedServer from config. */
+/** Compose the pruned child env: base vars + LC_*, the per-agent HOME/XDG, the
+ * package-manager cache vars, the proxy vars, and ONLY the route provider's
+ * key(s). Orchestrator secrets (Slack/GitHub tokens) are dropped.
+ * OPENCODE_CONFIG_CONTENT is added by startEmbeddedServer from config. */
 function buildChildEnv(providerID: string, homeDir: string, proxy: { url: string; noProxy: string }, cred: { username: string; password: string }): Record<string, string> {
   const env: Record<string, string> = {};
   for (const k of BASE_ENV_KEYS) if (process.env[k] != null) env[k] = process.env[k]!;
   for (const [k, v] of Object.entries(process.env)) if (k.startsWith('LC_') && v != null) env[k] = v;
   env.HOME = homeDir;
   env.XDG_DATA_HOME = homeDir;
+  // Share the package-manager cache with the Claude path instead of letting each
+  // child warm its own under $HOME. Nothing errors without this here — unlike the
+  // Claude sandbox, HOME is a writable per-agent dir, so there is no EROFS to avoid
+  // — but CACHES_DIR is already rw-bound for every agent and would otherwise sit
+  // unused while every child re-downloads what the last one fetched. Set from the
+  // shared builder rather than re-derived, so "where do package managers cache" has
+  // one answer for both runtimes.
+  Object.assign(env, buildPackageManagerCacheEnv());
   for (const key of (PROVIDER_ENV_KEYS[providerID] ?? [])) if (process.env[key] != null) env[key] = process.env[key]!;
   const withCreds = proxy.url.replace('http://', `http://${cred.username}:${cred.password}@`);
   env.HTTP_PROXY = withCreds; env.HTTPS_PROXY = withCreds; env.http_proxy = withCreds; env.https_proxy = withCreds;
