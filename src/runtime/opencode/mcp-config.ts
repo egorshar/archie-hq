@@ -27,7 +27,12 @@ function translate(name: string, cfg: any): McpEntry | null {
     if (cfg.headers && typeof cfg.headers === 'object') entry.headers = cfg.headers;
     return entry;
   }
-  if (type === 'stdio') {
+  // `type` is optional in the MCP stdio form: the Claude SDK treats any entry with a
+  // `command` as stdio, and plugin authors write them that way (the shipped gatecheck
+  // fixture has no `type` at all). Dispatching on `type` alone left every such server
+  // silently absent on opencode — present on the other runtime, missing here, with only
+  // a warn line to say so.
+  if (type === 'stdio' || (type === undefined && typeof cfg?.command === 'string')) {
     if (typeof cfg.command !== 'string') { logger.warn('opencode', `MCP "${name}": stdio entry has no command — skipped`); return null; }
     const entry: McpLocal = { type: 'local', command: [cfg.command, ...(Array.isArray(cfg.args) ? cfg.args : [])] };
     if (cfg.env && typeof cfg.env === 'object') entry.environment = cfg.env;

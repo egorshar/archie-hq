@@ -35,6 +35,28 @@ describe('buildOpencodeMcpConfig', () => {
     expect(cfg.fs).toEqual({ type: 'local', command: ['npx', '-y', 'fs-mcp'], environment: { ROOT: '/x' } });
   });
 
+  // `type` is optional in the MCP stdio form, and the Claude SDK treats any entry
+  // carrying a `command` as stdio. Plugin authors write it that way — the shipped
+  // gatecheck fixture does — and dropping it left those servers silently absent on
+  // opencode while working fine on the other runtime.
+  it('treats a command-bearing entry with no type as stdio, the way the Claude path does', async () => {
+    (getRootMcpConfig as any).mockReturnValue({ servers: {
+      gatecheck: { command: 'node', args: ['/workdir/plugins/gatecheck/server.mjs'] },
+    }});
+
+    const cfg = await buildOpencodeMcpConfig();
+
+    expect(cfg.gatecheck).toEqual({ type: 'local', command: ['node', '/workdir/plugins/gatecheck/server.mjs'] });
+  });
+
+  it('still skips a typeless entry that carries no command either', async () => {
+    (getRootMcpConfig as any).mockReturnValue({ servers: { bad: { description: 'nothing runnable' } } });
+
+    const cfg = await buildOpencodeMcpConfig();
+
+    expect(cfg.bad).toBeUndefined();
+  });
+
   it('skips a malformed entry without throwing', async () => {
     (getRootMcpConfig as any).mockReturnValue({ servers: { bad: { type: 'nonsense' }, ok: { type: 'sse', url: 'u' } } });
     const cfg = await buildOpencodeMcpConfig();
