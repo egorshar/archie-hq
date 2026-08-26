@@ -5,8 +5,8 @@
  */
 
 import { createHash } from 'node:crypto';
-import { query } from '@anthropic-ai/claude-agent-sdk';
 import { z, toJSONSchema } from 'zod';
+import { getLlmOneShot } from '../../system/backends.js';
 import { logger } from '../../system/logger.js';
 
 /** Pins at or below this length are indexed verbatim — no model call. */
@@ -95,66 +95,44 @@ export async function summarisePinText(raw: string): Promise<{ summary: string; 
   if (text.length <= VERBATIM_MAX) return { summary: text, source: 'verbatim' };
 
   try {
-    let result: z.infer<typeof SummarySchema> | null = null;
-    let sawResult = false;
-
     const prompt = `Write a one-line index entry for the following pinned Slack message.
 
 ${text}
 
 Respond with JSON only.`;
 
-    for await (const event of query({
+    // Through the LlmOneShot port rather than the SDK directly: the same call has to
+    // work under AGENT_RUNTIME=opencode, and the port already owns the plumbing this
+    // used to carry inline (executable, pruned env, CA-trust forwarding).
+    const raw = await getLlmOneShot().json({
       prompt,
-      options: {
-        model: 'haiku',
-        systemPrompt: SYSTEM_PROMPT,
-        executable: 'node',
-        env: {
-          NODE_ENV: process.env.NODE_ENV || 'development',
-          ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
-          // Forward CA-trust to the spawned CLI (TLS-intercepting proxy); no-op when unset.
-          ...(process.env.NODE_USE_SYSTEM_CA ? { NODE_USE_SYSTEM_CA: process.env.NODE_USE_SYSTEM_CA } : {}),
-          ...(process.env.NODE_EXTRA_CA_CERTS ? { NODE_EXTRA_CA_CERTS: process.env.NODE_EXTRA_CA_CERTS } : {}),
-          PATH: process.env.PATH,
-        },
-        tools: [],
-        maxTurns: 2,
-        outputFormat: {
-          type: 'json_schema',
-          schema: summaryJsonSchema,
-        },
-      },
-    })) {
-      if (event.type !== 'result') continue;
-      sawResult = true;
-      if (event.subtype === 'success') {
-        const parsed = SummarySchema.safeParse(event.structured_output);
-        if (parsed.success) {
-          result = parsed.data;
-        } else {
-          logger.warn('pin-summary', `schema validation failed: ${parsed.error.message}`);
-        }
+      systemPrompt: SYSTEM_PROMPT,
+      model: 'haiku',
+      maxTurns: 2,
+      jsonSchema: summaryJsonSchema as unknown as Record<string, unknown>,
+    });
+
+    let result: z.infer<typeof SummarySchema> | null = null;
+    if (raw === null) {
+      // The port answers null for every unsuccessful call, so the two failures the SDK
+      // told apart — a failed result subtype, and a stream that ended without a result
+      // event — arrive here as one. Both still get a log line rather than degrading in
+      // silence, which is what let five distinct failure modes hide.
+      logger.warn('pin-summary', 'no usable result from the haiku one-shot');
+    } else {
+      const parsed = SummarySchema.safeParse(raw);
+      if (parsed.success) {
+        result = parsed.data;
       } else {
-        logger.warn('pin-summary', `haiku call failed: ${event.subtype}`);
+        logger.warn('pin-summary', `schema validation failed: ${parsed.error.message}`);
       }
     }
 
     // An empty summary passes the schema — `z.string()` accepts "" — so it has to be
-    // caught here rather than by validation. This branch also catches a stream that ended
-    // without a result event at all, so it warns for itself: the two `logger.warn` calls
-    // above sit on paths that never reach here, and QA found five distinct failure modes
-    // degrading through this line without leaving a single log entry.
+    // caught here rather than by validation.
     const summary = result ? normalisePinText(truncateTo(unwrapJsonSummary(result.summary))) : '';
     if (!summary) {
-      // Three distinct reasons land here and they are worth telling apart: the model
-      // answered with nothing, it answered in a shape the schema rejected (already warned
-      // above), or the stream ended without a result event at all.
-      logger.warn('pin-summary', result
-        ? 'model returned an empty summary'
-        : sawResult
-          ? 'no usable summary in the result event'
-          : 'no result event from the haiku call');
+      if (result) logger.warn('pin-summary', 'model returned an empty summary');
       return { summary: truncateTo(text), source: 'verbatim' };
     }
     return { summary, source: 'model' };

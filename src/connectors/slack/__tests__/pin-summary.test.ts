@@ -1,9 +1,9 @@
 /**
  * Unit tests for the pinned-message summariser.
  *
- * Mocks the Claude Agent SDK's query() with an async generator and asserts:
+ * Mocks the LlmOneShot port — the seam both runtimes resolve through — and asserts:
  * - short pins are verbatim and never reach the model
- * - long pins take exactly one Haiku call with structured output
+ * - long pins take exactly one Haiku call with a JSON schema
  * - every model failure mode degrades to the truncated original, never to nothing
  * - normalisePinText / digestOf behaviour
  */
@@ -11,21 +11,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const state = vi.hoisted(() => ({
-  queryEvents: [] as any[],
-  queryShouldThrow: false,
-  lastQueryArgs: null as any,
+  json: null as any,
 }));
 
-vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
-  query: vi.fn((args: any) => {
-    state.lastQueryArgs = args;
-    if (state.queryShouldThrow) {
-      throw new Error('boom');
-    }
-    return (async function* () {
-      for (const e of state.queryEvents) yield e;
-    })();
-  }),
+vi.mock('../../../system/backends.js', () => ({
+  getLlmOneShot: () => ({ kind: 'claude' as const, text: vi.fn(), json: state.json }),
 }));
 
 vi.mock('../../../system/logger.js', () => ({
@@ -33,23 +23,20 @@ vi.mock('../../../system/logger.js', () => ({
 }));
 
 import { summarisePinText, normalisePinText, digestOf, truncateTo, unwrapJsonSummary, VERBATIM_MAX } from '../pin-summary.js';
-import { query } from '@anthropic-ai/claude-agent-sdk';
 import { logger } from '../../../system/logger.js';
 const warnSpy = logger.warn as unknown as ReturnType<typeof vi.fn>;
 
-function successEvent(summary: string): any {
-  return { type: 'result', subtype: 'success', structured_output: { summary } };
+/** The port's structured return for a successful call. */
+function structured(summary: string): any {
+  return { summary };
 }
 
 /** A pin comfortably over the verbatim threshold. */
 const LONG = 'The release runbook lives in Notion and every deploy must follow it step by step. '.repeat(5);
 
 beforeEach(() => {
-  state.queryEvents = [];
-  state.queryShouldThrow = false;
-  state.lastQueryArgs = null;
+  state.json = vi.fn().mockResolvedValue(null);
   warnSpy.mockClear();
-  (query as any).mockClear();
 });
 
 describe('summarisePinText', () => {
@@ -58,23 +45,26 @@ describe('summarisePinText', () => {
     const out = await summarisePinText(short);
 
     expect(out).toEqual({ summary: short, source: 'verbatim' });
-    expect(query).not.toHaveBeenCalled();
+    expect(state.json).not.toHaveBeenCalled();
   });
 
-  it('summarises long text with one haiku call using json_schema output', async () => {
-    state.queryEvents = [successEvent('Release runbook lives in Notion and gates every deploy')];
+  it('summarises long text with one haiku call carrying the pin JSON schema', async () => {
+    state.json.mockResolvedValue(structured('Release runbook lives in Notion and gates every deploy'));
 
     const out = await summarisePinText(LONG);
 
-    expect(query).toHaveBeenCalledTimes(1);
-    expect(state.lastQueryArgs.options.model).toBe('haiku');
-    expect(state.lastQueryArgs.options.outputFormat?.type).toBe('json_schema');
+    expect(state.json).toHaveBeenCalledTimes(1);
+    const req = state.json.mock.calls[0][0];
+    expect(req.model).toBe('haiku');
+    expect(req.jsonSchema).toBeTypeOf('object');
     expect(out.source).toBe('model');
     expect(out.summary).toBe('Release runbook lives in Notion and gates every deploy');
   });
 
-  it('falls back to the truncated original on a non-success result subtype', async () => {
-    state.queryEvents = [{ type: 'result', subtype: 'error_during_execution' }];
+  // The port answers null for every unsuccessful call — a failed subtype and a stream
+  // that ended without a result event are one case on this side of the seam.
+  it('falls back to the truncated original when the one-shot yields nothing', async () => {
+    state.json.mockResolvedValue(null);
 
     const out = await summarisePinText(LONG);
 
@@ -85,7 +75,7 @@ describe('summarisePinText', () => {
   });
 
   it('falls back to the truncated original when structured output misses the schema', async () => {
-    state.queryEvents = [{ type: 'result', subtype: 'success', structured_output: { nope: 1 } }];
+    state.json.mockResolvedValue({ nope: 1 });
 
     const out = await summarisePinText(LONG);
 
@@ -94,8 +84,8 @@ describe('summarisePinText', () => {
     expect(warnSpy).toHaveBeenCalled();
   });
 
-  it('falls back to the truncated original when query() throws', async () => {
-    state.queryShouldThrow = true;
+  it('falls back to the truncated original when the one-shot throws', async () => {
+    state.json.mockRejectedValue(new Error('boom'));
 
     const out = await summarisePinText(LONG);
 
@@ -107,7 +97,7 @@ describe('summarisePinText', () => {
   it('returns an empty verbatim summary for blank input', async () => {
     const out = await summarisePinText('   \n  ');
     expect(out).toEqual({ summary: '', source: 'verbatim' });
-    expect(query).not.toHaveBeenCalled();
+    expect(state.json).not.toHaveBeenCalled();
   });
 });
 
@@ -147,7 +137,7 @@ describe('summarisePinText — empty model output', () => {
   it('falls back to truncation when the model returns a blank summary', async () => {
     // `z.string()` accepts "", so this passes schema validation and would otherwise
     // render as a pin with no index line at all.
-    state.queryEvents = [successEvent('   ')];
+    state.json.mockResolvedValue(structured('   '));
     const out = await summarisePinText(LONG);
     expect(out.source).toBe('verbatim');
     expect(out.summary.length).toBeGreaterThan(0);
@@ -155,10 +145,11 @@ describe('summarisePinText — empty model output', () => {
     expect(warnSpy).toHaveBeenCalled();
   });
 
-  // A stream that ends with no result event degrades down the same branch. It used to do
-  // so in complete silence, which is how five distinct failure modes stayed invisible.
-  it('warns when the stream yields no result event at all', async () => {
-    state.queryEvents = [];
+  // The silent-degradation regression: this branch used to log nothing at all, which is
+  // how five distinct failure modes stayed invisible. The port collapses two of them into
+  // a null, so the warning is the only thing left that tells them apart from a good run.
+  it('warns when the one-shot returns nothing', async () => {
+    state.json.mockResolvedValue(null);
     const out = await summarisePinText(LONG);
     expect(out.source).toBe('verbatim');
     expect(out.summary.endsWith('…')).toBe(true);
@@ -186,7 +177,7 @@ describe('unwrapJsonSummary', () => {
   });
 
   it('is applied to the model summary end to end', async () => {
-    state.queryEvents = [successEvent('{"entry": "Release runbook lives in Notion"}')];
+    state.json.mockResolvedValue(structured('{"entry": "Release runbook lives in Notion"}'));
     const out = await summarisePinText(LONG);
     expect(out.source).toBe('model');
     expect(out.summary).toBe('Release runbook lives in Notion');

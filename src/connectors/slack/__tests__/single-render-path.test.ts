@@ -22,14 +22,14 @@ vi.mock('@slack/web-api', () => ({
   WebClient: vi.fn(function (this: unknown) { return slackApi; }),
 }));
 
-// The title generator's only outbound call is the Haiku query. Capturing the prompt is how the transcript it built becomes assertable — the transcript itself is internal to the module, by design.
-const sdk = vi.hoisted(() => ({ lastPrompt: '' }));
-vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
-  query: vi.fn((args: { prompt: string }) => {
-    sdk.lastPrompt = args.prompt;
-    return (async function* () {
-      yield { type: 'result', subtype: 'success', structured_output: { title: 'Expired feature flags' } };
-    })();
+// Every model call on the paths under test goes through the LlmOneShot port, so the port
+// is what gets stubbed. Nothing here asserts on a prompt any more — the title generator's
+// transcript is asserted directly, and the pin summariser's own tests cover its request.
+vi.mock('../../../system/backends.js', () => ({
+  getLlmOneShot: () => ({
+    kind: 'claude' as const,
+    text: vi.fn().mockResolvedValue(null),
+    json: vi.fn().mockResolvedValue(null),
   }),
 }));
 
@@ -147,7 +147,6 @@ function makeTrigger(contains?: string): Trigger {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  sdk.lastPrompt = '';
 
   slackApi.auth.test.mockResolvedValue({
     user_id: OUR_BOT_USER, bot_id: OUR_BOT_ID, team_id: 'THOME', url: 'https://acme.slack.com',
