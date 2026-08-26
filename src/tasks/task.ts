@@ -13,6 +13,7 @@ import { isPmAgent, isRepoAgent } from '../types/agent.js';
 import { modelDisplayLabel, modelChangingAgentIds } from '../agents/model-label.js';
 import { getAgentRuntime } from '../system/backends.js';
 import { prCardFingerprint, prCardTitlePlain } from '../system/pr-card-format.js';
+import { APPROVAL_TTL_MS, PENDING_APPROVAL_TTL_MS } from '../agents/tool-approval-gate.js';
 import { getGitHubClient } from '../connectors/github/client.js';
 import { createKeyedLock } from '../system/keyed-lock.js';
 
@@ -58,7 +59,8 @@ import { scheduleIdleCheck } from './recovery.js';
 import { scanAgentDefs, getAgentDef, getVisiblePeerIdsForSender, synthesizeDynamicAgentDef } from '../agents/registry.js';
 import type { AttachedRepo } from '../types/task.js';
 import { syncPlugins } from '../system/plugin-sync.js';
-import { postSlackMessage, postSlackFiles, postInteractiveToThread, postInteractiveToThreads, updateMessage, deleteMessage, buildPrCardBlocks, addReaction, removeReaction, getMessageReactions, buildThreadUrl, isExternalUser, formatSlackChannelRef, formatSlackChannelDisplay } from '../connectors/slack/client.js';
+import { postSlackMessage, postSlackFiles, postInteractiveToThread, postInteractiveToThreads, updateMessage, deleteMessage, buildPrCardBlocks, addReaction, removeReaction, getMessageReactions, buildThreadUrl, formatSlackChannelRef, formatSlackChannelDisplay } from '../connectors/slack/client.js';
+import { renderMessageBody, shouldRedact } from '../connectors/slack/message-body.js';
 import { basename } from 'path';
 import { AGENT_PROMPTS } from '../agents/prompts.js';
 import { logger } from '../system/logger.js';
@@ -101,6 +103,15 @@ const cardLock = createKeyedLock();
  * onto it, so exactly one set of agents ever spawns.
  */
 const activationLock = createKeyedLock();
+
+/**
+ * Per-task serialization for opening a task's own thread in its home channel.
+ *
+ * A task has exactly one thread, and an agent can emit two `post_to_user` calls in a single turn. Unserialized, both see no default channel, both root a top-level message, and the channel ends up showing two competing roots for one task with only one of them linked. Keyed by taskId at module scope so it also holds across separate `Task` instances built from disk for the same task.
+ *
+ * The lock is all the coordination needed because the open body re-checks for an existing thread first: whoever runs second finds the thread the first one linked and posts into it. An attempt that fails links nothing, so the next caller may legitimately try again — which is what makes a failed first post non-wedging rather than terminal.
+ */
+const homeThreadLock = createKeyedLock();
 
 // ---- Task class ----
 
@@ -334,19 +345,29 @@ export class Task {
 
     // Redaction policy: when the channel is shared and the message author is
     // external, drop content and don't download files. Author info is logged.
+    // The predicate lives in the shared render module so this call site cannot
+    // drift from the other paths that ask the same question.
     const writeMessage = async (msg: typeof thread.messages[number]): Promise<void> => {
-      const redact = thread.shared && isExternalUser(msg.user);
-      if (redact) {
+      const redacted = shouldRedact(msg, thread);
+      if (redacted) {
+        // Skipping the download is load-bearing, not an optimisation: a redacted
+        // message's files must never reach the task's attachments folder, since
+        // the body that would reference them is a placeholder.
         await appendSlackMessage(
-          this.taskId, thread.channel, thread.threadId, msg.user, '', undefined, undefined,
+          this.taskId, thread.channel, thread.threadId, msg.user,
+          renderMessageBody(msg, { redacted: true }),
           { redacted: true, ts: msg.ts },
         );
       } else {
         const downloadedFiles = msg.files ? await downloadMessageFiles(this.taskId, msg.files) : undefined;
+        // Render AFTER the download, from `downloadedFiles` rather than `msg.files`: only the
+        // downloaded copies carry `localPath`, and the `[Attachments: …]` suffix prints the path
+        // only when it is set — rendering earlier would silently strip every local path an agent
+        // needs to open the file.
         await appendSlackMessage(
-          this.taskId, thread.channel, thread.threadId, msg.user, msg.text,
-          downloadedFiles, msg.attachments,
-          { ts: msg.ts, reactions: msg.reactions },
+          this.taskId, thread.channel, thread.threadId, msg.user,
+          renderMessageBody({ ...msg, files: downloadedFiles }, { redacted }),
+          { ts: msg.ts },
         );
       }
     };
@@ -432,10 +453,11 @@ export class Task {
    * - No target: post to default_channel only
    * - target.channel: post to a specific already-linked thread
    *
-   * Opening new DMs/threads is intentionally not supported — the PM reaches
-   * other channels via the task-decoupled `post_to_channel` explore tool, which
-   * deliberately does NOT link them to this task. Always returns null (the
-   * return type is kept for call-site compatibility).
+   * Posts to `default_channel`, or to an already-linked thread via
+   * `target.channel`. For a trigger-fired task that has a `home_channel` and no
+   * channel yet, a message sent by an agent opens the task's own thread there
+   * (the message itself becomes the thread root) and returns its channel key —
+   * that is the only way a new thread is ever opened. Otherwise returns null.
    */
   async postToUser(message: string, agentName?: string, target?: PostTarget): Promise<string | null> {
     const sender = agentName || 'system';
@@ -459,6 +481,16 @@ export class Task {
       ? this.metadata.channels[this.metadata.default_channel]
       : null;
     if (!defaultCh) {
+      // A trigger-fired task starts with no thread: its first user-facing message becomes the root of
+      // the thread it will live in. `sender !== 'system'` is load-bearing, not defensive — `sender` is
+      // `agentName || 'system'`, and the internal callers that post without an agentName are operational
+      // notices (the inter-agent budget warning and the wall-clock pause message). Letting one of those
+      // open the thread would make the root a preamble about the machinery rather than the result the
+      // trigger was created to deliver, which is exactly what this feature exists to avoid. So only an
+      // agent's own message may open a task's thread; a system notice with nowhere to go is still dropped.
+      if (this.metadata.home_channel && sender !== 'system') {
+        return this.openHomeThread(message, sender, footer);
+      }
       logger.warn('task', `postToUser called on task ${this.taskId} with no default channel — message dropped`);
       return null;
     }
@@ -469,6 +501,56 @@ export class Task {
       this.logOutgoingMessage(sender, message, 'cli', undefined, footer);
     }
     return null;
+  }
+
+  /**
+   * Post `message` as a new top-level message in the task's home channel and adopt that message as the task's thread, so every human reply to it routes back to this task instead of starting a new one.
+   *
+   * The message is the thread root: nothing is posted ahead of it. Only reached from `postToUser` for a task that has a `home_channel` and no channel yet.
+   *
+   * Serialized per task by {@link homeThreadLock}, because a task has exactly one thread and an agent can emit two `post_to_user` calls in one turn. Whoever runs second finds the thread the first one linked and posts into it rather than rooting a second one beside it.
+   */
+  private async openHomeThread(message: string, sender: string, footer: string): Promise<string | null> {
+    return homeThreadLock(this.taskId, () => this.rootHomeThread(message, sender, footer));
+  }
+
+  /** The body of {@link openHomeThread}, run one at a time per task by it. */
+  private async rootHomeThread(message: string, sender: string, footer: string): Promise<string | null> {
+    const home = this.metadata.home_channel!;
+
+    // One thread per channel: if this task already has a thread in the home channel (a reply arrived
+    // and linked it, or a restart re-read it from disk while default_channel was still null), post
+    // into that thread rather than rooting a second one alongside it.
+    const existing = Object.entries(this.metadata.channels).find(
+      (entry): entry is [string, SlackChannel] => entry[1].type === 'slack' && entry[1].channel_id === home.channel_id,
+    );
+    if (existing) {
+      const [key, ch] = existing;
+      this.metadata.default_channel = key;
+      await postSlackMessage({ channel: ch.channel_id, threadTs: ch.thread_id, text: message, footer });
+      this.logOutgoingMessage(sender, message, Task.formatSlackDest(ch).display, ch, footer);
+      await this.save(true);
+      return key;
+    }
+
+    // No threadTs — this is a new top-level post in the channel, and its ts becomes the thread root.
+    const ts = await postSlackMessage({ channel: home.channel_id, text: message, footer });
+    if (!ts) {
+      // Dry-run mode returns undefined without ever reaching Slack, so there is no thread to link to.
+      // Log the message so it still surfaces, but leave the task threadless rather than inventing a key.
+      logger.warn('task', `openHomeThread on task ${this.taskId}: no message ts returned for channel ${home.channel_id} — nothing linked`);
+      this.logOutgoingMessage(sender, message, formatSlackChannelDisplay(home.channel_name), undefined, footer);
+      return null;
+    }
+
+    const key = this.linkSlackThread(home.channel_id, ts, home.channel_name);
+    const ch = this.metadata.channels[key] as SlackChannel;
+    this.logOutgoingMessage(sender, message, Task.formatSlackDest(ch).display, ch, footer);
+    // Flushed rather than debounced on purpose: this record is what routes every future human reply back
+    // to this task, and the message is already live in Slack. A crash in the debounce window would leave a
+    // thread nobody owns — replies to it would open a brand-new task, which is the bug this feature fixes.
+    await this.save(true);
+    return key;
   }
 
   /**
@@ -557,7 +639,7 @@ export class Task {
   async postInteractiveToUser(
     text: string,
     blocks: unknown[],
-    approvalType: 'edit_mode' | 'research_budget' | 'merge' | 'trigger' | 'max_mode',
+    approvalType: 'edit_mode' | 'research_budget' | 'merge' | 'trigger' | 'max_mode' | 'tool_call',
     channelKey?: string,
     context?: { github: string; pr_number: number },
     ref?: string,
@@ -929,10 +1011,11 @@ export class Task {
 
   /**
    * Link an existing Slack thread to this task and promote it to the default
-   * channel. Posts nothing — used by `fireTrigger` for channel-message triggers
-   * so the spawned PM replies in the triggering thread rather than opening a new
-   * one. Idempotent; mirrors the channel-registration shape used by `append`.
-   * Returns the channel key.
+   * channel. Posts nothing — this is how a task takes ownership of a thread it is
+   * about to speak in, so every human reply to that thread routes back here. Its
+   * only caller is `openHomeThread`, which links the thread it just rooted in the
+   * task's home channel. Idempotent; mirrors the channel-registration shape used
+   * by `append`. Returns the channel key.
    */
   linkSlackThread(channelId: string, threadTs: string, channelName: string): string {
     const key = `slack:${channelId}:${threadTs}`;
@@ -1456,6 +1539,312 @@ export class Task {
 
     this.debouncedSave();
     await appendAgentFinding(this.taskId, 'system', 'Merge denied by user — PR not merged', 'decision');
+    await this.sendMessage(AGENT_PROMPTS.existingTask, 'pm-agent');
+    return 'resolved';
+  }
+
+
+  // ---- MCP tool-call approvals ---------------------------------------------
+  // The gate itself lives in agents/tool-approval-gate.ts; this section owns
+  // the metadata invariants it depends on. See docs/architecture/tool-approvals.md.
+
+  /**
+   * Spend a grant for `digest`.
+   *
+   * **Synchronous read-compare-remove, no awaits.** The gate hook calls this on
+   * every gated tool call, so two calls with the same digest in one turn must
+   * not both find the grant — the splice has to land before anything can yield.
+   * (Same invariant as `handleMergeApproval`'s clear-before-awaits.)
+   *
+   * The *spend* is then flushed durably before the caller proceeds, which is
+   * why this returns a promise on the spend path. Durability is inverted for a
+   * single-use token: losing the grant write costs an extra approval prompt,
+   * but losing the spend write means a crash — after the tool call has already
+   * run — leaves the grant on disk, unexpired and spendable a second time. The
+   * splice above is what has to be synchronous; awaiting the write afterwards
+   * costs one fsync on a path that is about to make a network call anyway.
+   */
+  consumeToolApproval(digest: string): boolean | Promise<boolean> {
+    const grants = this.metadata.approved_tool_calls;
+    if (!grants || grants.length === 0) return false;
+
+    const now = Date.now();
+    const index = grants.findIndex((a) => a.digest === digest && Date.parse(a.expires_at) > now);
+    // Prune anything stale while we're here — an unspent grant is a standing
+    // permission, so it should not outlive its window on disk.
+    const live = grants.filter((a, i) => i !== index && Date.parse(a.expires_at) > now);
+
+    if (index === -1) {
+      if (live.length !== grants.length) {
+        this.metadata.approved_tool_calls = live;
+        this.debouncedSave();
+      }
+      return false;
+    }
+
+    this.metadata.approved_tool_calls = live;
+
+    // Record that the grant was actually *spent* — without this the audit trail
+    // stops at "approved" and nobody can tell from the thread whether the call
+    // ever ran. Fire-and-forget: a failed log write must not block the call.
+    const spent = grants[index];
+    void appendAgentFinding(
+      this.taskId,
+      'system',
+      `Gated tool call ran on approval ${spent.digest}: ${spent.server}:${spent.tool}` +
+        (spent.approved_by ? ` (approved by <@${spent.approved_by}>)` : ''),
+      'completion',
+    ).catch(() => {});
+
+    // A failed flush is not a reason to refuse a call a human approved — the
+    // cost of that write being lost is a possible replay, which is strictly
+    // less bad than denying an approved action. Log and proceed.
+    return this.save(true)
+      .catch((error) => logger.warn('task', `Failed to flush spent tool-call grant ${digest}`, error))
+      .then(() => true);
+  }
+
+  /**
+   * Post a tool-call approval request and park the task.
+   *
+   * One outstanding request per task: a second gated call while one is pending
+   * is refused rather than queued, so a human never faces a stack of approval
+   * buttons to clear. There is no supersede path for a *live* request —
+   * superseding would let an agent swap the call out from under a human who is
+   * mid-way through reading it. Instead the slot ages out
+   * (PENDING_APPROVAL_TTL_MS), and a failed Slack post clears it.
+   */
+  async requestToolApproval(
+    agentId: string,
+    request: { digest: string; server: string; tool: string; summary: string; heading: string },
+  ): Promise<'posted' | 'already-pending'> {
+    // A pending request goes stale: nobody clicked, and a prompt raised against
+    // state that is now hours old should not keep blocking every other call for
+    // the rest of the task's life, nor mint a fresh grant if someone finds it
+    // days later. Past its window it is discarded and this request replaces it.
+    const pending = this.metadata.pending_tool_approval;
+    const live = pending && Date.parse(pending.requested_at) > Date.now() - PENDING_APPROVAL_TTL_MS
+      ? pending
+      : undefined;
+    if (live && live.digest !== request.digest) return 'already-pending';
+    // Same digest already pending: the agent retried before the human answered.
+    // Re-arm the park — the previous teardown has already fired, so returning
+    // without arming would leave the agent running against a prompt nobody has
+    // answered, free to try something else.
+    //
+    // Only the *requester* re-arms. A grant is bound to the call, not to the
+    // agent, so a second agent can reach this with the same digest — and both
+    // resolution paths clear the teardown of `requested_by` alone, so arming
+    // anyone else leaves a deferred stop() nothing will cancel: it fires at that
+    // agent's turn end and tears the task down while the requester's retry is
+    // in flight. Tell the other agent to wait instead.
+    if (live && live.requested_by !== agentId) return 'already-pending';
+    if (live) {
+      this.suspendStatus();
+      this.agentProcesses.get(agentId as AgentName)?.deferTeardown(() => this.stop());
+      return 'posted';
+    }
+
+    this.metadata.pending_tool_approval = {
+      digest: request.digest,
+      server: request.server,
+      tool: request.tool,
+      summary: request.summary,
+      heading: request.heading,
+      requested_by: agentId,
+      requested_at: new Date().toISOString(),
+    };
+
+    // Audit prose, fire-and-forget like the spent-finding: an awaited write here
+    // is one more way to leave the slot set with no prompt behind it.
+    void appendAgentFinding(
+      this.taskId,
+      'system',
+      `Tool-call approval requested: ${request.server}:${request.tool} — ${request.heading}`,
+      'decision',
+    ).catch(() => {});
+
+    const buttonValue = `${this.taskId}|${request.digest}`;
+    const blocks = [
+      {
+        type: 'section',
+        text: { type: 'mrkdwn', text: `*Approval needed:* ${request.summary}` },
+      },
+      {
+        type: 'context',
+        elements: [{
+          type: 'mrkdwn',
+          text: `Requested by \`${agentId}\` · approving runs this one call once`,
+        }],
+      },
+      {
+        type: 'actions',
+        elements: [
+          {
+            type: 'button',
+            text: { type: 'plain_text', text: 'Approve' },
+            action_id: 'approve_tool_call',
+            value: buttonValue,
+            style: 'primary',
+          },
+          {
+            type: 'button',
+            text: { type: 'plain_text', text: 'Deny' },
+            action_id: 'deny_tool_call',
+            value: buttonValue,
+            style: 'danger',
+          },
+        ],
+      },
+    ];
+
+    try {
+      // Flush before posting: the resolution arrives on a *different* instance
+      // (the task is about to stop and be reloaded by the button handler), so
+      // the slot must be on disk before the park, not 500ms later.
+      await this.save(true);
+      await this.postInteractiveToUser(
+        `Approve tool call: ${request.heading}?`,
+        blocks,
+        'tool_call',
+        undefined,
+        undefined,
+        request.digest,
+      );
+    } catch (error) {
+      // The slot's presence means "a prompt exists in Slack" — the same-digest
+      // re-arm branch and the one-at-a-time refusal both key off it. Anything
+      // that fails between setting it and the prompt landing must therefore
+      // clear it, or the task spends an hour refusing every call and a retry
+      // parks it against a button nobody can see. This catch covers the flush
+      // as well as the post for that reason. Rethrow so the gate's fail-closed
+      // wrapper denies this attempt.
+      this.metadata.pending_tool_approval = undefined;
+      await this.save(true).catch((saveError) =>
+        logger.warn('task', `Failed to clear the pending tool-approval slot`, saveError),
+      );
+      throw error;
+    }
+
+    // Park: freeze the status so the wind-down doesn't resurface "working…",
+    // and defer the stop to turn-end so stopping the queue doesn't close the
+    // input stream under this in-flight hook.
+    this.suspendStatus();
+    this.agentProcesses.get(agentId as AgentName)?.deferTeardown(() => this.stop());
+    return 'posted';
+  }
+
+  /**
+   * Resolve a pending tool-call approval (approve side).
+   *
+   * Same synchronous read-compare-clear identity gate as
+   * {@link handleMergeApproval}: a click whose digest doesn't match the slot is
+   * a stale no-op and can never authorize the call currently pending. On match
+   * the grant is *stored*, not executed — the agent spends it by retrying its
+   * own call, which keeps the action running through the same audited MCP path
+   * as everything else.
+   */
+  async handleToolCallApproval(
+    approver: { id: string; name: string } | undefined,
+    expectedDigest: string,
+  ): Promise<'resolved' | 'stale'> {
+    const pending = this.metadata.pending_tool_approval;
+    if (!pending || pending.digest !== expectedDigest) {
+      logger.warn(
+        'task',
+        `Stale tool-call approval for ${expectedDigest} on task ${this.taskId} — ` +
+        `slot ${pending ? `holds ${pending.digest}` : 'is empty'}`,
+      );
+      return 'stale';
+    }
+    // The Slack message never expires on its own, so a prompt found days later
+    // would otherwise resolve and mint a fresh spendable grant against state the
+    // approver never saw. Bound the render→click interval, not just grant→spend.
+    if (Date.parse(pending.requested_at) <= Date.now() - PENDING_APPROVAL_TTL_MS) {
+      logger.warn(
+        'task',
+        `Expired tool-call approval for ${expectedDigest} on task ${this.taskId} — requested ${pending.requested_at}`,
+      );
+      this.metadata.pending_tool_approval = undefined;
+      await this.save(true);
+      await appendAgentFinding(
+        this.taskId,
+        'system',
+        `Tool-call approval expired unspent: ${pending.server}:${pending.tool} — ${pending.heading}`,
+        'decision',
+      );
+      return 'stale';
+    }
+    this.metadata.pending_tool_approval = undefined;
+
+    // Dedupe on digest so two prompts for the same call cannot become two
+    // grants: "cannot be spent twice" has to hold per *call*, not per grant.
+    const now = new Date();
+    this.metadata.approved_tool_calls = [
+      ...(this.metadata.approved_tool_calls ?? []).filter((a) => a.digest !== pending.digest),
+      {
+        digest: pending.digest,
+        server: pending.server,
+        tool: pending.tool,
+        approved_by: approver?.id,
+        approved_at: now.toISOString(),
+        expires_at: new Date(now.getTime() + APPROVAL_TTL_MS).toISOString(),
+      },
+    ];
+
+    // Cancel the park armed by the gate hook on the requesting agent —
+    // approval means "continue", so the deferred stop must not fire and tear
+    // down the task we just approved.
+    this.agentProcesses.get(pending.requested_by as AgentName)?.clearPendingTeardown();
+
+    // Durable, not debounced: the agent's retry reads this from a reloaded
+    // instance, so the grant has to be on disk before the reactivation below.
+    await this.save(true);
+
+    const bySuffix = approver?.name ? ` by ${approver.name}` : '';
+    await appendAgentFinding(
+      this.taskId,
+      'system',
+      `Tool call approved${bySuffix}: ${pending.server}:${pending.tool} — ${pending.heading}`,
+      'decision',
+    );
+    // Wake the agent that owns the grant: only a byte-identical retry from the
+    // requester spends it, and routing through the PM alone adds a
+    // re-delegation hop to the TTL clock.
+    const requester = (pending.requested_by || 'pm-agent') as AgentName;
+    emitEvent('approval:resolved', this.taskId, { type: 'tool_call', approve: true });
+    await this.sendMessage(AGENT_PROMPTS.existingTask, requester);
+    return 'resolved';
+  }
+
+  /**
+   * Resolve a pending tool-call approval (deny side). Same identity gate;
+   * clears the slot and grants nothing. No grant is ever stored on this path.
+   */
+  async handleToolCallDenial(expectedDigest: string): Promise<'resolved' | 'stale'> {
+    const pending = this.metadata.pending_tool_approval;
+    if (!pending || pending.digest !== expectedDigest) {
+      logger.warn(
+        'task',
+        `Stale tool-call denial for ${expectedDigest} on task ${this.taskId} — ` +
+        `slot ${pending ? `holds ${pending.digest}` : 'is empty'}`,
+      );
+      return 'stale';
+    }
+    this.metadata.pending_tool_approval = undefined;
+
+    this.agentProcesses.get(pending.requested_by as AgentName)?.clearPendingTeardown();
+
+    // Durable, matching the approve path: a denial lost to a crash in the
+    // debounce window would leave the slot set and block every later call.
+    await this.save(true);
+    await appendAgentFinding(
+      this.taskId,
+      'system',
+      `Tool call denied by user: ${pending.server}:${pending.tool} — ${pending.heading}`,
+      'decision',
+    );
+    emitEvent('approval:resolved', this.taskId, { type: 'tool_call', approve: false });
     await this.sendMessage(AGENT_PROMPTS.existingTask, 'pm-agent');
     return 'resolved';
   }

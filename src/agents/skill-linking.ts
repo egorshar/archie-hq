@@ -7,7 +7,7 @@
  */
 import { rm, mkdir, readdir, stat, symlink } from 'fs/promises';
 import { existsSync } from 'fs';
-import { join } from 'path';
+import { join, basename } from 'path';
 import { safePathSegment } from '../system/path-safety.js';
 
 /**
@@ -46,6 +46,33 @@ export async function linkAgentSkills(agentSkillsDir: string, skillSources: stri
       if (!existsSync(target)) {
         await symlink(entryPath, target);
       }
+    }
+  }
+}
+
+/**
+ * (Re)build a skills dir from a list of INDIVIDUAL skill directories — the
+ * `skillPaths` model, where ordering and plugin-shadowing are already resolved
+ * upstream by the registry, so this only has to mount what it is given.
+ *
+ * Clear-and-rebuild for the same reason as {@link linkAgentSkills}: a stale or
+ * dangling link left by a different-workdir process slips an `existsSync` guard
+ * (existsSync FOLLOWS the link) and makes `symlink()` throw EEXIST. Within the
+ * fresh build the first entry to claim a name wins, which is what preserves the
+ * caller's ordering.
+ *
+ * A path is re-checked here rather than trusted: the list is a scan-time
+ * snapshot and the plugins clone can be reset between the scan and this call, so
+ * a since-removed skill would otherwise be mounted as a dangling link.
+ */
+export async function linkSkillDirs(agentSkillsDir: string, skillPaths: string[]): Promise<void> {
+  await rm(agentSkillsDir, { recursive: true, force: true });
+  await mkdir(agentSkillsDir, { recursive: true });
+  for (const skillPath of skillPaths) {
+    if (!existsSync(skillPath)) continue;
+    const target = join(agentSkillsDir, safePathSegment(basename(skillPath), 'skill name'));
+    if (!existsSync(target)) {
+      await symlink(skillPath, target);
     }
   }
 }

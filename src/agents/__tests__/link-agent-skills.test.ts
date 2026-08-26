@@ -12,7 +12,7 @@ import { mkdtemp, mkdir, symlink, writeFile, rm, readlink } from 'fs/promises';
 import { existsSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { linkAgentSkills } from '../skill-linking.js';
+import { linkAgentSkills, linkSkillDirs } from '../skill-linking.js';
 
 let tmp: string;
 beforeEach(async () => { tmp = await mkdtemp(join(tmpdir(), 'las-')); });
@@ -64,5 +64,49 @@ describe('linkAgentSkills', () => {
     await linkAgentSkills(skillsDir, [src]);
     await expect(linkAgentSkills(skillsDir, [src])).resolves.toBeUndefined();
     expect(await readlink(join(skillsDir, 'x'))).toBe(join(src, 'x'));
+  });
+});
+
+/**
+ * linkSkillDirs — the same builder for the `skillPaths` model upstream moved to:
+ * the list names individual skill directories rather than directories that
+ * contain skills, and the order is already resolved (plugin-first, deduped).
+ */
+describe('linkSkillDirs', () => {
+  it('mounts each named skill dir under its own basename', async () => {
+    const a = join(tmp, 'plugA', 'engineering');
+    const b = join(tmp, 'core', 'triggers');
+    await mkdir(a, { recursive: true });
+    await mkdir(b, { recursive: true });
+    const skillsDir = join(tmp, 'ws', '.claude', 'skills');
+
+    await linkSkillDirs(skillsDir, [a, b]);
+
+    expect(await readlink(join(skillsDir, 'engineering'))).toBe(a);
+    expect(await readlink(join(skillsDir, 'triggers'))).toBe(b);
+  });
+
+  it('keeps the first claim on a name, so an earlier entry shadows a later one', async () => {
+    const plugin = join(tmp, 'plugA', 'engineering');
+    const core = join(tmp, 'core', 'engineering');
+    await mkdir(plugin, { recursive: true });
+    await mkdir(core, { recursive: true });
+    const skillsDir = join(tmp, 'ws2', '.claude', 'skills');
+
+    await linkSkillDirs(skillsDir, [plugin, core]);
+
+    expect(await readlink(join(skillsDir, 'engineering'))).toBe(plugin);
+  });
+
+  it('skips a path that has since been removed instead of mounting a dangling link', async () => {
+    const gone = join(tmp, 'plugA', 'deleted-skill');
+    const kept = join(tmp, 'plugA', 'kept');
+    await mkdir(kept, { recursive: true });
+    const skillsDir = join(tmp, 'ws3', '.claude', 'skills');
+
+    await linkSkillDirs(skillsDir, [gone, kept]);
+
+    expect(existsSync(join(skillsDir, 'deleted-skill'))).toBe(false);
+    expect(await readlink(join(skillsDir, 'kept'))).toBe(kept);
   });
 });

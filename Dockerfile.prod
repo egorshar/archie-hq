@@ -45,6 +45,8 @@ RUN if [ "$AGENT_RUNTIME" = "opencode" ]; then \
 COPY tsconfig.json tsconfig.scripts.json ./
 COPY src/ ./src/
 COPY prompts/ ./prompts/
+# Core skills. src/agents/core-skills.ts resolves the core skills directory to /app/skills and its CORE_SKILL_MOUNTS manifest mounts each one per track, but only if the directory is actually there. Without this COPY it never is, and every core-skill `Skill` call fails with "Unknown skill".
+COPY skills/ ./skills/
 COPY scripts/ ./scripts/
 
 # Build TypeScript (main app, then the standalone git-askpass token helper)

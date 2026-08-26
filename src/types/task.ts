@@ -52,8 +52,10 @@ export interface SlackReaction {
 /** A fully-resolved message from a Slack thread */
 export interface SlackThreadMessage {
   user: SlackAuthor;
-  /** The author's own typed text (top-level blocks/text + file descriptions), mentions already resolved. */
-  text: string;
+  /**
+   * ONLY the author's own typed text — top-level blocks/text plus file descriptions, mentions already resolved. This is NOT the message body: the body comes from `renderMessageBody` / `messageBody` in `src/connectors/slack/message-body.ts`, which folds in attachment cards, the file list and reactions.
+   */
+  ownText: string;
   ts: string;
   files?: SlackFile[];    // raw file metadata (not yet downloaded)
   /** Forwarded / unfurled message attachments — each carries its author and text. */
@@ -68,7 +70,7 @@ export interface SlackThreadMessage {
  * `shared` is a thread-level signal: when true, the channel is currently
  * shared with one or more external workspaces (Slack Connect). Consumers use
  * `shared && isExternalUser(msg.user)` to decide whether to redact a message
- * when writing it out — the data layer never strips content itself.
+ * when writing it out — the data layer never strips content itself. Redaction covers the whole message body (`ownText` plus attachments, files and reactions), not just `ownText`.
  */
 export interface SlackThread {
   threadId: string;
@@ -280,6 +282,12 @@ export interface TaskMetadata {
   participants: AgentName[];
   channels: Record<string, Channel>;   // Active message delivery targets, keyed by channel ID
   default_channel: string | null;      // Channel ID of the originating channel (null for CLI-originated tasks)
+  /**
+   * The Slack channel a trigger-fired task is homed in. Written only by `fireTrigger`, from the binding on an approved trigger — never from a model input.
+   *
+   * It answers two questions for a task that has no thread yet: where the task opens its own thread (its first user-facing agent message becomes that thread's root), and whose standing context applies before that thread exists.
+   */
+  home_channel?: { channel_id: string; channel_name: string };
   title?: string;                      // AI-generated one-line summary; absent on pre-feature tasks
   slack_threads?: SlackThreadRef[];    // Legacy — only present on old tasks loaded from disk, removed after migration
   agent_sessions: Record<string, AgentSessionState | string>; // union handles legacy string values on disk
@@ -298,6 +306,19 @@ export interface TaskMetadata {
    * `Task.get`. Absent on tasks that never spawned one.
    */
   dynamic_agents?: DynamicAgentSpec[];
+  /**
+   * Channel ids whose standing brief `post_to_channel`'s preflight has already
+   * shown on this task. The first attempt to post into a channel with an `Archie…`
+   * canvas returns that brief instead of posting; the retry goes through, and every
+   * later post to the same channel skips the preflight entirely.
+   *
+   * Lives in metadata, not on the Agent, because the Agent's lifetime is shorter
+   * than the task's: a settled task leaves the active registry, and the next
+   * message rebuilds `Task` from disk with a fresh Agent — which would show the
+   * same brief again on every re-activation (observed live before this was moved).
+   * Once per task means once per task, restarts included.
+   */
+  briefed_channels?: string[];
   status: TaskStatus;
   edit_allowed?: boolean;     // Has user approved edit mode for this task?
   max_mode?: boolean;         // Has user approved "max mode" (per-task model/effort upgrade) for this task?
@@ -321,6 +342,28 @@ export interface TaskMetadata {
     requested_by: string; // agent id — to clear its parked teardown on resolution
     requested_at: string; // ISO 8601, for the audit finding
   };
+  /**
+   * The single pending MCP tool-call approval (written by the PreToolUse gate
+   * in `tool-approval-gate.ts`, cleared on resolution, on a failed Slack post,
+   * or by ageing out). One at a time by design: a queue of pending approvals
+   * invites clearing them in a batch, which is the accident the gate exists to
+   * stop.
+   */
+  pending_tool_approval?: {
+    digest: string;       // identity of the exact (server, tool, arguments) call
+    server: string;       // MCP server key, for the audit finding
+    tool: string;         // bare tool name
+    summary: string;      // rendered prompt body shown to the approver
+    heading: string;      // one-line heading (the tool's description, or server:tool)
+    requested_by: string; // agent id — woken on approval; park cleared on resolution
+    requested_at: string; // ISO 8601
+  };
+  /**
+   * Grants approved but not yet spent. Each is one-shot and bound to a digest
+   * of the exact call, so it cannot be redirected to a different call or
+   * replayed. Expired entries are pruned on read.
+   */
+  approved_tool_calls?: ApprovedToolCall[];
   research_budget_extra?: number;    // Additional research budget granted via Slack approval (+5 per approval)
   research_request_count?: number;   // Persisted research request count (survives stop/reactivate)
   failure_counter?: number;          // Consecutive recovery attempts (Stage 3 idle detection)
@@ -332,6 +375,20 @@ export interface TaskMetadata {
   pending_trigger_id?: string;       // Trigger ID proposed by this task, awaiting approve/deny (read by handleTriggerApproval/Denial)
   created_at: string;
   updated_at: string;
+}
+
+/**
+ * A human-approved, single-use permission to run one gated MCP tool call.
+ * Bound to `digest` — a hash of the server, tool and every argument — so it is
+ * spendable on that call and no other.
+ */
+export interface ApprovedToolCall {
+  digest: string;
+  server: string;
+  tool: string;
+  approved_by?: string;  // Slack user id of the approver, for the audit finding
+  approved_at: string;   // ISO 8601
+  expires_at: string;    // ISO 8601 — unspent grants go stale (APPROVAL_TTL_MS)
 }
 
 export interface LogEntry {

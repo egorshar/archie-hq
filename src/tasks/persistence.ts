@@ -8,15 +8,25 @@
 import { mkdir, readdir, readFile, writeFile, appendFile } from 'fs/promises';
 import { createReadStream, existsSync } from 'fs';
 import { createInterface } from 'readline';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import { join, resolve, relative, isAbsolute, sep } from 'path';
-import type { TaskMetadata, LogEntry, FindingType, SlackFile, SlackAttachment, SlackAuthor, SlackReaction } from '../types/index.js';
-import { isExternalUser } from '../connectors/slack/client.js';
+import type { TaskMetadata, LogEntry, FindingType, SlackFile, SlackAuthor } from '../types/index.js';
 import type { SystemEvent } from '../system/event-bus.js';
 import { activeTasks } from './task.js';
 import { SESSIONS_DIR } from '../system/workdir.js';
 import { emitEvent, onEvent } from '../system/event-bus.js';
 import { logger } from '../system/logger.js';
 import { formatSlackChannelRef, formatSlackChannelDisplay } from '../connectors/slack/client.js';
+
+const execFileAsync = promisify(execFile);
+
+/**
+ * Ceiling on a scan's stdout. Only matching paths are printed, so this is ~150
+ * bytes per hit — far more headroom than a needle broad enough to match the
+ * whole fleet would need, while still bounding a runaway.
+ */
+const MAX_SCAN_OUTPUT_BYTES = 32 * 1024 * 1024;
 
 /**
  * Generate a unique task ID with human-readable date format
@@ -227,7 +237,7 @@ function formatLogEntry(entry: LogEntry): string {
 
 /**
  * Build the `[Attachments: …]` suffix for a list of artifact paths.
- * Mirrors the inbound rendering at the bottom of `renderMessageForContext` so
+ * Mirrors the inbound rendering at the bottom of `renderMessageBody` (`src/connectors/slack/message-body.ts`) so
  * outgoing messages with attachments look symmetric in the knowledge log.
  * Returns an empty string when there are no paths.
  */
@@ -244,81 +254,19 @@ export function renderAttachmentsSuffix(artifactPaths: readonly string[]): strin
 }
 
 /**
- * Render the body of a Slack message for context (knowledge log, title generator, etc.).
- *
- * Single source of truth for redaction + forwarded-attachment rendering.
- * - Redacted: fixed placeholder.
- * - With externally-authored attachment: forwarder's text first, then a
- *   provenance label, then the forwarded content. Other (non-external)
- *   attachments fold into the inline body.
- * - Normal: author's text plus inline attachments and file list.
- */
-export function renderMessageForContext(
-  msg: { text: string; files?: SlackFile[]; attachments?: SlackAttachment[]; reactions?: SlackReaction[] },
-  options: { redacted: boolean }
-): string {
-  if (options.redacted) {
-    return '[redacted: external participant in shared channel]';
-  }
-
-  const inlineParts: string[] = [];
-  if (msg.text) inlineParts.push(msg.text);
-
-  let forwardedBlock = '';
-  for (const att of msg.attachments ?? []) {
-    if (att.author && isExternalUser(att.author)) {
-      // Render the externally-authored attachment under a provenance label.
-      // Only the first one gets the label block; subsequent ones (rare)
-      // fold inline so the agent still sees them.
-      if (!forwardedBlock) {
-        const teamSuffix = att.author.teamId ? `, team ${att.author.teamId}` : '';
-        const label = `[forwarded from <@${att.author.id}:${att.author.realName}> — external${teamSuffix}]`;
-        forwardedBlock = `${label}\n${att.text}`;
-        continue;
-      }
-    }
-    if (att.text) inlineParts.push(att.text);
-  }
-  if (forwardedBlock) inlineParts.push(forwardedBlock);
-
-  let fullMessage = inlineParts.join('\n');
-
-  if (msg.files && msg.files.length > 0) {
-    const fileInfo = msg.files.map(f => {
-      const pathInfo = f.localPath ? ` (${f.localPath})` : '';
-      return `${f.name}${pathInfo}`;
-    }).join(', ');
-    fullMessage += `\n  [Attachments: ${fileInfo}]`;
-  }
-
-  if (msg.reactions && msg.reactions.length > 0) {
-    const reactionInfo = msg.reactions
-      .map((r) => `:${r.name}:${r.count > 1 ? ` ×${r.count}` : ''}`)
-      .join(', ');
-    fullMessage += `\n  [Reactions: ${reactionInfo}]`;
-  }
-
-  return fullMessage;
-}
-
-/**
  * Append a Slack message to the knowledge log.
+ *
+ * The body arrives already rendered: rendering is owned by `renderMessageBody` in `src/connectors/slack/message-body.ts`, and the caller is the one that knows the message's parts (in particular the *downloaded* files, whose `localPath` only exists after the download await). Keeping this function to persistence-only concerns is what stops a second renderer growing here.
  */
 export async function appendSlackMessage(
   taskId: string,
   channelInfo: { id: string; name: string },
   threadId: string,
   userInfo: SlackAuthor,
-  message: string,
-  files?: SlackFile[],
-  attachments?: SlackAttachment[],
-  options?: { redacted?: boolean; ts?: string; reactions?: SlackReaction[] }
+  renderedBody: string,
+  options?: { redacted?: boolean; ts?: string }
 ): Promise<void> {
   const redacted = options?.redacted === true;
-  const fullMessage = renderMessageForContext(
-    { text: message, files, attachments, reactions: options?.reactions },
-    { redacted },
-  );
 
   // Mask the author name in the source line when the body is redacted, so the
   // log doesn't leak the external user's display name even though we keep it
@@ -331,7 +279,7 @@ export async function appendSlackMessage(
   const entry: LogEntry = {
     timestamp: new Date().toISOString(),
     source: `<@${userInfo.id}:${displayName}> in ${formatSlackChannelRef(channelInfo.id, channelInfo.name, threadId)}${msgIdSuffix}`,
-    message: fullMessage,
+    message: renderedBody,
   };
 
   await appendFile(getKnowledgeLogPath(taskId), formatLogEntry(entry));
@@ -342,7 +290,7 @@ export async function appendSlackMessage(
     from: displayName,
     to: 'pm-agent',
     destination: formatSlackChannelDisplay(channelInfo.name),
-    message: fullMessage,
+    message: renderedBody,
   });
 }
 
@@ -541,29 +489,77 @@ export async function readKnowledgeLog(taskId: string): Promise<string> {
 
 /**
  * Candidate scan: task IDs whose shared/metadata.json contains `needle` as a
- * plain substring, in directory order. Pure fs — the needles carry external
- * input (webhook branch names, Slack thread ids), which previously reached a
- * shell via grep interpolation. A substring hit only narrows candidates;
+ * plain substring, in directory order. A substring hit only narrows candidates;
  * callers verify matches structurally against the parsed metadata.
+ *
+ * grep does the reading — one process over the fleet rather than one sequential
+ * readFile per task, which is a cost that grows with every task ever created.
+ * The shell expands the glob (the shape rebuildFromDisk in reminder-scheduler.ts
+ * already uses), which also keeps the file list out of argv and away from
+ * ARG_MAX. Recursion is deliberately avoided: a session directory also holds
+ * repo clones and SDK transcripts, so `grep -r` would walk gigabytes to answer a
+ * question about one small file per task.
+ *
+ * The needle is safe on two independent grounds: its form is checked first (see
+ * assertNeedleForm), and it is passed as a POSITIONAL ARGUMENT rather than
+ * interpolated into the script, so `sh` expands the glob but never parses the
+ * data. That is the whole reason the previous grep was removed in 3190d00 —
+ * needles carry external input, git ref rules allow quotes, semicolons and
+ * `$()`, and a crafted branch name reaching an execSync string could execute
+ * shell commands. `-F` keeps the needle a fixed string rather than a regex, and
+ * `--` stops one starting with `-` being read as a flag.
+ *
+ * `|| [ $? -le 2 ]` absorbs grep's "no match" (1) and "a file was unreadable"
+ * (2, which is what an empty sessions dir looks like once the glob fails to
+ * expand) while still failing on anything else. A failed scan must not read as
+ * "no task matches": that would route a webhook to a new task instead of the one
+ * that owns the branch.
  */
 async function scanMetadataFiles(needle: string): Promise<string[]> {
-  let dirs: string[];
-  try {
-    dirs = await readdir(SESSIONS_DIR);
-  } catch {
-    return [];
-  }
+  assertNeedleForm(needle);
+
+  const { stdout } = await execFileAsync(
+    'sh',
+    [
+      '-c',
+      'grep -lF -- "$1" "$2"/task-*/shared/metadata.json 2>/dev/null || [ $? -le 2 ]',
+      'sh',
+      needle,
+      SESSIONS_DIR,
+    ],
+    { encoding: 'utf-8', maxBuffer: MAX_SCAN_OUTPUT_BYTES },
+  );
+
   const hits: string[] = [];
-  for (const dir of dirs) {
-    if (!dir.startsWith('task-')) continue;
-    try {
-      const text = await readFile(join(SESSIONS_DIR, dir, 'shared', 'metadata.json'), 'utf-8');
-      if (text.includes(needle)) hits.push(dir);
-    } catch {
-      // No readable metadata.json — not a task session.
-    }
+  for (const line of stdout.split('\n')) {
+    // …/sessions/<taskId>/shared/metadata.json
+    const taskId = line.trim().split(sep).at(-3);
+    if (taskId?.startsWith('task-')) hits.push(taskId);
   }
   return hits;
+}
+
+/**
+ * Every needle is a JSON-encoded fragment of the serialized metadata — a quoted
+ * string, or a `"key": value` pair — so its form is known before it is built:
+ * one line, no control characters, because JSON.stringify escapes them all.
+ *
+ * Checking that form is the first of the two guarantees that make the pattern
+ * safe to hand to grep, and the one that survives a future refactor of how the
+ * command gets assembled. Anything malformed is a construction bug at the call
+ * site, so it throws rather than being trimmed into something plausible.
+ */
+function assertNeedleForm(needle: string): void {
+  if (needle.length === 0) throw new Error('scanMetadataFiles: needle must not be empty');
+  const control = /[\u0000-\u001f\u007f]/.exec(needle);
+  if (control) {
+    const at = control.index;
+    throw new Error(
+      `scanMetadataFiles: needle must be a single line of printable text — ` +
+      `found control character 0x${needle.charCodeAt(at).toString(16).padStart(2, '0')} at index ${at}. ` +
+      `Needles are JSON-encoded fragments; encode the value before scanning.`,
+    );
+  }
 }
 
 /**
@@ -672,6 +668,35 @@ export async function findTaskByBranch(
   }
 
   return null;
+}
+
+/**
+ * Has any task muted this exact Slack thread? A mute is stored on the task that
+ * took it, so a per-task check can't see one taken elsewhere: on 2026-08-05 one
+ * task was told to leave a #backend-dev thread while a second task went on
+ * posting into it.
+ *
+ * Matched on the thread, not the channel. Muting is routine — ~100 of 2575 prod
+ * tasks have muted something, across 29 channels, #bugs 16 times — so treating
+ * a mute as closing its whole channel would lock Archie out of the channels bug
+ * reports arrive in.
+ */
+export async function isThreadMuted(channelId: string, threadTs: string): Promise<boolean> {
+  try {
+    // A Slack thread belongs to at most one task — that's the routing model, and
+    // findTaskByThread is how the Slack router already resolves it. No second
+    // scan of its own.
+    const taskId = await findTaskByThread(threadTs);
+    if (!taskId) return false;
+
+    // Prefer the live instance: a mute taken this turn may not be flushed yet.
+    const metadata = activeTasks.get(taskId)?.metadata ?? (await loadMetadata(taskId));
+    const channel = metadata?.channels[`slack:${channelId}:${threadTs}`];
+    return channel?.type === 'slack' && !!channel.muted;
+  } catch {
+    // Best-effort: a failed lookup must not block posting outright.
+    return false;
+  }
 }
 
 /**

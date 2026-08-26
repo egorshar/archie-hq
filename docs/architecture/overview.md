@@ -108,7 +108,7 @@ All repo agents work in isolated `git clone --shared` checkouts (`src/connectors
 Agents and capabilities are loaded dynamically from the plugins directory under the runtime workdir (`$ARCHIE_WORKDIR/plugins`, default `./workdir/plugins`). On startup `bootstrapWorkdir()` (`src/system/workdir.ts`) clones the repo specified by `ARCHIE_PLUGINS` into that location (or pulls/resets it on subsequent boots) before `initPlugins()` (`src/system/plugin-loader.ts`) scans it. `initRegistry()` then builds `AgentDef`s from the loaded plugins, and `cloneRepos()` clones every repo declared by repo-track agent frontmatter into `$ARCHIE_WORKDIR/repos/<repo-key>` (or fetches+resets if already cloned). Each plugin can provide:
 
 - **Repo agents**: Via `agents/*.md` with repo metadata in frontmatter (or legacy `repo-config.json`)
-- **Plugin agents**: Via `agents/*.md` without repo metadata (lightweight, read-only)
+- **Plugin agents**: Via `agents/*.md` without repo metadata (lightweight; no repo, no git)
 - **PM overlay**: Via `pm/` plugin (`agents/pm.md` body appended to PM prompt)
 - **Agent skills**: Via `skills/` directories (agent-specific capabilities symlinked at spawn)
 - **Hooks**: Via `hooks/hooks.json` (plugin-defined hooks injected into agent settings)
@@ -134,7 +134,10 @@ See [plugin-system.md](plugin-system.md) for details.
      AGENT_PROMPTS.existingTask)
    → Otherwise start a new task if it's an @mention, a DM, or a human reply to
      a thread Archie itself started (rootAuthorWasBot — a post it made via the
-     post_to_channel explore tool)
+     post_to_channel explore tool; a trigger-fired task's own home thread is
+     also bot-rooted, but step 3 resolves that to the owning task first), AND
+     the fetched thread carries at least one
+     visible message — a payload with no author and no body never seeds a task
      (Task.create → task.append → task.sendMessage with AGENT_PROMPTS.newTask)
    → Replies in human-started threads the bot didn't start are ignored
 
@@ -240,6 +243,7 @@ prompts/                         # Repo-root: layered system prompts
 - [GitHub Integration](github-integration.md) -- webhooks, PR management, merge orchestrator
 - [Edit Mode](edit-mode.md) -- approval flow, shared clones, and git workflow
 - [Max Mode](max-mode.md) -- per-task, human-approved model/effort upgrade for coding agents
+- [Tool Approvals](tool-approvals.md) -- per-call human approval for critical MCP tools
 - [Plugin System](plugin-system.md) -- plugin structure, loading, and agent registration
 - [Web Research](web-research.md) -- multi-agent research pipeline and defense layers
 - [Security](security.md) -- research budget, sandwich defense, prompt injection mitigations

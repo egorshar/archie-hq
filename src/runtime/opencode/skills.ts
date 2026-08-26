@@ -11,7 +11,7 @@ import { existsSync } from 'node:fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'node:url';
 import type { AgentDef } from '../../types/agent.js';
-import { linkAgentSkills } from '../../agents/skill-linking.js';
+import { linkSkillDirs } from '../../agents/skill-linking.js';
 
 /**
  * Locate the installed `@opencode-ai/plugin` package root by walking up from
@@ -33,18 +33,16 @@ function findBridgePluginPkgRoot(): string {
 }
 
 /**
- * Stage ONE agent's skills into a per-child skills dir (P3a §4): only
- * `def.skillsPath` + `def.coreSkillsPath`, plugin source first so it shadows a
- * core skill of the same name (same ordering the Claude spawn path uses).
- * Returns the staged source count for logging. Clear-and-rebuild via
- * linkAgentSkills, so idempotent.
+ * Stage ONE agent's skills into a per-child skills dir (P3a §4) from `def.skillPaths`
+ * — the ordered, plugin-first, deduplicated list the registry resolves, which is the
+ * same list the Claude spawn path mounts. Shadowing is decided there, not here.
+ * Returns the staged count for logging. Clear-and-rebuild via linkSkillDirs, so
+ * idempotent.
  */
 export async function stageAgentSkills(def: AgentDef, skillsDir: string): Promise<number> {
-  const sources = [def.skillsPath, def.coreSkillsPath].filter(
-    (s): s is string => typeof s === 'string' && s.length > 0,
-  );
-  await linkAgentSkills(skillsDir, sources);
-  return sources.length;
+  const skillPaths = def.skillPaths ?? [];
+  await linkSkillDirs(skillsDir, skillPaths);
+  return skillPaths.length;
 }
 
 /**

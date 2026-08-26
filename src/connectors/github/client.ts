@@ -6,6 +6,7 @@
  */
 
 import fs from 'fs';
+import path from 'path';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { App } from '@octokit/app';
@@ -39,9 +40,29 @@ import type { RepoHost } from '../../ports/repo-host.js';
 import type { RepoHostCapabilities } from '../../ports/capabilities.js';
 import { GITHUB_CAPABILITIES } from '../../ports/capabilities.js';
 import { githubRepoToUrl } from './repo-clone.js';
-import { repoBotIdentity } from '../shared/repo-url.js';
+import { repoBotIdentity, repoHostKind } from '../shared/repo-url.js';
 
 const execAsync = promisify(exec);
+
+/**
+ * Narrow an Octokit resource id to `number`.
+ *
+ * `@octokit/openapi-types` v28 widened every GitHub integer id to
+ * `number | bigint` so the types can describe ids beyond 2^53. That widening
+ * is type-level only on this transport: these values reach us through
+ * `JSON.parse` of the REST response, and `JSON.parse` yields `number` for
+ * every JSON number — it never produces a `bigint`. So the narrowing is an
+ * identity operation at runtime, not a lossy cast.
+ *
+ * Kept as a named helper rather than inlined so the reasoning lives in one
+ * place: more of these surface as code touches new octokit fields, and the
+ * alternative (widening our own `id` fields to `number | bigint`) would be
+ * actively worse — these ids get JSON-serialized on the way to agents, and
+ * `JSON.stringify` throws on a bigint.
+ */
+function narrowGithubId(id: number | bigint): number {
+  return typeof id === 'bigint' ? Number(id) : id;
+}
 
 /**
  * Map legacy commit-status state (success/failure/pending/error) onto the
@@ -695,7 +716,7 @@ export class GitHubClient implements RepoHost {
     );
 
     return response.data.map((comment) => ({
-      id: comment.id,
+      id: narrowGithubId(comment.id),
       author: comment.user?.login || 'unknown',
       body: comment.body || '',
       createdAt: comment.created_at,
@@ -818,7 +839,7 @@ export class GitHubClient implements RepoHost {
     const run = res.data;
 
     const report: CheckRunReport = {
-      id: run.id,
+      id: narrowGithubId(run.id),
       name: run.name,
       app: run.app?.slug || 'unknown',
       status: run.status,
@@ -1146,7 +1167,13 @@ export function createGitHubClient(): GitHubClient | null {
 }
 
 /**
- * Get GitHub App bot identity for git commits
+ * The GitHub App bot's name and commit address.
+ *
+ * Only a fallback now — `getArchieAttributionIdentity()` returns this when the
+ * attribution account isn't configured, so a deployment without those vars keeps
+ * its prior behaviour. Nothing credits the bot deliberately: the numeric prefix
+ * below is `GITHUB_APP_ID`, which is not a user ID, so GitHub resolves the
+ * address to no account. See `getArchieAttributionIdentity()`.
  */
 export function getGitHubAppIdentity(): { name: string; email: string } | null {
   const appId = process.env.GITHUB_APP_ID;
@@ -1163,19 +1190,125 @@ export function getGitHubAppIdentity(): { name: string; email: string } | null {
 }
 
 /**
- * Configure git identity (the committer) for a repository using the active repo
- * host's bot credentials. Host-aware: defaults to `repoBotIdentity()` so that
- * under REPO_HOST=gitlab the committer is the GitLab bot's verified email
- * (GITLAB_BOT_EMAIL) — GitLab push rules reject commits whose committer email
- * isn't a verified email of the token account. Should be called once on server
- * startup for each base repo (and per shared clone); worktrees inherit it.
- * Callers may pass an explicit identity; `null` means "leave git's default".
+ * The identity Archie is *credited* as on GitHub: the committer on every commit
+ * (via `configureGitIdentity`), the `Co-Authored-By` trailer on repo-agent commits,
+ * and the attribution block on PR bodies.
+ *
+ * Deliberately separate from `getGitHubAppIdentity()`, which is the identity Archie
+ * *acts* as — the installation its API calls and git transport authenticate with.
+ * Credit points at the real
+ * `archie-hq` user account instead, for two reasons a bot account can't satisfy:
+ * a GitHub App bot cannot be @mentioned at all, and its profile is an app page
+ * rather than an account. Attribution needs no repository access, so this works
+ * without granting the account anything.
+ *
+ * The numeric prefix must be the account's **user** ID. GitHub resolves the
+ * `<id>+<login>@users.noreply.github.com` form by ID and silently drops the credit
+ * when the ID disagrees with the login — it does not fall back to matching the
+ * login. The bot form above synthesizes that prefix from `GITHUB_APP_ID`, which is
+ * not a user ID (for this App: 2605869 vs. the bot user's 253344994), so every
+ * `Co-Authored-By` line Archie has written resolved to no account: PR #264's
+ * co-author comes back from the API with `login: ""`.
+ *
+ * Falls back to the App bot when the attribution account isn't configured, so a
+ * deployment without the new vars keeps its current behaviour instead of losing
+ * the trailer.
+ */
+export interface ArchieIdentity {
+  /** Display name for the commit trailer and footer link text. */
+  name: string;
+  /** noreply address GitHub resolves to the account. */
+  email: string;
+  /** `@mention` form — GitHub auto-links it to the profile. A bot login is left bare; bots aren't mentionable. */
+  mention: string;
+}
+
+export function getArchieAttributionIdentity(): ArchieIdentity | null {
+  const login = process.env.ARCHIE_GITHUB_LOGIN?.trim();
+  const userId = process.env.ARCHIE_GITHUB_USER_ID?.trim();
+
+  // Both are required, and the ID must be numeric: a non-numeric or absent ID
+  // would produce an address that looks right and credits nobody, which is the
+  // exact failure this function exists to correct. Prefer the visibly-degraded
+  // bot fallback over a silent one.
+  if (login && userId && /^[0-9]+$/.test(userId)) {
+    return {
+      name: process.env.ARCHIE_GITHUB_NAME?.trim() || login,
+      email: `${userId}+${login}@users.noreply.github.com`,
+      mention: `@${login}`,
+    };
+  }
+
+  const bot = getGitHubAppIdentity();
+  if (!bot) return null;
+  return {
+    name: bot.name,
+    email: bot.email,
+    mention: bot.name,
+  };
+}
+
+/**
+ * Root every repo path must live under. Read per call rather than imported from
+ * `system/workdir.ts` (which imports this module transitively) — keep the two
+ * in step if the default ever changes.
+ */
+function workdirRoot(): string {
+  return path.resolve(process.env.ARCHIE_WORKDIR || path.join(process.cwd(), 'workdir'));
+}
+
+/**
+ * Delete an orphaned `config.lock` from a repo, if it has one.
+ *
+ * `git config` takes that lock for every write, and a hard kill mid-write
+ * orphans it — after which every `git config` in the repo fails ("could not
+ * lock config file"), including on the next boot, since nothing else cleans it
+ * up. That cost task-20260804-1050-iat4s8 two agents during startup recovery.
+ *
+ * Repo paths originate in task and plugin input, so the resolved lock path is
+ * confined to the workdir before anything is unlinked; a path pointing outside
+ * it is left alone. Removing a lock a live `git` still holds makes that
+ * writer's rename fail rather than corrupting the config, and every writer here
+ * sets the same bot identity, so no staleness check is needed.
+ */
+async function dropOrphanedConfigLock(repoPath: string): Promise<void> {
+  const root = workdirRoot();
+  const lockPath = path.resolve(repoPath, '.git', 'config.lock');
+  if (!lockPath.startsWith(root + path.sep)) {
+    logger.warn('github', `Skipped config lock cleanup outside the workdir: ${lockPath}`);
+    return;
+  }
+  await fs.promises.rm(lockPath, { force: true });
+}
+
+/**
+ * The git identity to write into a repo — the committer on every commit made
+ * there, and the author on commits `buildCommitAuthorEnv` leaves unattributed.
+ *
+ * Host-aware, because the two hosts constrain it differently. GitLab push rules
+ * reject commits whose committer email is not a verified email of the token
+ * account, so under REPO_HOST=gitlab the committer must be the GitLab bot
+ * (GITLAB_BOT_EMAIL) — it is an auth requirement there, not a credit. GitHub
+ * does not require the committer to match the pusher (push auth is the
+ * installation token via GIT_ASKPASS), so it uses the attribution account
+ * instead: the App bot's synthetic address is built from GITHUB_APP_ID, which
+ * is not a user id, and resolves to no account at all.
+ */
+function gitIdentityForActiveHost(): { name: string; email: string } | null {
+  return repoHostKind() === 'gitlab' ? repoBotIdentity() : getArchieAttributionIdentity();
+}
+
+/**
+ * Configure git identity (the committer) for a repository. Should be called once
+ * on server startup for each base repo (and per shared clone); worktrees inherit
+ * it. Callers may pass an explicit identity; `null` means "leave git's default".
  */
 export async function configureGitIdentity(
   repoPath: string,
-  identity: { name: string; email: string } | null = repoBotIdentity(),
+  identity: { name: string; email: string } | null = gitIdentityForActiveHost(),
 ): Promise<string | null> {
   if (identity && identity.email) {
+    await dropOrphanedConfigLock(repoPath);
     await execAsync(`git config user.name "${identity.name}"`, { cwd: repoPath });
     await execAsync(`git config user.email "${identity.email}"`, { cwd: repoPath });
     return identity.name;

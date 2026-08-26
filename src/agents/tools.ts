@@ -18,12 +18,14 @@ import type { Task } from '../tasks/task.js';
 import type { Agent } from './agent.js';
 import { getVisiblePeerIdsForSender, findAgentDefsContainingRepo, synthesizeDynamicAgentDef, isAutoMergeRepo } from './registry.js';
 import { getRepoHost } from '../system/backends.js';
-import { parseCheckRef } from '../connectors/github/client.js';
+import { parseCheckRef, getArchieAttributionIdentity } from '../connectors/github/client.js';
+import { buildAttributedBody } from '../connectors/github/pr-attribution.js';
 import { parseGitLabCheckRef } from '../connectors/gitlab/status-map.js';
 import { gitExec } from '../connectors/github/repo-clone.js';
 import { hydrateBranchState, findBranchStateByPR, assignPrNumber } from '../connectors/github/branch-state.js';
 import { taskBranchName, composeTicketBranchName } from '../connectors/github/branch-naming.js';
-import { appendAgentFinding, appendArtifactShared } from '../tasks/persistence.js';
+import { appendAgentFinding, appendArtifactShared, isThreadMuted } from '../tasks/persistence.js';
+import { exploreBody } from '../connectors/slack/message-body.js';
 import { copyArtifactToShared, assertReadable } from './artifacts.js';
 import { aggregateTaskUsage, formatTaskUsageReport } from './task-usage.js';
 import { logger } from '../system/logger.js';
@@ -43,12 +45,19 @@ import {
   fetchChannelIsPrivate,
 } from '../connectors/slack/client.js';
 import { readCanvas } from '../connectors/slack/canvas-read.js';
-import { collectCanvasFileAllowlist } from '../connectors/slack/channel-canvas.js';
-import { isDmOrUserId } from '../connectors/slack/channel-ids.js';
+import {
+  collectCanvasFileAllowlist,
+  ensureChannelCanvas,
+  buildOtherChannelContextSection,
+} from '../connectors/slack/channel-canvas.js';
+import { collectPinnedFileAllowlist } from '../connectors/slack/channel-pins.js';
+import { isDmOrUserId, findMutedTarget, taskSlackChannelIds, taskSlackChannelLabels } from '../connectors/slack/channel-ids.js';
 import {
   formatSlackSendError,
   formatSlackPostError,
   formatSlackReadError,
+  formatMutedTargetRefusal,
+  formatCrossTaskMuteRefusal,
 } from '../connectors/slack/format-errors.js';
 
 /**
@@ -65,28 +74,25 @@ function rejectDmTarget(channel: string): string | null {
 }
 
 /**
- * The Slack channel ids THIS task is linked to (its own origin channel(s)).
+ * The Slack channel ids THIS task is linked to (its own origin channel(s)), plus the
+ * home channel a trigger-fired task has before it opens its own thread there.
  * Explore reads treat these as accessible regardless of type — so the PM can read
  * the private channel or DM the task itself lives in, but no other private/DM.
+ *
+ * Delegates to the shared derivation so the channels a task may READ are the same ones whose standing context it was given: a task homed in a private channel is handed that channel's pin index on its first turn, and refusing to let it read the channel that index describes made its own prompt incoherent for exactly one turn.
  */
-function taskSlackChannelIds(task: Task): Set<string> {
-  const ids = new Set<string>();
-  for (const ch of Object.values(task.metadata.channels)) {
-    if (ch.type === 'slack') ids.add(ch.channel_id);
-  }
-  return ids;
+function taskChannelIds(task: Task): Set<string> {
+  return taskSlackChannelIds(task.metadata);
 }
 
 /** Render explore messages in the same `@<id:name> | msg:ts` shape the PM sees elsewhere. */
-function formatExploreMessages(messages: SlackThreadMessage[]): string {
+export function formatExploreMessages(messages: SlackThreadMessage[]): string {
   return messages
     .map((m) => {
       const who = m.user.realName || m.user.username;
-      const files = m.files?.length ? `\n  [files: ${m.files.map((f) => f.name).join(', ')}]` : '';
-      const reactions = m.reactions?.length
-        ? `\n  [reactions: ${m.reactions.map((r) => `:${r.name}:×${r.count}`).join(' ')}]`
-        : '';
-      return `<@${m.user.id}:${who}> | msg:${m.ts}\n${m.text}${files}${reactions}`;
+      // `exploreBody` is the one sanctioned never-redacted render, and it is named rather than an inline `redacted: false` so that decision is greppable and auditable in a single place. Explore is deliberately unredacted because the agent asked to look at this channel: redacting here would hand back a wall of placeholders instead of the content it went to read. `SlackChannelMessages` accordingly carries no `shared` field — there is nothing here for a redaction policy to consult.
+      const body = exploreBody(m);
+      return `<@${m.user.id}:${who}> | msg:${m.ts}\n${body}`;
     })
     .join('\n\n');
 }
@@ -459,12 +465,16 @@ export type PostToUserArgs = z.infer<z.ZodObject<typeof postToUserArgsSchema>>;
 export async function postToUserHandler(agent: Agent, task: Task, args: PostToUserArgs): Promise<ToolResult> {
   const agentName = agent.def.id as AgentName;
   const hasTarget = !!(args.target?.channel || args.target?.new_dm || args.target?.new_thread);
-  if (!hasTarget && Object.keys(task.metadata.channels).length === 0) {
+  // A trigger-fired task has no thread yet but does have a home channel, and this call is exactly what opens that thread — so "no channels" is only "nowhere to post" when there is no home channel either.
+  if (!hasTarget && Object.keys(task.metadata.channels).length === 0 && !task.metadata.home_channel) {
     return ok(
       'No channel linked to this task. Use target.new_dm <userId> or target.new_thread <channelId> ' +
       'to open a destination, or call report_completion() without a message to finish silently.'
     );
   }
+  const mutedKey = args.target?.channel ?? task.metadata.default_channel;
+  const muted = mutedKey ? findMutedTarget(task.metadata.channels, mutedKey) : null;
+  if (muted) return ok(formatMutedTargetRefusal(muted.channel_name));
   task.touch();
   let newChannelKey: string | null;
   try {
@@ -485,6 +495,7 @@ function createPostToUserTool(agent: Agent, task: Task) {
     'Use target.channel only to reach another thread ALREADY linked to this task. ' +
     'If this task lives in a channel thread, bring someone in by @mentioning them in that thread. ' +
     'To say something in a channel that is NOT part of this task (exploration/outreach), use `post_to_channel` — it deliberately does not link to this task. ' +
+    'A muted channel is refused. ' +
     'To attach files, send the message first, then call `post_files_to_user` with the same target.',
     postToUserArgsSchema,
     async (args) => postToUserHandler(agent, task, args),
@@ -503,6 +514,9 @@ async function postFilesToUserHandler(agent: Agent, task: Task, args: z.infer<z.
       'No channel linked to this task. Open one first with post_to_user(target.new_dm or target.new_thread), then call post_files_to_user with the returned channel key.'
     );
   }
+  const mutedKey = args.channel ?? task.metadata.default_channel;
+  const muted = mutedKey ? findMutedTarget(task.metadata.channels, mutedKey) : null;
+  if (muted) return ok(formatMutedTargetRefusal(muted.channel_name, 'files'));
   let validatedPaths: string[];
   try {
     const sandbox = requireSandbox(agent);
@@ -628,6 +642,20 @@ async function listChannelsHandler(_agent: Agent, task: Task, _args: z.infer<z.Z
         seen.add(ch.channel_id);
         own.push({ name: ch.channel_name || ch.channel_id, id: ch.channel_id });
       }
+    }
+    // A trigger-fired task's home channel counts as its own before it has a thread there, and it must be
+    // enumerable for the same reason it is readable: the canvas and pin blocks in the prompt name that
+    // channel by its `#label`, and every read tool takes an id. Listing the capability without listing the
+    // channel leaves the agent told about context it cannot go and look at.
+    //
+    // Derived from the same helper the read gate and the standing-context blocks use, rather than reading
+    // `home_channel` again here. The linked channels above are a subset of it, so this only ever adds what
+    // `seen` has not already covered — and there is one answer to "which channels are this task's own"
+    // instead of two that can drift.
+    for (const [channelId, label] of taskSlackChannelLabels(task.metadata)) {
+      if (seen.has(channelId)) continue;
+      seen.add(channelId);
+      own.push({ name: label.replace(/^#/, ''), id: channelId });
     }
     if (publicChannels.length === 0 && own.length === 0) {
       return ok("Archie isn't a member of any channels you can use yet. Invite it to a channel (`/invite @Archie`) to explore there.");
@@ -769,8 +797,15 @@ export async function reportCompletionHandler(agent: Agent, task: Task, args: Re
   if (task.completionIntent) {
     return ok('Completion already recorded. End your turn.');
   }
-  if (args.message) {
-    if (Object.keys(task.metadata.channels).length === 0) {
+  // A muted default channel drops the message but still completes: the turn
+  // has to be allowed to end, and refusing outright would just push the
+  // agent to find another way to say it.
+  const mutedDefault = task.metadata.default_channel
+    ? findMutedTarget(task.metadata.channels, task.metadata.default_channel)
+    : null;
+  if (args.message && !mutedDefault) {
+    // Same exception as post_to_user: a trigger-fired task's home channel is a place to post, and the completion message is often the first thing it says — posting it is what opens the task's own thread.
+    if (Object.keys(task.metadata.channels).length === 0 && !task.metadata.home_channel) {
       return ok(
         'Cannot post a completion message — no channel linked. ' +
         'Either open a destination via post_to_user(target.new_dm/new_thread) first, ' +
@@ -803,6 +838,12 @@ export async function reportCompletionHandler(agent: Agent, task: Task, args: Re
   // no synchronous peer-gate races the Stop-hook boundary. The agent must end
   // its turn now: that's what lets the system reach quiescence and park.
   task.setCompletionIntent();
+  if (args.message && mutedDefault) {
+    return ok(
+      `${formatMutedTargetRefusal(mutedDefault.channel_name)}\n\n` +
+      'Completion is recorded either way — end your turn now, silently.'
+    );
+  }
   return ok(
     args.message
       ? 'Message posted. Nothing left to do — end your turn.'
@@ -950,7 +991,8 @@ async function muteChannelHandler(agent: Agent, task: Task, args: z.infer<z.ZodO
 }
 
 const muteChannelDescription =
-  'Unsubscribe from a Slack channel/thread. Once muted, messages in it are ignored until someone @mentions the bot there again. Posts a notification to the thread it muted. ' +
+  'Step out of a Slack channel/thread, in both directions: messages there stop reaching you, AND your own posts there are refused (post_to_user, post_files_to_user, post_to_channel) — until someone @mentions the bot there again. ' +
+  'Posts a notification to the thread it muted, so add no farewell message of your own. Call it before saying anything else when asked to stop, step back, or go away. ' +
   'Pass `channel` (a channel key like "slack:C123:456.789") to mute that specific thread. ' +
   'Omit `channel` to mute the task\'s default channel only (never all linked channels). ' +
   'DM channels cannot be muted — DMs have no @mention to unmute by, so muting one would lock the user out permanently.';
@@ -1040,7 +1082,7 @@ const readChannelHistoryArgsSchema = {
 };
 
 async function readChannelHistoryHandler(_agent: Agent, task: Task, args: z.infer<z.ZodObject<typeof readChannelHistoryArgsSchema>>): Promise<ToolResult> {
-  const allowed = taskSlackChannelIds(task);
+  const allowed = taskChannelIds(task);
   if (!allowed.has(args.channel)) {
     const dm = rejectDmTarget(args.channel);
     if (dm) return ok(dm);
@@ -1065,7 +1107,7 @@ const readThreadArgsSchema = {
 };
 
 async function readThreadHandler(_agent: Agent, task: Task, args: z.infer<z.ZodObject<typeof readThreadArgsSchema>>): Promise<ToolResult> {
-  const allowed = taskSlackChannelIds(task);
+  const allowed = taskChannelIds(task);
   if (!allowed.has(args.channel)) {
     const dm = rejectDmTarget(args.channel);
     if (dm) return ok(dm);
@@ -1079,28 +1121,120 @@ async function readThreadHandler(_agent: Agent, task: Task, args: z.infer<z.ZodO
   }
 }
 
+/**
+ * Values that answer the `mandate` field without answering the question — the
+ * shapes a model reaches for when it wants past the gate rather than having a
+ * request to quote.
+ */
+const NON_MANDATES = new Set([
+  'n/a', 'na', 'none', 'no mandate', 'not applicable', 'nobody', 'no one',
+  'self', 'my own judgement', 'my own judgment', 'implied', 'implicit',
+  'urgent', 'high severity', 'proactive', 'unknown', 'tbd', '-',
+]);
+
 const postToChannelDescription =
   'Post a message into any channel Archie is a member of, WITHOUT linking it to this task — for chiming in while exploring, or escalating somewhere (e.g. a private management channel). ' +
-  "Works in PUBLIC and PRIVATE channels Archie has been invited to (DMs are not allowed). Unlike reading, posting is NOT limited to this task's channel — escalating outward is a valid use. " +
+  "Works in PUBLIC and PRIVATE channels Archie has been invited to (DMs are not allowed, and neither is a channel muted for this task). Unlike reading, posting is NOT limited to this task's channel — escalating outward is a valid use. " +
   'Fire-and-forget: it does not become a touchpoint of this task, and any reply is invisible to you here. If a human replies to a NEW top-level message you post, that reply starts its OWN fresh task; a reply inside someone else\'s existing thread never does. ' +
-  "GUARDRAIL: match what you post to the destination's audience — never relay private or sensitive task content into a broader or unrelated channel. " +
-  'Pass a channel ID; optionally `thread_ts` to reply in an existing thread. To talk to the user about THIS task, use post_to_user instead.';
+  "GUARDRAIL: only post where a human in this task asked you to — the required `mandate` arg is where you quote them, and without one you report to your requester instead and let them route it. Keep it short and match what you post to the destination's audience — never relay private or sensitive task content into a broader or unrelated channel. " +
+  'Pass a channel ID; optionally `thread_ts` to reply in an existing thread. To talk to the user about THIS task, use post_to_user instead. ' +
+  'A task started by a trigger has to post its result to the user first — that is what opens its own thread — so this tool is unavailable until then.';
 
 const postToChannelArgsSchema = {
   channel: z.string().describe('Slack channel ID (e.g. "C1234567")'),
   message: z.string().describe('The message to post'),
+  mandate: z.string().describe(
+    "Verbatim quote of the message in THIS task's thread where a human asked you to say something in this channel, naming who said it. " +
+    'Required. If you cannot quote one, do not call this tool — report the thing to your requester in this thread and let them decide who to tell. ' +
+    'A teammate agent suggesting it, or your own judgement that someone should know, is not a mandate.',
+  ),
   thread_ts: z.string().optional().describe('Parent message ts to reply inside an existing thread; omit to post a new top-level message'),
 };
 
 async function postToChannelHandler(_agent: Agent, task: Task, args: z.infer<z.ZodObject<typeof postToChannelArgsSchema>>): Promise<ToolResult> {
+  // Sequencing, checked before anything about the destination: a trigger-fired task has a home channel but no thread of its own yet, and this tool posts WITHOUT linking the channel to the task — which is precisely the detached, unanswerable message that homing a fired task in a channel exists to replace. So while the task has no channel open, the first thing it says has to be its result to the user, which is what opens its thread; only after that is posting elsewhere a coherent act rather than the task's only utterance.
+  //
+  // This outranks the DM and mandate checks deliberately. Both of those describe something wrong with *this call* (wrong kind of target, no one asked for it), and answering them first would send the agent off to fix the wrong problem — hunting for a mandate quote, or picking a different channel — when the real answer is that nothing may be posted anywhere yet. The sequencing message is the only one that points at the fix.
+  //
+  // There is deliberately NO branch here comparing the target to the task's own channel. Once a channel is open, post_to_channel behaves exactly as it always has for every destination, including the task's home channel: the task can then be replied to in its own thread, so an unlinked post beside it is a normal, recoverable thing to do rather than a dead end.
+  if (task.metadata.home_channel && !task.metadata.default_channel) {
+    return ok(
+      'Nothing was posted. This task has no channel of its own yet — post the result with `post_to_user` first, which opens this task\'s thread in ' +
+      `#${task.metadata.home_channel.channel_name}. ` +
+      '`post_to_channel` is available for other channels after that.',
+    );
+  }
   const dm = rejectDmTarget(args.channel);
   if (dm) return ok(dm);
+  // The mandate is the whole gate on unsolicited outreach: it can't be
+  // checked semantically, but requiring the quote forces the question to be
+  // asked, and refusing the degenerate answers stops the field being filled
+  // in with filler to get past it.
+  const mandate = args.mandate.trim();
+  if (mandate.length < 15 || NON_MANDATES.has(mandate.toLowerCase().replace(/[.\s]+$/, ''))) {
+    return ok(
+      'Blocked: no mandate. Nothing was posted. `mandate` has to be an actual quote of a human in this task asking you to post in that channel — ' +
+      'not a restatement of why it matters, not a teammate\'s suggestion, not your own read that someone should know. ' +
+      "If nobody asked, report it to your requester in this task's thread and let them route it: who else needs to know is their call.",
+    );
+  }
+  // A muted thread in this channel blocks the whole channel — otherwise
+  // post_to_channel is the obvious way around a mute (new top-level post,
+  // same audience).
+  const muted = findMutedTarget(task.metadata.channels, args.channel);
+  if (muted) return ok(formatMutedTargetRefusal(muted.channel_name));
+  // Same check across OTHER tasks: the task told to go away is usually not
+  // the one posting next.
+  if (args.thread_ts && await isThreadMuted(args.channel, args.thread_ts)) {
+    return ok(formatCrossTaskMuteRefusal(args.channel));
+  }
   task.touch();
   try {
     // The prefix check above rejects 1:1 DMs/user ids; this rejects group DMs
     // (mpims), which share the ambiguous `G…` prefix with private channels.
     await assertPostableChannel(args.channel);
+
+    // Preflight: a channel's standing brief governs what gets said in it, and
+    // this agent has never seen the destination's — its own context is for the
+    // channel this task lives in. So the first post into a channel that has an
+    // `Archie…` canvas returns that brief instead of posting, and the retry goes
+    // through. Runs AFTER the mandate/mute/postable checks so a refused post
+    // never triggers a scan (which would announce canvas adoption in a channel
+    // nothing is then posted to), and applies to thread replies too — a reply is
+    // still speaking into that channel.
+    //
+    // No canvas there means no extra round-trip: the common case is untouched,
+    // and once a channel has been briefed on this task it is never briefed
+    // again — tracked in task metadata rather than on the Agent, whose lifetime
+    // is shorter than the task's (a settled task is rebuilt from disk with a
+    // fresh Agent, which re-showed the same brief on every re-activation).
+    const briefed = (task.metadata.briefed_channels ??= []);
+    if (!briefed.includes(args.channel)) {
+      await ensureChannelCanvas(args.channel);
+      const name = await getChannelInfo(args.channel).then((c) => c.name).catch(() => undefined);
+      const brief = await buildOtherChannelContextSection(args.channel, name);
+      briefed.push(args.channel);
+      // Flushed, not debounced: this is the record that stops the same brief
+      // being shown twice, and the path that would show it again is the task
+      // being rebuilt from disk.
+      await task.save(true);
+      if (brief) {
+        return ok(
+          `Not posted yet — that channel has a standing brief you have not read. It is below; ` +
+          `check your message against it, then call post_to_channel again to send (same mandate).\n\n${brief}`,
+        );
+      }
+    }
     const ts = await postSlackMessage({ channel: args.channel, text: args.message, threadTs: args.thread_ts });
+    // Record the claimed mandate in the knowledge log: outreach lands in
+    // front of people outside this task, so the reason it happened has to be
+    // auditable after the fact.
+    await appendAgentFinding(
+      task.taskId,
+      _agent.def.id as AgentName,
+      `Posted to ${args.channel} outside this task. Mandate: ${mandate}`,
+      'decision',
+    );
     return ok(
       ts
         ? `Message posted to ${args.channel}${args.thread_ts ? ` (in thread ${args.thread_ts})` : ` (new thread ts: ${ts})`}. Not linked to this task.`
@@ -1188,6 +1322,26 @@ const createPullRequestArgsSchema = {
   github: githubArgSchema,
 };
 
+/**
+ * Stamp the attribution line onto a PR body: who opened it, and for whom.
+ *
+ * The human is the edit-mode approver, which is also who repo-agent commits are
+ * authored as (`buildCommitAuthorEnv`) — so the PR names exactly whoever
+ * `git blame` will name. Their Slack display name is used as-is.
+ *
+ * Host-neutral in shape, but the mention it stamps is GitHub-specific today —
+ * `getArchieAttributionIdentity()` reads ARCHIE_GITHUB_* and yields null on
+ * GitLab, which leaves the body as the agent wrote it. See the upstream audit
+ * for the RepoHost.botIdentity() extension this wants.
+ */
+function attributePrBody(task: Task, body: string): string {
+  return buildAttributedBody(
+    body,
+    task.metadata.edit_approved_by?.name ?? null,
+    getArchieAttributionIdentity()?.mention ?? null,
+  );
+}
+
 async function createPullRequestHandler(agent: Agent, task: Task, args: z.infer<z.ZodObject<typeof createPullRequestArgsSchema>>): Promise<ToolResult> {
   const agentName = agent.def.id as AgentName;
   logger.agentAction(agentName, 'Creating PR', args.title);
@@ -1205,7 +1359,8 @@ async function createPullRequestHandler(agent: Agent, task: Task, args: z.infer<
   const entry = agent.def.repo!.repos.find((r) => r.github === github);
   const base = state?.base_branch || entry?.baseBranch || 'main';
 
-  const result = await client.createPullRequest(github, head, base, args.title, args.body);
+  const body = attributePrBody(task, args.body);
+  const result = await client.createPullRequest(github, head, base, args.title, body);
 
   if (state) {
     // Reset per-PR markers when this branch's pr_number changes — a reused
@@ -1721,9 +1876,11 @@ async function updatePRHandler(agent: Agent, task: Task, args: z.infer<z.ZodObje
   if (!resolved.ok) return err(resolved.error);
   const client = getRepoHost();
   if (!client) throw new Error('GitHub client not configured');
+  // Re-stamp attribution: a body rewrite would otherwise drop the line naming
+  // the human this PR was opened for.
   await client.updatePR(resolved.github, args.pr_number, {
     title: args.title,
-    body: args.body,
+    body: args.body === undefined ? undefined : attributePrBody(task, args.body),
     base: args.base,
   });
   return ok(`Updated PR #${args.pr_number} (${resolved.github})`);
@@ -2153,15 +2310,15 @@ function safeReferenceFileName(name: string, forceExt?: string): string {
 
 /**
  * `fetch_slack_reference` (PM-only) — pull a file referenced in the channel's
- * project-context canvas into the PM workspace so it can be read. The agent
- * never has to know whether the reference is a canvas or a plain file: the tool
- * inspects `files.info.filetype` and routes internally (canvas → converted
- * markdown; anything else → native bytes). The file lands in the PM's own
- * workspace, not shared — the PM decides what to do with it next.
+ * project-context canvas, or pinned in the channel, into the PM workspace so it
+ * can be read. The agent never has to know whether the reference is a canvas or
+ * a plain file: the tool inspects `files.info.filetype` and routes internally
+ * (canvas → converted markdown; anything else → native bytes). The file lands in
+ * the PM's own workspace, not shared — the PM decides what to do with it next.
  */
 const fetchSlackReferenceArgsSchema = {
   reference: z.string().describe(
-    'A Slack file link (e.g. https://….slack.com/files/…/F…/name) or a bare file id (F…) taken from the channel canvas.',
+    'A Slack file link (e.g. https://….slack.com/files/…/F…/name) or a bare file id (F…) taken from the channel canvas or the pinned-messages index.',
   ),
 };
 
@@ -2170,13 +2327,18 @@ async function fetchSlackReferenceHandler(agent: Agent, task: Task, args: z.infe
   if (!fileId) {
     return err(`No Slack file id found in "${args.reference}". Pass a Slack file link or an F… id.`);
   }
-      // Scope to canvas-referenced files only: the bot token can read far more
-      // of the workspace than this task should reach, so an unscoped id would
-      // let prompt-influenced input exfiltrate arbitrary accessible files.
-      const allowed = await collectCanvasFileAllowlist(task.metadata);
+      // Scope to canvas-referenced and pinned files only: the bot token can read
+      // far more of the workspace than this task should reach, so an unscoped id
+      // would let prompt-influenced input exfiltrate arbitrary accessible files.
+      // Both standing context sources are in scope, and nothing else is.
+      const [canvasIds, pinnedIds] = await Promise.all([
+        collectCanvasFileAllowlist(task.metadata),
+        collectPinnedFileAllowlist(task.metadata),
+      ]);
+      const allowed = new Set([...canvasIds, ...pinnedIds]);
       if (!allowed.has(fileId)) {
         return err(
-          `File ${fileId} is not referenced by an adopted channel canvas for this task — only the canvas itself or files it references can be fetched.`,
+          `File ${fileId} is neither referenced by an adopted channel canvas nor pinned in one of this task's channels — only the canvas itself, files it references, and pinned files can be fetched.`,
         );
       }
   const cwd = requireSandbox(agent).cwd;
@@ -2205,8 +2367,8 @@ async function fetchSlackReferenceHandler(agent: Agent, task: Task, args: z.infe
 }
 
 const fetchSlackReferenceDescription =
-  'Fetch a file referenced in the channel\'s project-context canvas and save it into your workspace so you can read it. ' +
-  'Pass the reference exactly as it appears in the canvas — a Slack file link or a file id. ' +
+  'Fetch a file referenced in the channel\'s project-context canvas, or pinned in the channel, and save it into your workspace so you can read it. ' +
+  'Pass the reference exactly as it appears in the canvas or in the pinned-messages index — a Slack file link or a file id. ' +
   'Documents and images are saved in their original form; a referenced canvas is saved as readable markdown.';
 // ============================================================================
 // Trigger tools (PM-only) — propose / list / update / delete persistent triggers
@@ -2344,6 +2506,13 @@ async function proposeTriggerHandler(_agent: Agent, task: Task, args: z.infer<z.
 
       const b = args.binding;
       if (!b.channel_id || !b.channel_name) return ok('A trigger needs both channel_id and channel_name for delivery.');
+      // The binding's channel id is model-supplied text, and a fired task is HOMED in that channel: it opens its
+      // own thread there and treats it as its own for reads. So the id has to be a channel. Without this check a
+      // `D…` or `U…` value would hand a fired task DM access that `post_to_channel` and the explore reads both
+      // refuse by prefix everywhere else — and the human approving it sees only the channel NAME on the card.
+      if (isDmOrUserId(b.channel_id)) {
+        return ok('A trigger has to deliver to a channel, not a DM or a user. Pass a channel ID (e.g. "C…"). Delivery to a person\'s DM is not supported yet.');
+      }
       const binding: TriggerBinding = { type: 'channel', channel_id: b.channel_id, channel_name: b.channel_name };
 
       // Best-effort creator id (only known in a DM) — used for cap accounting and

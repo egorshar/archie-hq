@@ -171,7 +171,7 @@ ANTHROPIC_API_KEY=sk-ant-...           # Claude API key (use this for Slack depl
 # PORT=3000                            # Default: 3000
 ```
 
-See [`.env.example`](../../.env.example) for the full list, including per-MCP plugin tokens (Atlassian, Bugsnag, TeamCity, Firebase, Rollbar) that get substituted into `plugins/.mcp.json`.
+See [`.env.example`](../../.env.example) for the full list. Your plugins repo may need additional `MCP_*` keys of its own — every `${MCP_*}` placeholder in `plugins/.mcp.json` is substituted from the environment at load time — but those belong to the plugins, not to the engine, so they aren't listed here.
 
 Without Slack credentials, the server runs in **CLI-only mode**.
 Without GitHub App credentials, **PR tools are disabled** but agents can still read/write code, commit, and push via SSH. To enable PR tools, follow the **[GitHub App Setup guide](github-setup.md)** — it covers creating the App, the exact repository permissions and webhook events, the private key, installation, and the env vars above.
@@ -279,6 +279,9 @@ archie-hq/
 ├── workdir/              # Runtime state (gitignored)
 │   ├── plugins/          # Symlink to archie-plugins (or auto-cloned via ARCHIE_PLUGINS)
 │   ├── plugins-data/     # Persistent per-plugin data
+│   ├── caches/           # Shared npm/yarn/Corepack caches (all agents, all tasks)
+│   ├── triggers/         # One JSON record per trigger
+│   ├── triggers-data/    # Persistent per-trigger data (survives across fires)
 │   ├── repos/            # Auto-cloned (or pre-cloned with SSH)
 │   └── sessions/         # Task persistence (shared/metadata.json, shared/knowledge.log)
 └── docs/                 # Documentation

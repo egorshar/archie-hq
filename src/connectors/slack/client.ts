@@ -19,7 +19,7 @@ import { prCardSubtitle, SLACK_PR_CARD_EMOJI } from '../../system/pr-card-format
 interface RawSlackMessage {
   /** Author's user ID. Empty string when the message was posted by an app/bot. */
   user: string;
-  text: string;
+  ownText: string;
   ts: string;
   files?: SlackFile[];
   attachments?: SlackAttachment[];
@@ -344,7 +344,7 @@ export async function getMessageReactions(channel: string, timestamp: string): P
     // external participants unresolved elsewhere.
     const nameById = new Map((await listWorkspaceUsers()).map((u) => [u.id, u.realName]));
     return raw
-      .filter((r): r is { name: string; count?: number; users?: string[] } => typeof r.name === 'string')
+      .filter((r): r is { name: string; count?: number; users?: string[] } => Boolean(r) && typeof r?.name === 'string')
       .map((r) => {
         const users = (r.users ?? []).map((uid) => nameById.get(uid) ?? uid);
         return { name: r.name, count: r.count ?? 0, ...(users.length > 0 ? { users } : {}) };
@@ -547,7 +547,19 @@ function applyMentionReplacements(
     return channelName ? `#<${channelId}:${channelName}>` : match;
   });
 
-  return result;
+  // Undo Slack's escaping last, after every `<…>` construct has been parsed, so
+  // a user who literally typed "&lt;" doesn't turn into a bogus mention.
+  return decodeSlackEntities(result);
+}
+
+/**
+ * Reverse the only three escapes Slack applies to message text. Left encoded,
+ * `&amp;` corrupts every URL with a query string the agent reads back — and it
+ * appears in `text` but not in `blocks`, so decoding is also what lets the two
+ * dialects be compared.
+ */
+function decodeSlackEntities(text: string): string {
+  return text.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
 }
 
 /**
@@ -563,14 +575,244 @@ async function fetchThreadHistory(
 ): Promise<RawSlackMessage[]> {
   const client = getSlackClient();
 
-  const result = await client.conversations.replies({
-    channel,
-    ts: threadTs,
-    oldest,
-    inclusive: oldest ? false : true,
-  });
+  // `conversations.replies` returns oldest-first and pages, so ignoring
+  // `next_cursor` would drop the NEWEST replies — including, on a long enough
+  // thread, the very message that triggered this fetch. Follow the cursor, with
+  // a page cap so a runaway thread can't stall the turn.
+  const raw: SlackHistoryMessage[] = [];
+  let cursor: string | undefined;
+  let page = 0;
+  do {
+    const result = await client.conversations.replies({
+      channel,
+      ts: threadTs,
+      oldest,
+      inclusive: oldest ? false : true,
+      cursor,
+      limit: 1000,
+    });
+    raw.push(...(result.messages ?? []));
+    cursor = result.response_metadata?.next_cursor || undefined;
+    page += 1;
+    if (cursor && page >= THREAD_PAGE_LIMIT) {
+      logger.warn(
+        'Slack',
+        `Thread ${channel}:${threadTs} exceeds ${THREAD_PAGE_LIMIT} pages (${raw.length} messages) — older replies kept, newest truncated`,
+      );
+      break;
+    }
+  } while (cursor);
 
-  return resolveRawMessages(result.messages ?? [], channel);
+  return resolveRawMessages(raw, channel);
+}
+
+/** Max `conversations.replies` pages per thread fetch (1000 messages each). */
+const THREAD_PAGE_LIMIT = 5;
+
+/**
+ * Slack encodes links in the legacy `text` field as `<url>` or `<url|label>`.
+ * Mentions share that bracket syntax (`<@U…>`, `<#C…>`, `<!here>`) but never
+ * carry a scheme, so requiring one isolates real URLs.
+ */
+const TEXT_FIELD_URL = /<((?:https?|mailto):[^|>\s]+)(?:\|[^>]*)?>/g;
+
+/**
+ * Recover URLs that the Block Kit walk dropped.
+ *
+ * `blocks` is the richer source and is preferred, but Slack renders an
+ * ever-growing set of pasted links as "smart link" chips carried by rich_text
+ * element types we don't know about (`message_mention`, `canvas`, the Jira
+ * issue chip, …). An unrecognised element contributes nothing, so the link
+ * vanishes from the agent's view entirely — the user sees a link in Slack and
+ * Archie insists no link was sent. The legacy `text` field always spells the
+ * raw URL out, so treat it as the backstop: append anything `extracted` is
+ * missing, deduped and in order.
+ */
+function recoverMissingUrls(extracted: string, textField: string | undefined): string[] {
+  if (!textField || typeof textField !== 'string') return [];
+  const missing: string[] = [];
+  for (const match of textField.matchAll(TEXT_FIELD_URL)) {
+    // Decode before comparing: `text` escapes `&` but `blocks` does not, so a
+    // query-string URL that the block walk DID render still looked absent and
+    // got appended a second time — which is every Grafana silence link and
+    // Bugsnag error URL.
+    const url = decodeSlackEntities(match[1]);
+    if (extracted.includes(url) || missing.includes(url)) continue;
+    missing.push(url);
+  }
+  return missing;
+}
+
+/**
+ * Object keys whose string values are Slack plumbing, never message content:
+ * ids, timestamps, colours, asset URLs, enum tags, layout hints. Everything not
+ * listed here is treated as potential content by `collectUnrenderedText`.
+ */
+const PLUMBING_KEYS = new Set([
+  'type', 'subtype', 'ts', 'id', 'user', 'team', 'channel', 'mrkdwn_in', 'verbatim',
+  'emoji', 'short', 'style', 'indent', 'border', 'offset', 'length', 'range',
+  'username', 'name', 'unicode', 'skin_tone', 'locale', 'lang', 'color', 'inviter',
+  // Accessibility label. On an image *block* it is the only content and the
+  // `image` case renders it; on an image *element* inside a context row it is
+  // just an icon name ("vcs", "app").
+  'alt_text',
+  'mimetype', 'filetype', 'pretty_type', 'permalink', 'permalink_public',
+  // Attachment author identity is carried structurally in `SlackAttachment.author`
+  // (a resolved SlackAuthor), and the card path renders `author_name` when Slack
+  // gave us no id to resolve — so these are never the only copy.
+  'author_name', 'author_subname', 'author_link',
+  // Deliberately rendered by the structural pass above; listing them here keeps
+  // the same content from being reported twice when phrasing differs.
+  'fallback', 'value',
+]);
+
+/**
+ * Slack's naming is regular enough to classify plumbing by suffix, which beats
+ * enumerating keys we haven't met yet (`canvas_update_section_ids` was not on
+ * anyone's list). Content keys are plain nouns — `text`, `title`, `pretext`,
+ * `footer`, `description`, `alt_text`.
+ */
+const PLUMBING_KEY_SUFFIX = /_(id|ids|ts|url|urls|icon|icons|users|type|subtype|color|code|link|team|hash|name|files)$/;
+
+function isPlumbingKey(key: string): boolean {
+  return PLUMBING_KEYS.has(key) || PLUMBING_KEY_SUFFIX.test(key);
+}
+
+/**
+ * Normalise text before asking "did we already render this?".
+ *
+ * Slack ships the same content twice in different dialects: `blocks` carry
+ * structure while the legacy `text` field carries mrkdwn (`*bold*`,
+ * `<url|label>`). A raw substring test calls those a mismatch and reports the
+ * whole message body as unrendered, which would bury the real signal.
+ */
+function normalizeForMatch(text: string): string {
+  return decodeSlackEntities(text)
+    // Link brackets become separators, not nothing: `<url|label>` names the same
+    // target twice, and deleting the delimiters would weld the url's tail to the
+    // label's head into a token ("comAshkenia") that matches nothing.
+    .replace(/[<>|]/g, '/')
+    .replace(/\b(?:https?:\/\/|mailto:)/g, '') // one dialect keeps the scheme, one drops it
+    .replace(/[*_~`]/g, '')            // mrkdwn emphasis, absent from rich_text
+    .replace(/[-•·‣]/g, '')            // list bullets: "- item" vs "• item"
+    // Whitespace is dropped entirely, not collapsed: the two dialects disagree
+    // about where paragraph and list breaks fall, and a break is never the only
+    // thing a fragment contributes.
+    .replace(/\s+/g, '');
+}
+
+/**
+ * Words worth matching on: alphanumeric runs of 4+ characters, lowercased.
+ * URL schemes are dropped because one dialect prints them and the other doesn't.
+ * Derived from the ORIGINAL string, not the whitespace-stripped form — stripping
+ * first welds "…#6887 archie/…" into the token "6887archie", which matches
+ * nothing and reads as a loss.
+ */
+function contentTokens(text: string): string[] {
+  return (decodeSlackEntities(text).toLowerCase().match(/[\p{L}\p{N}]{4,}/gu) ?? [])
+    .filter((token) => token !== 'http' && token !== 'https' && token !== 'mailto');
+}
+
+/**
+ * Is `candidate` already accounted for in the rendered output?
+ *
+ * Exact containment first. Failing that, token coverage: the legacy `text` field
+ * and `blocks` describe the same content in different dialects — mrkdwn
+ * emphasis, different list bullets, and a link like `<http://x.com/a|x.com/a>`
+ * that names its target twice where rich_text names it once. Requiring every
+ * substantial word to appear somewhere, rather than the whole run verbatim,
+ * tolerates the dialects without tolerating real loss: a dropped Jira link takes
+ * its distinctive tokens with it.
+ */
+function isCovered(candidate: string, normalizedRendered: string, renderedTokens: Set<string>): boolean {
+  const normalized = normalizeForMatch(candidate);
+  if (!normalized) return true;
+  if (normalizedRendered.includes(normalized)) return true;
+  const tokens = contentTokens(candidate);
+  if (tokens.length === 0) return false;
+  return tokens.every((token) => renderedTokens.has(token));
+}
+
+/**
+ * Whole subtrees with no message content, or content already handled by a
+ * dedicated extractor (`files` → `[Files: …]`, `reactions` → `[Reactions: …]`,
+ * `actions` → button labels).
+ */
+const PLUMBING_SUBTREES = new Set([
+  'bot_profile', 'icons', 'profile', 'user_profile', 'edited', 'reactions', 'files',
+  'metadata', 'third_party_auth', 'accessory', 'actions', 'root', 'shares',
+  'pinned_info', 'pinned_to',
+  // Interactive-control chrome, not message content: an app's overflow menu and
+  // select options ("More actions…", "Why am I seeing this?").
+  'placeholder', 'options', 'option_groups', 'initial_option', 'confirm',
+]);
+
+/** Cap on salvaged fragments, so a pathological payload can't flood the log. */
+const MAX_UNRENDERED_FRAGMENTS = 10;
+const MAX_UNRENDERED_FRAGMENT_CHARS = 300;
+
+/**
+ * Find text present in the raw Slack payload that our structural extraction did
+ * not surface.
+ *
+ * This is the backstop that makes capture *reliable* rather than merely correct
+ * today. Every extractor above is an allowlist — a `switch` over block types, a
+ * fixed set of attachment fields — and Slack keeps shipping new shapes (smart
+ * link chips, `markdown` and `table` blocks, Lists, canvases). An allowlist
+ * meets a new shape by silently dropping it, which is exactly how a pasted Jira
+ * link and a Grafana alert headline both vanished. So instead of trusting the
+ * allowlist to be complete, walk the payload and diff: anything that looks like
+ * human-readable text and does not already appear in the rendered output is
+ * reported. The caller appends it (nothing is lost) and logs it (we find out,
+ * and can then render it properly).
+ *
+ * Returns fragments in document order, deduped, each with its JSON path for the
+ * log line.
+ */
+function collectUnrenderedText(
+  payload: unknown,
+  rendered: string,
+): Array<{ path: string; text: string }> {
+  const found: Array<{ path: string; text: string }> = [];
+  const seen = new Set<string>();
+  const normalizedRendered = normalizeForMatch(rendered);
+  const renderedTokens = new Set(contentTokens(rendered));
+
+  const walk = (node: unknown, key: string, path: string): void => {
+    if (found.length >= MAX_UNRENDERED_FRAGMENTS) return;
+    if (Array.isArray(node)) {
+      node.forEach((item, i) => walk(item, key, `${path}[${i}]`));
+      return;
+    }
+    if (node && typeof node === 'object') {
+      for (const [childKey, child] of Object.entries(node)) {
+        if (PLUMBING_SUBTREES.has(childKey)) continue;
+        walk(child, childKey, path ? `${path}.${childKey}` : childKey);
+      }
+      return;
+    }
+    if (typeof node !== 'string') return;
+    if (isPlumbingKey(key)) return;
+    // Content is prose: it has letters. This filters ids, hex colours,
+    // timestamps and enum-ish tokens without needing to name them all.
+    if (!/\p{L}/u.test(node)) return;
+    const text = node.trim();
+    const normalized = normalizeForMatch(text);
+    if (!normalized || seen.has(normalized) || isCovered(text, normalizedRendered, renderedTokens)) return;
+    seen.add(normalized);
+    found.push({ path, text: text.slice(0, MAX_UNRENDERED_FRAGMENT_CHARS) });
+  };
+
+  try {
+    walk(payload, '', '');
+  } catch (error) {
+    // This is a diagnostic over an arbitrary third-party payload. It must never
+    // be the reason a Slack message fails to reach an agent, so a fault here
+    // degrades to "found nothing" rather than propagating out of the fetch.
+    logger.warn('Slack', 'collectUnrenderedText failed; skipping the backstop for this message', error);
+    return [];
+  }
+  return found;
 }
 
 /**
@@ -624,7 +866,28 @@ async function resolveRawMessages(
       }
     }
 
-    if (!consumedTopBlocks && msg.text) {
+    if (consumedTopBlocks) {
+      // `text` is a first-class content field, not a lossless mirror of the
+      // blocks: an app's notification headline ("Production release was
+      // started!") often lives ONLY there.
+      //
+      // Reconciled line by line rather than as one blob. Taking the whole field
+      // whenever any part of it was missing duplicated the entire message body
+      // on 47 of 3,778 real messages — one unmatched line, usually a link,
+      // dragged every already-rendered line in with it. Lines with no
+      // substantial word are skipped (they carry nothing `recoverMissingUrls`
+      // won't catch) so stray punctuation isn't echoed back.
+      const body = ownParts.join('\n');
+      const normalizedBody = normalizeForMatch(body);
+      const bodyTokens = new Set(contentTokens(body));
+      for (const line of String(msg.text ?? '').split('\n')) {
+        const trimmed = line.trim();
+        if (contentTokens(trimmed).length === 0) continue;
+        if (isCovered(trimmed, normalizedBody, bodyTokens)) continue;
+        ownParts.push(trimmed);
+      }
+      ownParts.push(...recoverMissingUrls(ownParts.join('\n'), msg.text));
+    } else if (msg.text) {
       ownParts.push(msg.text);
     }
 
@@ -640,20 +903,29 @@ async function resolveRawMessages(
       }
     }
 
-    // Attachments (forwarded messages, shared content, unfurls). Each entry
-    // becomes one SlackAttachment with its author + text correlated.
+    // Attachments (forwarded messages, shared content, unfurls, and every
+    // bot-posted alert card). Each entry becomes one SlackAttachment with its
+    // author + text correlated.
     const rawAttachments = msg.attachments as Array<{
       author_id?: string;
+      author_name?: string;
+      service_name?: string;
       text?: string;
       fallback?: string;
       pretext?: string;
       title?: string;
+      title_link?: string;
+      footer?: string;
+      fields?: Array<{ title?: string; value?: string }>;
+      blocks?: Array<unknown>;
+      actions?: Array<{ text?: string; url?: string }>;
       message_blocks?: Array<{ message?: { user?: string; blocks?: Array<unknown> } }>;
     }> | undefined;
 
     const attachments: RawAttachment[] = [];
     if (rawAttachments && Array.isArray(rawAttachments)) {
       for (const att of rawAttachments) {
+        if (!att || typeof att !== 'object') continue;
         // Prefer structured message_blocks; skip text/fallback when present to
         // avoid duplicating the same content.
         const seg: string[] = [];
@@ -674,9 +946,60 @@ async function resolveRawMessages(
           }
         }
 
-        if (!consumedFromBlocks) {
-          const attText = att.text || att.fallback;
-          if (attText && !seg.includes(attText)) seg.push(attText);
+        if (consumedFromBlocks) {
+          // A forwarded Slack message: the body came from message_blocks and the
+          // author is resolved from `authorId`, so only the trailing provenance
+          // line and an unresolvable author name are left to pick up.
+          if (!authorId && att.author_name) seg.unshift(att.author_name);
+          if (att.footer && !seg.includes(att.footer)) seg.push(att.footer);
+          // The forwarder's own `text` is usually a duplicate of the blocks, but
+          // not always — on a shared Slack message it can hold the pings that
+          // aren't in the quoted body.
+          const body = normalizeForMatch(seg.join('\n'));
+          if (att.text && !body.includes(normalizeForMatch(att.text))) seg.push(att.text);
+          seg.push(...recoverMissingUrls(seg.join('\n'), att.text || att.fallback));
+        } else {
+          // A bot-posted attachment is a card, not a paragraph: Grafana and
+          // Alertmanager put the alert name in `title` and its dashboard URL in
+          // `title_link`, the paged group in `pretext`, and Bugsnag puts the
+          // error location in `fields`. Reading only `text`/`fallback` left the
+          // agent with a bare "**Firing** / Value: C=1" and no idea which alert
+          // fired or where to look.
+          const push = (part: string | undefined) => {
+            if (part && !seg.includes(part)) seg.push(part);
+          };
+          push(att.pretext);
+          push(att.service_name ?? att.author_name);
+          push(att.title && att.title_link ? `${att.title} (${att.title_link})` : att.title ?? att.title_link);
+          const fieldLines = (Array.isArray(att.fields) ? att.fields : [])
+            .filter((field) => field && typeof field === 'object')
+            .map((field) => [field.title, field.value].filter(Boolean).join(': '))
+            .filter(Boolean);
+          // `fallback` is a flat restatement of the whole card, so when the
+          // structured fields already say it (Bugsnag) printing both just
+          // doubles the error string.
+          const coveredByFields = (candidate: string | undefined) =>
+            Boolean(candidate) && fieldLines.length > 0
+            && isCovered(
+              candidate!,
+              normalizeForMatch(fieldLines.join('\n')),
+              new Set(contentTokens(fieldLines.join('\n'))),
+            );
+          push(att.text || (coveredByFields(att.fallback) ? undefined : att.fallback));
+          fieldLines.forEach(push);
+          // Block Kit nested inside the attachment. Distinct from
+          // `message_blocks` (a forwarded Slack message) and previously unread,
+          // which is why a #bugs report's "Ticket" button rendered as the
+          // fallback string "[no preview available]".
+          for (const block of Array.isArray(att.blocks) ? att.blocks : []) {
+            push(extractBlockText(block as { type: string; elements?: Array<unknown> }));
+          }
+          push(att.footer);
+          for (const action of Array.isArray(att.actions) ? att.actions : []) {
+            if (!action || typeof action !== 'object') continue;
+            push(action.text ? `[${action.text}]${action.url ? ` ${action.url}` : ''}` : undefined);
+          }
+          seg.push(...recoverMissingUrls(seg.join('\n'), att.text || att.fallback));
         }
 
         const text = seg.join('\n');
@@ -695,21 +1018,76 @@ async function resolveRawMessages(
   /**
    * Extract text from a Block Kit block (handles rich_text, section, etc.)
    */
-  const extractBlockText = (block: { type: string; text?: { text?: string }; elements?: Array<unknown> }): string => {
+  const extractBlockText = (block: { type: string; text?: { text?: string } | string; elements?: Array<unknown> }): string => {
     if (!block) return '';
+
+    // `text` is an object on section/header, a bare string on markdown blocks.
+    const blockText = typeof block.text === 'string' ? block.text : block.text?.text;
 
     switch (block.type) {
       case 'rich_text':
-        // rich_text blocks have nested elements (sections, lists, quotes, etc.)
-        return extractRichTextElements(block.elements || []);
+        // A rich_text block's direct children are paragraph-level: sections,
+        // lists, quotes, code blocks. Render each separately and join on newline
+        // — extractRichTextElements concatenates its input with no separator
+        // (correct for the words *inside* a section, wrong across them, which
+        // used to run a list straight onto the end of the preceding sentence).
+        return (block.elements || [])
+          .map((el) => extractRichTextElements([el]))
+          .filter(Boolean)
+          .join('\n');
 
       case 'section':
-        // Section blocks have a text field
-        return block.text?.text || '';
-
       case 'header':
-        // Header blocks have a text field
-        return block.text?.text || '';
+      case 'markdown':
+        // Single text payload. `markdown` is what Archie posts with; Slack
+        // normally hands it back as rich_text, but not contractually.
+        return blockText || '';
+
+      case 'image':
+        // Alt text / caption is the only readable content; the URL keeps the
+        // reference resolvable.
+        return [blockText, (block as { alt_text?: string }).alt_text, (block as { image_url?: string }).image_url]
+          .filter(Boolean).join(' — ');
+
+      case 'video': {
+        const v = block as { title?: { text?: string }; description?: { text?: string }; title_url?: string };
+        return [v.title?.text, v.description?.text, v.title_url].filter(Boolean).join(' — ');
+      }
+
+      case 'actions':
+        // Button rows. The label plus its link is often the whole point of the
+        // block (e.g. a bug tracker's "Ticket" button).
+        return (block.elements ?? [])
+          .map((el) => {
+            const e = el as { text?: { text?: string }; url?: string };
+            if (!e.text?.text) return '';
+            return `[${e.text.text}]${e.url ? ` ${e.url}` : ''}`;
+          })
+          .filter(Boolean)
+          .join(' ');
+
+      case 'table': {
+        // `rows` is a cell matrix, each cell its own rich_text block. Archie
+        // posts markdown tables and Slack hands them back in this shape, so
+        // without this the agent re-reading its own message sees no table at all.
+        const rows = (block as { rows?: Array<Array<unknown>> }).rows;
+        if (!Array.isArray(rows)) return '';
+        return rows
+          .filter((row): row is Array<unknown> => Array.isArray(row))
+          .map((row) => `| ${row.map((cell) => extractBlockText(cell as { type: string })).join(' | ')} |`)
+          .join('\n');
+      }
+
+      case 'card': {
+        // Link-preview card (a GitHub PR unfurl, for one). Both halves are
+        // mrkdwn, and the title is where the URL lives — `text` carries only the
+        // flattened label.
+        const card = block as { title?: { text?: string }; subtitle?: { text?: string } };
+        return [card.title?.text, card.subtitle?.text].filter(Boolean).join('\n');
+      }
+
+      case 'divider':
+        return '';
 
       case 'context':
         // Context blocks have elements array with text/image objects
@@ -725,6 +1103,12 @@ async function resolveRawMessages(
         return '';
 
       default:
+        // Unknown block type — Slack adds them (`table`, `markdown`, …) faster
+        // than this switch grows. Salvage the two shapes every block follows
+        // rather than returning nothing; `collectUnrenderedText` catches the
+        // rest.
+        if (blockText) return blockText;
+        if (block.elements) return extractRichTextElements(block.elements);
         return '';
     }
   };
@@ -736,6 +1120,10 @@ async function resolveRawMessages(
     const parts: string[] = [];
 
     for (const element of elements) {
+      // Slack's arrays are typed, but this walks a third-party payload — a
+      // primitive or null where an element belongs must not take the whole
+      // thread fetch down with it.
+      if (!element || typeof element !== 'object') continue;
       const el = element as {
         type: string;
         elements?: Array<unknown>;
@@ -792,14 +1180,38 @@ async function resolveRawMessages(
           parts.push(`<#${el.channel_id}>`);
           break;
 
-        case 'emoji':
-          // Emoji
-          parts.push(`:${el.name}:`);
+        case 'emoji': {
+          // Slack's own text dialect spells a modified emoji `:pray::skin-tone-2:`.
+          const skinTone = (el as { skin_tone?: number }).skin_tone;
+          parts.push(skinTone ? `:${el.name}::skin-tone-${skinTone}:` : `:${el.name}:`);
           break;
+        }
 
-        case 'link':
-          // URL link
-          parts.push(el.url || '');
+        // `attachment_mention` is the "smart link" chip a third-party app's
+        // unfurl turns a pasted URL into — a Jira issue link is one, which is
+        // exactly the element that used to make a linked ticket vanish. Same
+        // shape as `link`: url plus a display label worth keeping (the ticket
+        // title).
+        case 'attachment_mention':
+        case 'link': {
+          // Keep the label when it says something the URL doesn't — "(details)"
+          // on a Bugsnag link, a page title on a Notion one. Slack's own
+          // auto-generated labels are just the truncated URL, so those collapse.
+          const url = el.url ?? '';
+          const label = el.text && !normalizeForMatch(url).includes(normalizeForMatch(el.text))
+            ? el.text
+            : undefined;
+          parts.push(label ? `${label} (${url})` : url || el.text || '');
+          break;
+        }
+
+        case 'canvas':
+          // Canvas chip. Sometimes only a file id — which is itself the
+          // information — and sometimes a docs URL alongside it.
+          parts.push(
+            `[canvas ${(el as { file_id?: string }).file_id}]`
+            + (el.url ? ` ${el.url}` : ''),
+          );
           break;
 
         case 'usergroup':
@@ -810,6 +1222,15 @@ async function resolveRawMessages(
         case 'broadcast':
           // @here, @channel, @everyone
           parts.push(`<!${(el as { range?: string }).range}>`);
+          break;
+
+        default:
+          // Slack keeps adding rich_text element types for "smart link" chips
+          // (message_mention, canvas, and whatever ships next). Salvage whatever
+          // the unknown element carries rather than dropping it silently —
+          // `recoverMissingUrls` below is the second line of defence.
+          if (el.url) parts.push(el.url);
+          else if (el.text) parts.push(el.text);
           break;
       }
     }
@@ -871,6 +1292,7 @@ async function resolveRawMessages(
 
     if (attachments && Array.isArray(attachments)) {
       for (const att of attachments) {
+        if (!att || typeof att !== 'object') continue;
         // Files nested in attachment
         processFiles(att.files);
 
@@ -895,7 +1317,7 @@ async function resolveRawMessages(
     const raw = (msg as { reactions?: Array<{ name?: string; count?: number }> }).reactions;
     if (!raw || !Array.isArray(raw)) return [];
     return raw
-      .filter((r): r is { name: string; count?: number } => typeof r.name === 'string')
+      .filter((r): r is { name: string; count?: number } => Boolean(r) && typeof r?.name === 'string')
       .map((r) => ({ name: r.name, count: r.count ?? 0 }));
   };
 
@@ -947,9 +1369,33 @@ async function resolveRawMessages(
     const botName = rawMsg.bot_profile?.name;
     const teamId = rawMsg.bot_profile?.team_id || rawMsg.team;
     const reactions = extractReactions(msg);
+
+    // Backstop: whatever the structural pass above failed to surface gets
+    // appended here and logged, so a Slack shape we don't know about degrades
+    // into slightly untidy text instead of silently disappearing.
+    let ownTextWithResidue = ownText;
+    // File ids count as accounted-for: Slack's text fallback for a file share is
+    // the bare id, and we capture it structurally on `SlackFile.id` even though
+    // only the name is printed.
+    const fileNames = (files ?? []).map((f) => `${f.name} ${f.id}`).join('\n');
+    const unrendered = collectUnrenderedText(
+      msg,
+      [ownText, ...attachments.map((a) => a.text), fileNames].join('\n'),
+    );
+    if (unrendered.length > 0) {
+      logger.warn(
+        'Slack',
+        `Unrendered message content at ${unrendered.map((u) => u.path).join(', ')} ` +
+        `(ts ${msg.ts}) — extend extractBlockText/extractMessageParts to render it properly`,
+      );
+      ownTextWithResidue = [ownText, `[unparsed: ${unrendered.map((u) => u.text).join(' | ')}]`]
+        .filter(Boolean)
+        .join('\n');
+    }
+
     return {
       user: msg.user || '',
-      text: applyMentionReplacements(ownText, userInfoMap, groupInfoMap, channelInfoMap),
+      ownText: applyMentionReplacements(ownTextWithResidue, userInfoMap, groupInfoMap, channelInfoMap),
       ts: msg.ts || '',
       ...(files && files.length > 0 ? { files } : {}),
       ...(resolvedAttachments.length > 0 ? { attachments: resolvedAttachments } : {}),
@@ -994,7 +1440,7 @@ async function resolveAuthorsAndMap(messages: RawSlackMessage[]): Promise<SlackT
       : { id: msg.botId!, username: msg.botName || 'bot', realName: msg.botName || 'bot', teamId: msg.teamId };
     return {
       user: author,
-      text: msg.text,
+      ownText: msg.ownText,
       ts: msg.ts,
       ...(msg.files && msg.files.length > 0 ? { files: msg.files } : {}),
       ...(msg.attachments && msg.attachments.length > 0 ? { attachments: msg.attachments } : {}),
@@ -1341,8 +1787,13 @@ export interface SlackFileInfo {
 /**
  * List canvas tabs pinned in a channel (returns their file ids). Cached for
  * 1 minute, mirroring `isChannelShared`. DMs never have canvas tabs.
+ *
+ * Returns `null` when the lookup FAILED, as distinct from `[]` meaning the channel
+ * genuinely has no canvas tabs. Callers reconcile persisted state against this
+ * list, so conflating the two would let one transient API error look like "every
+ * canvas was removed" and discard standing channel context.
  */
-export async function getChannelCanvasTabs(channelId: string): Promise<CanvasTab[]> {
+export async function getChannelCanvasTabs(channelId: string): Promise<CanvasTab[] | null> {
   if (channelId.startsWith('D')) return [];
 
   const cached = canvasTabsCache.get(channelId);
@@ -1369,8 +1820,169 @@ export async function getChannelCanvasTabs(channelId: string): Promise<CanvasTab
     return tabs;
   } catch (error) {
     logger.warn('Slack', `Failed to fetch canvas tabs for ${channelId}`, error);
-    return [];
+    return null;
   }
+}
+
+// ---- Channel pinned messages (standing channel context) -------------------
+// `pins.list` returns whatever is pinned in a channel — messages and files.
+// Requires the `pins:read` scope, which older installs of the app do not have.
+
+/** One item pinned in a channel — a message or a file, as `pins.list` reports it. */
+export interface PinnedItem {
+  kind: 'message' | 'file';
+  pinnedAt: number;    // epoch seconds, Slack's unit
+  pinnedBy: string;    // Slack user id of whoever pinned it
+  messageTs?: string;
+  author?: string;
+  /** Slack-assigned bot identity when the pinned message was posted by an app. */
+  botId?: string;
+  /** Bot's display name, when posted by an app. */
+  botName?: string;
+  /** Workspace the message originated from — used to drop bots from another workspace. */
+  teamId?: string;
+  /** The message's own text, already extracted (blocks flattened, mentions resolved) — never the raw legacy `text` fallback. */
+  ownText?: string;
+  /** Attachment cards on the pinned message, carried out unrendered so the caller renders them through the shared message-body module. */
+  attachments?: SlackAttachment[];
+  /** Files on the pinned message, carried out for the same reason. */
+  files?: SlackFile[];
+  /**
+   * Reactions on the pinned message, carried out like everything else the extractor found. The pin path deliberately renders WITHOUT them (`includeReactions: false`) because the rendered string feeds a content digest: reactions change without the pin ever being edited, so digesting them would turn re-summarise-on-edit into re-summarise-on-every-emoji. Carrying the field and suppressing it at render time — rather than never carrying it — is what lets a test prove the suppression actually happens.
+   */
+  reactions?: SlackReaction[];
+  permalink?: string;
+  fileId?: string;
+  fileName?: string;
+  fileUser?: string;
+  fileCreated?: number;
+}
+
+interface ChannelPinsCacheEntry {
+  items: PinnedItem[];
+  fetchedAt: number;
+}
+const channelPinsCache = new Map<string, ChannelPinsCacheEntry>();
+const CHANNEL_PINS_TTL_MS = 60_000;
+
+/** Latched once `pins.list` reports `missing_scope` — see `listChannelPins`. */
+let pinsScopeMissing = false;
+
+/**
+ * List the items pinned in a channel. Cached for 1 minute, mirroring
+ * `getChannelCanvasTabs`. DMs are never scanned for pins.
+ *
+ * Returns `null` when the lookup FAILED, as distinct from `[]` meaning the channel
+ * genuinely has nothing pinned. Callers reconcile persisted state against this list,
+ * so conflating the two would let one transient API error read as "every pin was
+ * removed" and blank standing channel context — the same contract
+ * `getChannelCanvasTabs` documents above.
+ *
+ * A `missing_scope` failure latches a process-level flag instead of being retried.
+ * The canvas's retry-on-every-call behaviour is the right response to a transient
+ * error and the wrong one to a permanent one: in a workspace installed without
+ * `pins:read`, retrying would issue one `pins.list` per inbound message, forever.
+ * The bot token comes from the environment, so granting the scope means reinstalling
+ * and restarting anyway — there is nothing this process could observe that would
+ * make the next call succeed.
+ */
+export async function listChannelPins(channelId: string): Promise<PinnedItem[] | null> {
+  if (channelId.startsWith('D')) return [];
+  if (pinsScopeMissing) return null;
+
+  const cached = channelPinsCache.get(channelId);
+  if (cached && Date.now() - cached.fetchedAt < CHANNEL_PINS_TTL_MS) {
+    return cached.items;
+  }
+
+  try {
+    const result = await getSlackClient().pins.list({ channel: channelId });
+    // The pinned-item shape isn't in the WebClient types — cast to read it.
+    const raw = result as {
+      items?: Array<{
+        type?: string;
+        created?: number;
+        created_by?: string;
+        message?: { ts?: string; user?: string; text?: string; permalink?: string };
+        file?: { id?: string; title?: string; name?: string; user?: string; created?: number };
+      }>;
+    };
+    // `pins.list` hands back the raw message payload, whose top-level `text` is only
+    // Slack's legacy fallback: anything living in `blocks` or `attachments` is absent
+    // from it, and links and mentions arrive as raw `<url|label>` / `<@U…>` mrkdwn. A
+    // channel's most-pinned things — app posts, workflow output, unfurl cards — are
+    // exactly the messages with an empty `text`, and each one would otherwise index as
+    // a blank line. So run the payloads through the same extraction every other inbound
+    // path uses, in ONE batch: `resolveRawMessages` resolves mentions for the whole set
+    // together, where a call per pin would be a `users.info` round trip per pin.
+    //
+    // The resolver also reports `botId` for an app/bot post, and that is carried through
+    // rather than discarded: a relay app (RSS, email-to-Slack, a Jira or Datadog hook)
+    // posts as an in-workspace user, so classifying its `user` says only that the RELAY
+    // is internal and nothing at all about where the content came from. Without the flag
+    // the caller's trust gate would wave that through. Slack gives no way to tell relayed
+    // outside content from an app's own, so the caller fails closed on it.
+    const messageItems = (raw.items ?? []).filter((i) => i.type === 'message' && i.message?.ts);
+    const resolved = await resolveRawMessages(
+      messageItems.map((i) => i.message as SlackHistoryMessage),
+      channelId,
+    );
+    const byTs = new Map(resolved.map((m) => [m.ts, m]));
+
+    const items: PinnedItem[] = [];
+    for (const item of raw.items ?? []) {
+      if (item.type === 'message' && item.message?.ts) {
+        const full = byTs.get(item.message.ts);
+        // Attachment and file parts carry the substance of a forwarded or app-posted message, so they belong in the index text — but they are handed OUT structured rather than joined here. This module extracts; rendering a message into agent-facing text is `message-body.ts`'s single job, and that module imports `isExternalUser` from here for the forwarded-from provenance label, so calling it from this file would close a module cycle. The caller (`channel-pins.ts`) renders these parts through it instead.
+        items.push({
+          kind: 'message',
+          pinnedAt: item.created ?? 0,
+          pinnedBy: item.created_by ?? '',
+          messageTs: item.message.ts,
+          author: full?.user ?? item.message.user ?? '',
+          ...(full?.botId ? { botId: full.botId, botName: full.botName } : {}),
+          ...(full?.teamId ? { teamId: full.teamId } : {}),
+          // `item.message.text` is the raw Slack payload field — Slack's legacy fallback, kept under its API name — and is only the last resort when extraction produced nothing.
+          ownText: full?.ownText ?? item.message.text ?? '',
+          ...(full?.attachments ? { attachments: full.attachments } : {}),
+          ...(full?.files ? { files: full.files } : {}),
+          ...(full?.reactions ? { reactions: full.reactions } : {}),
+          permalink: item.message.permalink,
+        });
+      } else if (item.type === 'file' && item.file?.id) {
+        items.push({
+          kind: 'file',
+          pinnedAt: item.created ?? 0,
+          pinnedBy: item.created_by ?? '',
+          fileId: item.file.id,
+          fileName: item.file.title || item.file.name || item.file.id,
+          fileUser: item.file.user ?? '',
+          fileCreated: item.file.created,
+        });
+      }
+    }
+    channelPinsCache.set(channelId, { items, fetchedAt: Date.now() });
+    return items;
+  } catch (error) {
+    const code = (error as { data?: { error?: string } } | undefined)?.data?.error;
+    if (code === 'missing_scope' || String(error).includes('missing_scope')) {
+      pinsScopeMissing = true;
+      logger.warn('Slack', 'pins:read not granted — pinned-message context is dormant until the app is reinstalled with the scope');
+    } else {
+      logger.warn('Slack', `Failed to list pins for ${channelId}`, error);
+    }
+    return null;
+  }
+}
+
+/**
+ * Clear the latched missing-scope flag (and the pins cache) between tests. The
+ * flag is process-scoped by design, so a test that trips it would otherwise
+ * poison every case that runs after it.
+ */
+export function __resetPinsScopeFlagForTests(): void {
+  pinsScopeMissing = false;
+  channelPinsCache.clear();
 }
 
 /** Fetch metadata for a Slack file via `files.info`. Returns null on failure. */
@@ -1485,6 +2097,31 @@ export function extractMentionText(text: string, botUserId: string): string {
  */
 export function isBotMention(text: string, botUserId: string): boolean {
   return text.includes(`<@${botUserId}>`);
+}
+
+/**
+ * Run one raw Slack message payload through the full inbound extraction —
+ * blocks, attachment cards, files, mention resolution, entity decoding — the
+ * same path `fetchSlackThread` uses.
+ *
+ * For callers that hold a message payload directly rather than fetching a
+ * thread, notably the `message_changed` edit handler. Resolving mentions alone
+ * (`cleanSlackText`) leaves that caller with Slack's flat `text` fallback, so an
+ * edited message rendered its links as raw `<url|label>` mrkdwn and anything
+ * living in `blocks` or `attachments` did not survive at all.
+ */
+export async function extractMessageContent(
+  message: unknown,
+  channelId: string,
+): Promise<{ text: string; attachments?: SlackAttachment[]; files?: SlackFile[] }> {
+  const [resolved] = await resolveRawMessages([message as SlackHistoryMessage], channelId);
+  if (!resolved) return { text: '' };
+  const authorless = (resolved.attachments ?? []).map((a) => ({ text: a.text }));
+  return {
+    text: resolved.ownText,
+    ...(authorless.length > 0 ? { attachments: authorless } : {}),
+    ...(resolved.files?.length ? { files: resolved.files } : {}),
+  };
 }
 
 /**
@@ -1711,6 +2348,99 @@ export async function findSlackUsers(query: string): Promise<SlackUserInfo[]> {
     u.realName.toLowerCase().includes(q) ||
     u.displayName.toLowerCase().includes(q)
   );
+}
+
+/** A human in a task: the log's own mention marker, plus their job title. */
+export interface TaskPerson {
+  /** Slack user id — every decision (bot, external, title) is made from this. */
+  id: string;
+  /** The `<@ID:Name>` marker verbatim from the log, passed through untouched. */
+  marker: string;
+  /** `profile.title`, or `''` when we won't vouch for it. Callers must tolerate empty. */
+  title: string;
+}
+
+/**
+ * Maximum characters of a Slack job title we will place in a system prompt.
+ * Real titles are short ("Backend Lead", "Full Stack Engineer | DAU Squad");
+ * anything longer is being used as a payload, not a job title.
+ */
+const MAX_TITLE_LENGTH = 80;
+
+/**
+ * Flatten a job title to one short prompt-safe span.
+ *
+ * Two shapes are removed because this text lands in a system prompt. Newlines,
+ * because a multi-line title could close the line it sits on and forge a new
+ * prompt section. And angle brackets, so a title cannot write a tag at all —
+ * stronger than cutting one known closing tag, and a job title has no legitimate
+ * use for them. With no way to write `</people_in_task>`, the block that carries
+ * these titles holds by construction.
+ */
+function sanitizeJobTitle(title: string): string {
+  return title
+    .replace(/[<>]/g, '')
+    .replace(/[\u0000-\u001F\u007F]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, MAX_TITLE_LENGTH);
+}
+
+/**
+ * Job titles for people we are willing to quote one for, keyed by user id.
+ *
+ * A job title is self-authored free text, so carrying one into a system prompt
+ * extends trust to whoever wrote it. Excluded are external (Slack Connect) users
+ * and home-workspace guests, whose profiles belong to people outside the org.
+ * Unlike `isExternalUser`, which fails open to keep the bot usable, this fails
+ * *closed*: with no home team we cannot tell insider from outsider, so the map is
+ * empty and nobody gets a title. Same on any Slack failure — a missing title is
+ * a cosmetic loss, and this feeds prompt context that must never block a spawn.
+ */
+async function loadTrustedJobTitles(): Promise<Map<string, string>> {
+  const titles = new Map<string, string>();
+  if (getHomeTeamId() === null) return titles;
+  let users: SlackUserInfo[];
+  try {
+    users = await listWorkspaceUsers();
+  } catch (error) {
+    logger.warn('Slack', 'Failed to load job titles — omitting them', error);
+    return titles;
+  }
+  for (const user of users) {
+    if (isExternalUser(user) || !user.title) continue;
+    titles.set(user.id, sanitizeJobTitle(user.title));
+  }
+  return titles;
+}
+
+/**
+ * List the humans a task transcript names, as `{ id, name, title }`.
+ *
+ * Every marker (both bracket orders — see `restoreMentions`) is passed through
+ * verbatim; only the id inside it is interpreted. That matters for more than
+ * simplicity — on a shared channel `appendSlackMessage` masks an external
+ * author's display name to "external" on purpose, and reassembling the marker
+ * from user records would undo that.
+ *
+ * The only thing looked up is the job title, and only for people we will vouch
+ * for (see `loadTrustedJobTitles`). Bots are skipped: `B…` ids and Archie's own
+ * user id, so a workflow like "Report a bug" never reads as a colleague.
+ * Order is first-seen.
+ */
+export async function resolvePeopleFromTranscript(transcript: string): Promise<TaskPerson[]> {
+  const seen = new Map<string, string>();
+  const re = /(?:@<|<@)([A-Z0-9]+):[^>]+>/g;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(transcript)) !== null) {
+    const [marker, id] = match;
+    if (id.startsWith('B') || id === getBotUserId()) continue;
+    if (!seen.has(id)) seen.set(id, marker);
+  }
+  if (seen.size === 0) return [];
+
+  const titles = await loadTrustedJobTitles();
+  return Array.from(seen, ([id, marker]) => ({ id, marker, title: titles.get(id) ?? '' }));
 }
 
 // ============================================================================

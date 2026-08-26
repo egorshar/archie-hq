@@ -1,10 +1,9 @@
 import { describe, it, expect, vi } from 'vitest';
 import type { SlackThread } from '../../../types/index.js';
 
-// `buildSlackTitleTranscript` imports renderMessageForContext from
-// tasks/persistence.js, which pulls in the workdir/event-bus/task module graph.
-// Mock the leaves so the module loads in the test sandbox (mirrors the mock set
-// the prior title-generator test used for the same reason).
+// `buildSlackTitleTranscript` renders through `message-body.js`, whose only
+// runtime dependency is the Slack client's user classification. Mock that leaf
+// so the module loads in the test sandbox without the Slack SDK.
 vi.mock('../client.js', () => ({
   isExternalUser: (user: { teamId?: string; isRestricted?: boolean; isUltraRestricted?: boolean }) => {
     if (user.isRestricted || user.isUltraRestricted) return true;
@@ -43,7 +42,7 @@ function makeThread(overrides?: Partial<SlackThread>): SlackThread {
     messages: [
       {
         ts: '1.0',
-        text: 'hello, can you help fix the broken auth flow on Android',
+        ownText: 'hello, can you help fix the broken auth flow on Android',
         user: { id: 'U1', username: 'me', realName: 'Dana', teamId: 'T_HOME' },
       },
     ],
@@ -62,7 +61,7 @@ describe('buildSlackTitleTranscript', () => {
     const { hasUsableContent } = buildSlackTitleTranscript(makeThread({
       shared: true,
       messages: [
-        { ts: '1.0', text: 'external talk', user: { id: 'UEXT', username: 'ext', realName: 'External', teamId: 'T_OTHER' } },
+        { ts: '1.0', ownText: 'external talk', user: { id: 'UEXT', username: 'ext', realName: 'External', teamId: 'T_OTHER' } },
       ],
     }));
     expect(hasUsableContent).toBe(false);
@@ -72,8 +71,8 @@ describe('buildSlackTitleTranscript', () => {
     const { transcript } = buildSlackTitleTranscript(makeThread({
       shared: true,
       messages: [
-        { ts: '1.0', text: 'should be redacted', user: { id: 'UEXT', username: 'ext', realName: 'External', teamId: 'T_OTHER' } },
-        { ts: '2.0', text: 'internal subject', user: { id: 'UINT', username: 'me', realName: 'Dana', teamId: 'T_HOME' } },
+        { ts: '1.0', ownText: 'should be redacted', user: { id: 'UEXT', username: 'ext', realName: 'External', teamId: 'T_OTHER' } },
+        { ts: '2.0', ownText: 'internal subject', user: { id: 'UINT', username: 'me', realName: 'Dana', teamId: 'T_HOME' } },
       ],
     }));
     expect(transcript).toContain('[external]: [redacted: external participant in shared channel]');
@@ -87,7 +86,7 @@ describe('buildSlackTitleTranscript', () => {
       messages: [
         {
           ts: '1.0',
-          text: 'fyi',
+          ownText: 'fyi',
           user: { id: 'UINT', username: 'me', realName: 'Dana', teamId: 'T_HOME' },
           attachments: [
             { text: 'forwarded body', author: { id: 'UEXT', username: 'ext', realName: 'External', teamId: 'T_OTHER' } },

@@ -193,6 +193,15 @@ export interface AgentDef {
   maxMode?: MaxModeSpec;
 
   /**
+   * Tool approval policy for the MCP servers this agent mounts, resolved from
+   * each server's `archie` block in the plugins repo's `.mcp.json`. When
+   * present, a PreToolUse gate intercepts calls to those servers: `allow` tools
+   * pass ungated, `ask` tools require a per-call Slack approval, `deny` tools
+   * never run. See docs/architecture/tool-approvals.md.
+   */
+  mcpPolicy?: import('../agents/tool-approval-gate.js').McpToolPolicy;
+
+  /**
    * Maximum agentic turns — API round-trips — before the agent is stopped
    * (default: {@link DEFAULT_MAX_TURNS}). A safety net against a turn that
    * never decides it is done, not a target to spend.
@@ -232,11 +241,8 @@ export interface AgentDef {
   /** Absolute path to plugin's persistent data directory (workdir/plugins-data/<name>/) */
   pluginDataPath?: string;
 
-  /** Absolute path to plugin's skills/ directory */
-  skillsPath?: string;
-
-  /** Absolute path to archie-hq's built-in skills/ directory (PM only). Symlinked alongside plugin skills. */
-  coreSkillsPath?: string;
+  /** Ordered, deduplicated list of absolute skill directories to symlink into the agent workspace. Plugin skills come first, so a plugin shadows a core skill of the same name. Built by resolveSkillPaths in src/agents/core-skills.ts. */
+  skillPaths?: string[];
 
   /** PM-specific fields (PM only) — built dynamically from team */
   pmConfig?: AgentPmDef;

@@ -22,6 +22,26 @@ Verify acceptance criteria against a live Archie instance booted from the branch
 - For the edit-mode and merge-approval scenarios: at least one configured engineering repo in the workdir (see the recipes' prerequisite notes).
 - macOS Docker Desktop caveat: a wedged `docker-credential-desktop` helper can stall `docker compose up --build` during registry auth — upstream of the harness's bounded wait, so boot appears to hang before any diagnostics. Verify with `docker-credential-desktop list </dev/null`; if it hangs, point `DOCKER_CONFIG` at a scratch dir without `credsStore` for the run (leave your real `~/.docker/config.json` untouched). The scratch config also drops the `desktop-linux` context, so additionally set `DOCKER_HOST=unix://$HOME/.docker/run/docker.sock` or every docker command will fail to reach the daemon (observed in the 2026-07-05 QA run).
 
+### Booting from a git worktree
+
+A worktree checkout is a fresh tree, so `workdir/` and `claude-data/` do not exist in it and the boot creates empty ones. An instance booted that way has no history and no per-channel state: the CLI task list has nothing to paginate, and — because the channel store is what makes announce-once work — **the instance re-announces every `Archie…` canvas into its real Slack channel on first contact.** That is a live, user-visible post caused purely by test setup.
+
+Before the first boot in a new worktree:
+
+```bash
+ln -s /path/to/main/checkout/workdir      workdir
+ln -s /path/to/main/checkout/claude-data  claude-data
+cp -R /path/to/main/checkout/secrets      secrets     # a real copy, NOT a symlink
+```
+
+**Do all three, and link `workdir` whole — that alone resolves the setup.** In particular it is what supplies the plugins: main's `workdir/plugins` is itself a symlink to a local `archie-plugins` checkout, so linking main's `workdir` gets you the configured agents and their repos for free. Creating `workdir/` yourself instead — or letting the boot create it — leaves `workdir/plugins` empty, and **that does not fail the boot**: `ARCHIE_PLUGINS` is unset in local dev so nothing clones, and `initWorkdir`'s guard only tests that the directory *exists*. The instance comes up healthy with **zero agents**, and the first symptom is a repo-change scenario where the PM never requests edit mode — which reads like a product bug rather than setup.
+
+`workdir` is designed for concurrent access by many containers, so sharing it between checkouts is correct rather than risky — and copying it is not an option at ~20G.
+
+**`secrets/` is the exception and must be a real directory.** `Dockerfile.dev` does `COPY secrets/ /tmp/ca-src/`, and Docker's build context does not follow symlinks at the context root: a symlinked `secrets` fails the build with `"/secrets": not found`. Bind mounts *do* follow host symlinks, which is why `workdir` and `claude-data` are fine. The same asymmetry is why `docker-compose.yml` re-mounts `./workdir/plugins` explicitly — a symlink *inside* a mounted tree does not resolve in the container.
+
+Also set a free `PORT` in the worktree's `.env`. Main's 3000 is usually taken by another checkout's container; `boot.ts` will relocate around a squatter on its own, but the `archie-debug` MCP resolves its URL once at spawn, so an explicit port is one less thing to reconcile.
+
 **Rollback:** delete `.claude/skills/archie-e2e/` and `tools/e2e/` — the harness has no side effects and nothing else references them (plus one `e2e-evidence/` line in `.gitignore`).
 
 ## 1. Boot
@@ -140,6 +160,16 @@ Asserts the documented network boundary on the live instance: it copies `tools/e
 Why it exists: the allowlist is enforced by the Claude CLI, not by our code, and it silently stopped being enforced between CLI 2.1.156 and 2.1.157 while our configuration was unchanged. Archie picked that up transitively in a lockfile refresh and ran with unrestricted agent egress for six weeks. No unit test can catch that class of regression — only a live assertion can. Run this after any SDK bump, any `src/agents/sandbox.ts` or `spawn.ts` change, and before shipping anything that relies on the isolation claims in `SECURITY.md`.
 
 A failure here is a release blocker, not a flake. If the non-allowlisted host is reachable, agent egress is open.
+
+## 3c. Tool-approval-gate check (run on any branch that touches the gate, spawn hooks, or bumps the SDK)
+
+```bash
+npx tsx tools/e2e/tool-gate-check.ts     # requires a booted instance
+```
+
+Asserts the MCP tool approval gate end to end on the live instance, using the `gatecheck` example plugin (a stub MCP server whose one mutation appends to `workdir/e2e/gate-marker.log`, observable from the host; its policy, including the button title, is the `archie` block on the server in `examples/plugins/.mcp.json`): a gated call must produce a `tool_call` approval request **without executing**, approving via the API must let the agent's retry execute **exactly once**, and the fixture's `allow`-tier tool must pass ungated. Same rationale as the egress check: the interception lives in the Claude CLI (`PreToolUse` under `bypassPermissions`), is version-coupled, and no unit test can notice the CLI silently ceasing to deliver MCP calls to hooks. A failure is a release blocker for anything relying on the gate.
+
+Prerequisite: the booted workdir includes the `gatecheck` example plugin (`npm run example:setup` links `examples/plugins`, which ships it). The check is self-driving over the HTTP API — no MCP session needed — and takes one model round-trip per phase (~2-5 min total).
 
 ## 4. Teardown
 

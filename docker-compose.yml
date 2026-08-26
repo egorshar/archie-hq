@@ -62,7 +62,7 @@ services:
       - NODE_ENV=development
 
     volumes:
-      # Workdir mount — contains repos/, sessions/
+      # Workdir mount — contains repos/, sessions/, caches/, triggers/, triggers-data/
       - ./workdir:/workdir
 
       # Plugins — mounted explicitly because workdir/plugins is a symlink
@@ -71,6 +71,8 @@ services:
       # Mount source code for hot reload
       - ./src:/app/src
       - ./prompts:/app/prompts
+      # Core skills, which src/agents/core-skills.ts mounts from /app/skills per its CORE_SKILL_MOUNTS manifest, and only if that directory exists. Dockerfile.dev never copies them, so this bind mount is their only source in dev — without it every core-skill `Skill` call fails with "Unknown skill".
+      - ./skills:/app/skills
 
       # SSH agent forwarding (macOS Docker Desktop)
       - /run/host-services/ssh-auth.sock:/run/host-services/ssh-auth.sock

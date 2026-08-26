@@ -15,13 +15,13 @@ afterEach(async () => {
   await Promise.all(tmpRoots.splice(0).map((d) => rm(d, { recursive: true, force: true })));
 });
 
-// Delegate to the REAL linkAgentSkills so these tests exercise production
+// Delegate to the REAL linkSkillDirs so these tests exercise production
 // symlinking behavior, not a hand-copied reimplementation that could drift
 // from src/agents/skill-linking.ts. Wrapping it in vi.fn() keeps it spyable
 // for the call-shape assertions below.
 vi.mock('../../../agents/skill-linking.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../../agents/skill-linking.js')>();
-  return { ...actual, linkAgentSkills: vi.fn(actual.linkAgentSkills) };
+  return { ...actual, linkSkillDirs: vi.fn(actual.linkSkillDirs) };
 });
 
 // Per-agent tests with real file system behavior.
@@ -34,28 +34,33 @@ async function makeSkillSource(root: string, name: string, skills: string[]): Pr
 describe('stageAgentSkills (per-agent, P3a §4)', () => {
   beforeEach(async () => {
     vi.resetModules();
-    // Restore delegation to the REAL linkAgentSkills here so these tests
+    // Restore delegation to the REAL linkSkillDirs here so these tests
     // exercise production symlinking behavior end to end, regardless of run
     // order (vi.resetModules() clears the module-level mock's call history
     // but not its implementation override from a previous test file run).
-    const { linkAgentSkills } = await import('../../../agents/skill-linking.js');
+    const { linkSkillDirs } = await import('../../../agents/skill-linking.js');
     const actual = await vi.importActual<typeof import('../../../agents/skill-linking.js')>(
       '../../../agents/skill-linking.js',
     );
-    vi.mocked(linkAgentSkills).mockReset();
-    vi.mocked(linkAgentSkills).mockImplementation(actual.linkAgentSkills);
+    vi.mocked(linkSkillDirs).mockReset();
+    vi.mocked(linkSkillDirs).mockImplementation(actual.linkSkillDirs);
   });
 
-  it("links only the agent's own sources; plugin shadows core on a name collision", async () => {
+  it("mounts the agent's resolved skill list, one link per path", async () => {
     const { stageAgentSkills } = await import('../skills.js');
     const root = await tmpRoot('oc-skills-');
     const plugin = await makeSkillSource(root, 'plugin-skills', ['deploy', 'shared']);
-    const core = await makeSkillSource(root, 'core-skills', ['review', 'shared']);
+    const core = await makeSkillSource(root, 'core-skills', ['review']);
     const dest = join(root, 'dest');
-    const n = await stageAgentSkills({ id: 'backend', skillsPath: plugin, coreSkillsPath: core } as any, dest);
-    expect(n).toBe(2);
+    // `skillPaths` is what the registry resolved: plugin-first and already
+    // deduplicated by name, so shadowing is decided there, not here.
+    const skillPaths = [join(plugin, 'deploy'), join(plugin, 'shared'), join(core, 'review')];
+
+    const n = await stageAgentSkills({ id: 'backend', skillPaths } as any, dest);
+
+    expect(n).toBe(3);
     expect((await readdir(dest)).sort()).toEqual(['deploy', 'review', 'shared']);
-    expect(await readlink(join(dest, 'shared'))).toBe(join(plugin, 'shared')); // first source wins
+    expect(await readlink(join(dest, 'shared'))).toBe(join(plugin, 'shared'));
   });
 
   it('stages an empty dir and returns 0 when the def declares no skills', async () => {

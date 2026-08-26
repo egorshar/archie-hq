@@ -167,7 +167,7 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
   const mdWidth = Math.max(40, (stdout?.columns ?? 80) - 2);
 
   // Build log lines with inline approvals
-  const logLines: { node?: React.ReactNode; approval?: { approvalType: 'edit_mode' | 'research_budget' | 'merge' | 'trigger' | 'max_mode'; eventIndex: number; github?: string; pr_number?: number; ref?: string }; fold?: { id: string; summary: React.ReactNode; full: React.ReactNode } }[] = [];
+  const logLines: { node?: React.ReactNode; approval?: { approvalType: 'edit_mode' | 'research_budget' | 'merge' | 'trigger' | 'max_mode' | 'tool_call'; eventIndex: number; github?: string; pr_number?: number; ref?: string }; fold?: { id: string; summary: React.ReactNode; full: React.ReactNode } }[] = [];
 
   // Fold pr_card events so a card renders once, at its most recent `post`
   // (anchor), showing the latest merged state. `update` events refresh the data
@@ -284,7 +284,7 @@ export function TaskDetail({ taskId, onBack, liveEvents, onConnect }: TaskDetail
             logLines.push({
               node: <Text color="yellow" bold>⏳ {event.data.text as string}  [y] approve / [n] deny</Text>,
               approval: {
-                approvalType: event.data.approvalType as 'edit_mode' | 'research_budget' | 'merge' | 'trigger' | 'max_mode',
+                approvalType: event.data.approvalType as 'edit_mode' | 'research_budget' | 'merge' | 'trigger' | 'max_mode' | 'tool_call',
                 ref: event.data.ref as string | undefined,
                 eventIndex: idx,
                 // Merge approvals carry the PR identity; the API requires it on

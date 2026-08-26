@@ -33,6 +33,7 @@ Secrets are injected via the container's environment file plus the mounted
 - `GITHUB_APP_ID`, `GITHUB_APP_SLUG`, `GITHUB_INSTALLATION_ID` — GitHub App identifiers
 - `GITHUB_APP_PRIVATE_KEY_PATH` — path to PEM file (mount under `/app/secrets`)
 - `GITHUB_WEBHOOK_SECRET` — webhook signature verification (PR tools disabled if unset)
+- `ARCHIE_GITHUB_LOGIN`, `ARCHIE_GITHUB_USER_ID`, `ARCHIE_GITHUB_NAME` — the account Archie is *credited* as on commits and PRs, separate from the App it acts as (optional; falls back to the App bot). The user ID must be the account's numeric user ID, not the App ID — see `docs/architecture/github-integration.md`
 - `ARCHIE_PLUGINS` — git URL for the plugins repo, cloned into `$ARCHIE_WORKDIR/plugins` on startup
 - `ARCHIE_PLUGINS_BRANCH` — optional branch override (defaults to repo default)
 - `ARCHIE_WORKDIR` — base working directory (defaults to `./workdir`; production mounts `/workdir`)
@@ -120,7 +121,7 @@ echo 'kernel.apparmor_restrict_unprivileged_userns=0' | sudo tee /etc/sysctl.d/9
 
 | Host Path | Container Path | Purpose |
 |-----------|---------------|---------|
-| `/workdir` | `/workdir` | Runtime state: `plugins/`, `repos/`, `sessions/`, `plugins-data/` (set via `ARCHIE_WORKDIR`) |
+| `/workdir` | `/workdir` | Runtime state: `plugins/`, `repos/`, `sessions/`, `plugins-data/`, `triggers/`, `triggers-data/` (set via `ARCHIE_WORKDIR`) |
 | `/data/claude` | `/home/archie/.claude` | Claude CLI config and session logs |
 | `/data/claude/.claude.json` | `/home/archie/.claude.json` | Claude CLI feature flags |
 | `/app/secrets` | `/app/secrets` | GitHub App private key + encrypted OAuth vault (read-write — daemon persists refreshed tokens) |
