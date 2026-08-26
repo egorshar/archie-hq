@@ -17,6 +17,7 @@ import type { AgentName, FindingType, AttachedRepo, SlackThreadMessage } from '.
 import type { Task } from '../tasks/task.js';
 import type { Agent } from './agent.js';
 import { getVisiblePeerIdsForSender, findAgentDefsContainingRepo, synthesizeDynamicAgentDef, isAutoMergeRepo } from './registry.js';
+import { PENDING_APPROVAL_TTL_MS } from './tool-approval-gate.js';
 import { getRepoHost } from '../system/backends.js';
 import { parseCheckRef, getArchieAttributionIdentity } from '../connectors/github/client.js';
 import { buildAttributedBody } from '../connectors/github/pr-attribution.js';
@@ -796,6 +797,27 @@ export async function reportCompletionHandler(agent: Agent, task: Task, args: Re
   // Already recorded completion this turn — don't re-post or re-signal.
   if (task.completionIntent) {
     return ok('Completion already recorded. End your turn.');
+  }
+  // A tool call is waiting on a human. Completing now ends the task, and a
+  // terminal task cannot be reactivated — so the approval, when it lands, has
+  // nothing to wake and the grant is never spent.
+  //
+  // Checked here rather than left to the requester's own deferred teardown,
+  // because the two are decided by DIFFERENT agents: the requester parks itself,
+  // while any other agent — in practice the PM it just reported back to — can end
+  // the task from its own turn. Whichever fires first is timing, and the live
+  // gate check caught exactly that: the same run passed on the claude runtime
+  // (teardown fires synchronously on the turn's `result` event) and failed on
+  // opencode (completion got there first).
+  //
+  // Bounded by the same TTL the request path uses to decide a slot is live, so an
+  // abandoned prompt cannot wedge the task for the rest of its life.
+  const awaitingTool = task.metadata.pending_tool_approval;
+  if (awaitingTool && Date.parse(awaitingTool.requested_at) > Date.now() - PENDING_APPROVAL_TTL_MS) {
+    return ok(
+      `Not completing yet — \`${awaitingTool.tool}\` is waiting for human approval on this task. ` +
+      `The task pauses until it is approved or denied; the agent that asked will be reactivated to retry. End your turn.`,
+    );
   }
   // A muted default channel drops the message but still completes: the turn
   // has to be allowed to end, and refusing outright would just push the

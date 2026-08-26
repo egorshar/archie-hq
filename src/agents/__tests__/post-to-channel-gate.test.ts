@@ -85,7 +85,7 @@ function makeAgent(): Agent {
 /**
  * `home` gives the task a `home_channel` (the trigger-fired shape); `originChannelId` gives it an actually-linked channel and a `default_channel`. A fired task that has not spoken yet has the first and not the second.
  */
-function makeTask(opts: { home?: boolean; originChannelId?: string } = {}): Task {
+function makeTask(opts: { home?: boolean; originChannelId?: string; pendingToolApprovalAgeMs?: number } = {}): Task {
   const channels: Record<string, unknown> = {};
   let default_channel: string | null = null;
   if (opts.originChannelId) {
@@ -103,6 +103,14 @@ function makeTask(opts: { home?: boolean; originChannelId?: string } = {}): Task
       channels,
       default_channel,
       ...(opts.home ? { home_channel: { channel_id: 'CHOME', channel_name: 'ops-daily' } } : {}),
+      ...(opts.pendingToolApprovalAgeMs === undefined ? {} : {
+        pending_tool_approval: {
+          digest: 'd1', server: 'gatecheck', tool: 'write_marker',
+          summary: 'Append a marker line', heading: 'Append a marker line',
+          requested_by: 'gatekeeper-agent',
+          requested_at: new Date(Date.now() - opts.pendingToolApprovalAgeMs).toISOString(),
+        },
+      }),
     },
     touch: vi.fn(), debouncedSave: vi.fn(), save: vi.fn().mockResolvedValue(undefined),
     postToUser: vi.fn().mockResolvedValue(null),
@@ -325,5 +333,55 @@ describe('propose_trigger refuses a binding that is not a channel', () => {
 
     expect(out).not.toMatch(/has to deliver to a channel/i);
     expect(task.metadata.pending_trigger_id).toBeDefined();
+  });
+});
+
+/**
+ * A tool-call approval parks the task: the requesting agent is armed with a deferred
+ * teardown and the human is asked. Completion has to lose that race deterministically,
+ * because the two are decided by different agents — the requester parks itself, while
+ * ANY other agent (in practice the PM it reported back to) can call report_completion
+ * and end the task. Verified live: on the opencode runtime the PM's completion won,
+ * the task went terminal, and the approval then had nothing to reactivate — the retry
+ * that spends the grant never happened. The claude runtime passed the same check only
+ * because its teardown fires synchronously on the turn's `result` event and got there
+ * first, which is timing, not a guarantee.
+ */
+describe('report_completion while a tool call is awaiting approval', () => {
+  it('refuses to complete, so the parked agent survives to spend the grant', async () => {
+    const task = makeTask({ originChannelId: 'C1', pendingToolApprovalAgeMs: 1000 });
+
+    const out = textOf(await getOrchestrationHandler('report_completion', task)({ message: 'all done' }));
+
+    expect(task.setCompletionIntent).not.toHaveBeenCalled();
+    expect(task.postToUser).not.toHaveBeenCalled();
+    expect(out).toMatch(/approval/i);
+    expect(out).toMatch(/write_marker/);
+  });
+
+  it('refuses a silent completion too — ending the turn quietly loses the grant just the same', async () => {
+    const task = makeTask({ originChannelId: 'C1', pendingToolApprovalAgeMs: 1000 });
+
+    await getOrchestrationHandler('report_completion', task)({});
+
+    expect(task.setCompletionIntent).not.toHaveBeenCalled();
+  });
+
+  // An abandoned prompt must not wedge the task for the rest of its life. Same TTL the
+  // request path uses to decide a slot is no longer live.
+  it('completes normally when the pending request has outlived its window', async () => {
+    const task = makeTask({ originChannelId: 'C1', pendingToolApprovalAgeMs: 2 * 60 * 60 * 1000 });
+
+    await getOrchestrationHandler('report_completion', task)({ message: 'all done' });
+
+    expect(task.setCompletionIntent).toHaveBeenCalled();
+  });
+
+  it('completes normally when nothing is pending', async () => {
+    const task = makeTask({ originChannelId: 'C1' });
+
+    await getOrchestrationHandler('report_completion', task)({ message: 'all done' });
+
+    expect(task.setCompletionIntent).toHaveBeenCalled();
   });
 });
