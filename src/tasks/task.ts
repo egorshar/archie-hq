@@ -1813,7 +1813,7 @@ export class Task {
     // re-delegation hop to the TTL clock.
     const requester = (pending.requested_by || 'pm-agent') as AgentName;
     emitEvent('approval:resolved', this.taskId, { type: 'tool_call', approve: true });
-    await this.sendMessage(AGENT_PROMPTS.existingTask, requester);
+    await this.sendMessage(AGENT_PROMPTS.toolCallApproved, requester);
     return 'resolved';
   }
 

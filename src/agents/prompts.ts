@@ -22,6 +22,13 @@ export const AGENT_PROMPTS = {
   // path that uses this prompt (GitHub merge outcomes), which really are PM's to announce.
   existingTask:
     'New activity in a thread you are in — not necessarily a request for you. Check knowledge.log for what arrived, then decide whether it is yours to answer before you decide what to say.',
+  // The wake after a tool-call approval. Deliberately NOT `existingTask`: only a
+  // byte-identical retry from the requester spends the grant, and that constant now
+  // reads "not necessarily a request for you… decide whether it is yours to answer",
+  // which is close to the opposite instruction. Says what happened and what to do,
+  // and caps the retry at one so an approval cannot become a loop.
+  toolCallApproved:
+    'Your tool call was approved. Re-issue that exact call once, with the same arguments, then report the result. Do not repeat it beyond that single retry, and do not start anything else first.',
   recovery: 'Task was interrupted. Check knowledge.log for current state and continue where you left off.',
 
   // GitHub activity on work PM has already delegated — review comments, review

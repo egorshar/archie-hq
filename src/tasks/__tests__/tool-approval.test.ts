@@ -12,6 +12,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { AGENT_PROMPTS } from '../../agents/prompts.js';
 
 vi.mock('../persistence.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../persistence.js')>();
@@ -193,6 +194,29 @@ describe('handleToolCallApproval', () => {
     });
     expect(task.agentProcesses.get('release-manager-agent')!.clearPendingTeardown).toHaveBeenCalled();
     expect(task.sendMessage).toHaveBeenCalledWith(expect.any(String), 'release-manager-agent');
+  });
+
+  /**
+   * The wake prompt is load-bearing: only a byte-identical retry from the requester
+   * spends the grant, so the agent has to be told to re-issue that exact call once.
+   *
+   * It used to ride on the shared `existingTask` constant, which was fine while that
+   * read "New input received. Check knowledge.log for the update." Upstream then
+   * rewrote it for Slack-thread activity — "not necessarily a request for you… decide
+   * whether it is yours to answer" — which is close to the opposite instruction, and
+   * the assertion above (`expect.any(String)`) could not notice. Pinned here by meaning.
+   */
+  it('tells the requester its call was approved and to re-issue it once', async () => {
+    const task = makeFakeTask();
+    await request(task);
+
+    await approve(task, REQUEST.digest);
+
+    const [prompt, agentId] = task.sendMessage.mock.calls[0] as [string, string];
+    expect(agentId).toBe('release-manager-agent');
+    expect(prompt).not.toBe(AGENT_PROMPTS.existingTask);
+    expect(prompt).toMatch(/approved/i);
+    expect(prompt).toMatch(/\bonce\b/i);
   });
 
   it('is a stale no-op for a digest that does not match the slot', async () => {
