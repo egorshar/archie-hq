@@ -9,18 +9,23 @@
  * docs/architecture/tool-approvals.md; only what the code cannot say for itself
  * is repeated here.
  *
- * Why a PreToolUse hook and not `canUseTool`: every agent runs under
+ * Runtime-neutral: the verdict is expressed as a {@link GateDecision}, and each
+ * runtime's interception point maps it into its own host shape — the Claude
+ * PreToolUse hook in `runtime/claude/tool-approval-hooks.ts`, the opencode
+ * plugin's `tool.execute.before` guard via the bridge. Neither the deny-then-retry
+ * shape nor the fail-closed rule is theirs to re-decide: both live here.
+ *
+ * Why an interception hook and not the SDK's `canUseTool`: every agent runs under
  * `permissionMode: bypassPermissions`, and the SDK documents that this mode
  * auto-approves calls past `canUseTool` — "PreToolUse hook denies bypass
  * canUseTool" (sdk.d.ts). The hook is the only interception point that holds in
  * our configuration, and it is the same layer the filesystem guard already
  * relies on for read-only mode. The consequence is the deny-then-retry shape
- * above: the hook cannot pause a call and resume it later, so the action always
+ * above: a hook cannot pause a call and resume it later, so the action always
  * runs through the same audited MCP path on a second attempt.
  */
 
 import { createHash } from 'crypto';
-import type { HookCallbackMatcher, HookJSONOutput } from '@anthropic-ai/claude-agent-sdk';
 import { logger } from '../system/logger.js';
 
 /** How long a grant stays spendable. Spending it takes a chain — the requesting
@@ -241,18 +246,6 @@ export function renderCall(serverPolicy: McpServerPolicy, call: ClassifiedCall, 
   return { summary, heading };
 }
 
-// ---- Hook wiring -------------------------------------------------------------
-
-function deny(reason: string): HookJSONOutput {
-  return {
-    hookSpecificOutput: {
-      hookEventName: 'PreToolUse' as const,
-      permissionDecision: 'deny' as const,
-      permissionDecisionReason: reason,
-    },
-  };
-}
-
 /**
  * What the gate needs from the task. Kept as a narrow port rather than
  * importing Task, so classification and rendering stay unit-testable without a
@@ -283,58 +276,26 @@ export interface ToolApprovalPort {
   }): Promise<'posted' | 'already-pending'>;
 }
 
+// ---- Decision ----------------------------------------------------------------
+
 /**
- * PreToolUse hooks enforcing the tool policy of this agent's MCP servers.
- *
- * Returns a single matcher (no `matcher` field → fires on all tools) that
- * filters by tool name inside the callback, mirroring
- * `createFilesystemGuardHooks`. Unmanaged tools always proceed, even when the
- * gate's own dependencies are broken.
+ * The gate's verdict for one call. Two shapes only, so no runtime's hook type
+ * reaches into the decision: the adapters translate.
  */
-export function createToolApprovalHooks(policy: McpToolPolicy, port: ToolApprovalPort): HookCallbackMatcher[] {
-  return [{
-    // Generous explicit budget: the deny path posts to Slack and fsyncs metadata
-    // inside the hook, and what a host does with a TIMED-OUT PreToolUse decision
-    // is its policy, not ours — so never get near the default.
-    timeout: 120,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    hooks: [async (input: any): Promise<HookJSONOutput> => {
-      const toolName = typeof input?.tool_name === 'string' ? input.tool_name : undefined;
-      // Classify before the try, so a throw can be attributed: an unmanaged
-      // tool must proceed even if something below would have failed, and a
-      // managed mutation must be denied rather than left to the SDK's handling
-      // of a rejected hook.
-      const call = toolName ? classifyToolCall(policy, toolName) : undefined;
-      if (!call || call.tier === 'allow') return { continue: true };
+export type GateDecision = { allow: true } | { allow: false; reason: string };
 
-      try {
-        return await decideCall(policy[call.server], port, call, input.tool_input);
-      } catch (error) {
-        // Fail closed. The arguments are agent-controlled, so this path is
-        // reachable on purpose as well as by accident (a deeply nested argument
-        // overflows the canonicalizer's recursion), and a security hook must
-        // not depend on how the host treats a rejected hook.
-        const message = error instanceof Error ? error.message : String(error);
-        logger.error('tool-approval', `Gate failed for ${toolName} — denying`, error);
-        return deny(
-          `\`${call.tool}\` was refused because the approval gate errored while evaluating it (${message}). ` +
-          `Nothing ran. Report this to the user.`,
-        );
-      }
-    }],
-  }];
-}
+const refuse = (reason: string): GateDecision => ({ allow: false, reason });
 
-/** The gate's decision for one managed, non-`allow` call. Separated so the
- *  wrapper above can turn any throw into a denial. */
+/** The gate's decision for one managed, non-`allow` call. Separated so
+ *  {@link decideToolCall} can turn any throw into a denial. */
 async function decideCall(
   serverPolicy: McpServerPolicy,
   port: ToolApprovalPort,
   call: ClassifiedCall,
   toolInput: unknown,
-): Promise<HookJSONOutput> {
+): Promise<GateDecision> {
   if (call.tier === 'deny') {
-    return deny(
+    return refuse(
       `\`${call.tool}\` is disabled by the \`${call.server}\` tool policy and cannot be run by any agent. ` +
       `Nothing ran. Report what you wanted to do and why, so a human can decide.`,
     );
@@ -346,7 +307,7 @@ async function decideCall(
   // Already approved? Spend the grant and let this one call through.
   if (await port.consumeApproval(digest)) {
     logger.system(`Gated tool call ${call.server}:${call.tool} approved (${digest}) — proceeding`);
-    return { continue: true };
+    return { allow: true };
   }
 
   const rendered = renderCall(serverPolicy, call, toolInput);
@@ -360,14 +321,48 @@ async function decideCall(
   });
 
   if (outcome === 'already-pending') {
-    return deny(
+    return refuse(
       `Another tool call is already waiting for approval on this task. One request is resolved at a ` +
       `time — wait for the outstanding one to be approved or denied.`,
     );
   }
 
-  return deny(
+  return refuse(
     `\`${call.tool}\` needs human approval. The request has been posted and the task is pausing. ` +
     `When it is approved you will be reactivated — re-check relevant state, then retry this exact call.`,
   );
+}
+
+/**
+ * Decide one tool call.
+ *
+ * Classification happens before the try so a throw can be attributed: an unmanaged
+ * tool must proceed even if something below would have failed, and a managed
+ * mutation must be refused rather than left to a host's handling of a thrown hook.
+ *
+ * Fail-closed on any error, and deliberately here rather than in either adapter —
+ * the arguments are agent-controlled, so this path is reachable on purpose (a
+ * deeply nested argument overflows the canonicalizer's recursion) as well as by
+ * accident, and a runtime that forgot to wrap the call would otherwise be an open
+ * door.
+ */
+export async function decideToolCall(
+  policy: McpToolPolicy,
+  port: ToolApprovalPort,
+  toolName: string | undefined,
+  toolInput: unknown,
+): Promise<GateDecision> {
+  const call = toolName ? classifyToolCall(policy, toolName) : undefined;
+  if (!call || call.tier === 'allow') return { allow: true };
+
+  try {
+    return await decideCall(policy[call.server], port, call, toolInput);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logger.error('tool-approval', `Gate failed for ${toolName} — denying`, error);
+    return refuse(
+      `\`${call.tool}\` was refused because the approval gate errored while evaluating it (${message}). ` +
+      `Nothing ran. Report this to the user.`,
+    );
+  }
 }

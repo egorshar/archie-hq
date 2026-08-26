@@ -32,7 +32,8 @@ import {
   createSchedulingMcpServer,
 } from './tools.js';
 import { createFileBridgeMcpServer, shouldAttachFileBridge } from './mcp-file-bridge.js';
-import { createToolApprovalHooks, mcpToolName } from './tool-approval-gate.js';
+import { mcpToolName } from './tool-approval-gate.js';
+import { createToolApprovalHooks } from '../runtime/claude/tool-approval-hooks.js';
 import { hydrateBranchState } from '../connectors/github/branch-state.js';
 import { taskBranchName } from '../connectors/github/branch-naming.js';
 import { createResearchMcpServer, createResearchPostToolHook, createResearchDefenseTagHook } from '../mcp/research-tools.js';
