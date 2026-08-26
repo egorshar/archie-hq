@@ -125,6 +125,109 @@ describe('bridge plugin source', () => {
     });
   });
 
+  describe('tool.execute.before MCP tool gate', () => {
+    let gateDir: string;
+    afterEach(async () => {
+      if (gateDir) await rm(gateDir, { recursive: true, force: true });
+    });
+
+    it('rendered source references the gate endpoint, the prefix list and the argument object', () => {
+      const src = renderBridgePlugin('http://127.0.0.1:1', 'tok');
+      expect(src).toContain('/tool-gate');
+      expect(src).toContain('gatedPrefixes');
+      expect(src).toContain('output.args');
+    });
+
+    /** Loads the rendered plugin with a stubbed fetch and returns its hook plus the fetch spy. */
+    async function loadGuard(gate: (body: any) => unknown) {
+      gateDir = await mkdtemp(join(tmpdir(), 'archie-bridge-plugin-gate-'));
+      const file = join(gateDir, 'plugin.mjs');
+      await writeFile(file, renderBridgePlugin('http://127.0.0.1:1', 'tok-gate'), 'utf8');
+
+      const fetchMock = vi.fn(async (url: string, init?: any) => {
+        if (url.includes('/tools')) return { ok: true, json: async () => [] };
+        if (url.includes('/tool-gate')) return { ok: true, json: async () => gate(JSON.parse(init.body)) };
+        if (url.includes('/policy')) {
+          return { ok: true, json: async () => ({ readOnly: false, blockedTools: [], gatedPrefixes: ['jira_'] }) };
+        }
+        throw new Error('unexpected fetch ' + url);
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      const mod = await import(pathToFileURL(file).href);
+      const plugin = await mod.ArchieBridgePlugin({});
+      return { before: plugin['tool.execute.before'], fetchMock };
+    }
+
+    it('refuses a gated call the bridge denies, using the gate’s own reason', async () => {
+      const { before } = await loadGuard(() => ({ allow: false, reason: '`create` needs human approval.' }));
+
+      await expect(before({ tool: 'jira_create', sessionID: 's1' }, { args: { a: 1 } }))
+        .rejects.toThrow('needs human approval');
+    });
+
+    it('lets a gated call through when the bridge allows it, and forwards the arguments', async () => {
+      const { before, fetchMock } = await loadGuard(() => ({ allow: true }));
+
+      await expect(before({ tool: 'jira_create', sessionID: 's1' }, { args: { a: 1 } })).resolves.toBeUndefined();
+
+      const call = fetchMock.mock.calls.find((c: any[]) => String(c[0]).includes('/tool-gate'))!;
+      expect(JSON.parse((call[1] as any).body)).toEqual({ sessionId: 's1', tool: 'jira_create', args: { a: 1 } });
+    });
+
+    // The saving `gatedPrefixes` exists for: every built-in, and every server with no
+    // policy, must cost no second round-trip.
+    it('never asks the gate about a tool no prefix covers', async () => {
+      const { before, fetchMock } = await loadGuard(() => ({ allow: false, reason: 'should not be reached' }));
+
+      await expect(before({ tool: 'read', sessionID: 's1' }, { args: {} })).resolves.toBeUndefined();
+
+      expect(fetchMock.mock.calls.some((c: any[]) => String(c[0]).includes('/tool-gate'))).toBe(false);
+    });
+
+    // MCP servers live in opencode's own config and keep working while the bridge is
+    // unreachable, so an unresolvable policy must not leave gated tools ungated.
+    it('gates every underscored tool when the policy itself cannot be resolved, and still leaves read built-ins alone', async () => {
+      gateDir = await mkdtemp(join(tmpdir(), 'archie-bridge-plugin-gate-'));
+      const file = join(gateDir, 'plugin.mjs');
+      await writeFile(file, renderBridgePlugin('http://127.0.0.1:1', 'tok-gate'), 'utf8');
+
+      vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+        if (url.includes('/tools')) return { ok: true, json: async () => [] };
+        if (url.includes('/policy')) return { ok: false, status: 500 };
+        throw new Error('connection refused');
+      }));
+
+      const mod = await import(pathToFileURL(file).href);
+      const before = (await mod.ArchieBridgePlugin({}))['tool.execute.before'];
+
+      await expect(before({ tool: 'jira_create', sessionID: 's1' }, { args: {} }))
+        .rejects.toThrow(/could not be resolved/);
+      // `read` is not in the fail-closed block set and carries no underscore, so it stays usable.
+      await expect(before({ tool: 'read', sessionID: 's1' }, { args: {} })).resolves.toBeUndefined();
+    });
+
+    it('fails closed when the gate cannot be reached', async () => {
+      gateDir = await mkdtemp(join(tmpdir(), 'archie-bridge-plugin-gate-'));
+      const file = join(gateDir, 'plugin.mjs');
+      await writeFile(file, renderBridgePlugin('http://127.0.0.1:1', 'tok-gate'), 'utf8');
+
+      vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+        if (url.includes('/tools')) return { ok: true, json: async () => [] };
+        if (url.includes('/policy')) {
+          return { ok: true, json: async () => ({ readOnly: false, blockedTools: [], gatedPrefixes: ['jira_'] }) };
+        }
+        throw new Error('connection refused');
+      }));
+
+      const mod = await import(pathToFileURL(file).href);
+      const plugin = await mod.ArchieBridgePlugin({});
+
+      await expect(plugin['tool.execute.before']({ tool: 'jira_create', sessionID: 's1' }, { args: {} }))
+        .rejects.toThrow(/could not be resolved/);
+    });
+  });
+
   describe('tool.execute.before RO guard', () => {
     it('rendered source references the policy endpoint, input.tool/sessionID, and the block error text', () => {
       const src = renderBridgePlugin('http://127.0.0.1:1', 'tok');

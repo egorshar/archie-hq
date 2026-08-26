@@ -63,6 +63,7 @@ import type { Agent } from '../../../agents/agent.js';
 import type { Task } from '../../../tasks/task.js';
 import { isPmAgent, isRepoAgent } from '../../../types/agent.js';
 import type { SessionRegistry, BridgeSession } from './registry.js';
+import { decideToolCall, mcpToolName, type McpToolPolicy } from '../../../agents/tool-approval-gate.js';
 import { logger } from '../../../system/logger.js';
 
 /** Verified identity a per-child bearer token asserts: which agent's serve
@@ -577,11 +578,82 @@ function handlePolicyRequest(req: IncomingMessage, res: ServerResponse, registry
   // approval would flip to writable. For the PM / plugin agents it is always false —
   // they never gain built-in write/command execution — so the plugin guard can tell
   // the model "edit mode won't grant this" instead of nudging it to request edit mode.
+  // `gatedPrefixes`: the `<server>_` prefixes whose tools have to go through
+  // `POST /tool-gate` before running. The guard already fetches this endpoint on
+  // every tool call, so naming them here is what keeps an ungated tool — every
+  // built-in, and every server with no policy — from paying a second round-trip.
   sendJson(res, 200, {
     readOnly: session.readOnly,
     blockedTools: session.readOnly ? RO_BUILTIN_BLOCK : [],
     editModeApplies: isRepoAgent(session.agent.def),
+    gatedPrefixes: Object.keys(session.agent.def.mcpPolicy ?? {}).map((server) => `${server}_`),
   });
+}
+
+/**
+ * `POST /tool-gate` — the opencode plugin guard's call-time question, answered by
+ * the same `decideToolCall` the Claude PreToolUse hook reaches. The plugin runs in
+ * the opencode child and cannot see Archie's `SessionRegistry`, so the verdict has
+ * to come back over the bridge.
+ *
+ * The approval port is built from the session's own task, exactly as `spawnAgent`
+ * builds it for the SDK hook — same grant store, same Slack request path, so a
+ * grant minted by the button handler is spendable from either runtime.
+ *
+ * Fails closed on an unknown session or a malformed body. The guard treats any
+ * non-`allow` answer as a refusal, so answering "allow" here on a resolution
+ * failure would be the one shape that turns the gate into an open door.
+ */
+async function handleToolGateRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  registry: SessionRegistry,
+): Promise<void> {
+  let body: { sessionId?: string; tool?: string; args?: unknown };
+  try {
+    body = JSON.parse(await readBody(req)) as typeof body;
+  } catch {
+    sendJson(res, 200, { allow: false, reason: 'tool policy could not be resolved (malformed request)' });
+    return;
+  }
+
+  const session = body.sessionId ? registry.get(body.sessionId) : undefined;
+  if (!session || typeof body.tool !== 'string') {
+    sendJson(res, 200, { allow: false, reason: 'tool policy could not be resolved (unknown session)' });
+    return;
+  }
+
+  const policy = session.agent.def.mcpPolicy;
+  if (!policy) {
+    sendJson(res, 200, { allow: true });
+    return;
+  }
+
+  // opencode names an MCP tool `<server>_<tool>`; the policy names it
+  // `mcp__<server>__<tool>`. Split on the FIRST underscore that yields a server
+  // the policy manages, so a server whose own name contains an underscore still
+  // resolves — and an unmanaged tool falls through as unmanaged rather than
+  // being mis-attributed to a server it does not belong to.
+  const qualified = qualifyOpencodeToolName(policy, body.tool);
+  const decision = await decideToolCall(
+    policy,
+    {
+      consumeApproval: (digest) => session.task.consumeToolApproval(digest),
+      requestApproval: (request) => session.task.requestToolApproval(session.agent.def.id, request),
+    },
+    qualified,
+    body.args,
+  );
+  sendJson(res, 200, decision);
+}
+
+/** `<server>_<tool>` → `mcp__<server>__<tool>` for a server the policy manages; the name unchanged otherwise. */
+function qualifyOpencodeToolName(policy: McpToolPolicy, toolName: string): string {
+  for (const server of Object.keys(policy)) {
+    const prefix = `${server}_`;
+    if (toolName.startsWith(prefix)) return mcpToolName(server, toolName.slice(prefix.length));
+  }
+  return toolName;
 }
 
 /**
@@ -609,6 +681,11 @@ export function startBridgeServer(registry: SessionRegistry): Promise<BridgeHand
           if (req.method === 'GET' && pathname === '/policy') {
             if (!auth) { sendJson(res, 401, { ok: false, error: 'unauthorized' }); return; }
             handlePolicyRequest(req, res, registry);
+            return;
+          }
+          if (req.method === 'POST' && pathname === '/tool-gate') {
+            if (!auth) { sendJson(res, 401, { ok: false, error: 'unauthorized' }); return; }
+            await handleToolGateRequest(req, res, registry);
             return;
           }
           if (req.method === 'POST' && pathname === '/tool') {

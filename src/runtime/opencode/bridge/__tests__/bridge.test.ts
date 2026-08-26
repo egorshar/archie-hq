@@ -133,7 +133,113 @@ describe('bridge server', () => {
     });
   });
 
+  describe('POST /tool-gate', () => {
+    /** A session whose jira server declares a policy: one denied tool, one gated. */
+    function gatedSession() {
+      const requested: any[] = [];
+      const task: any = {
+        taskId: 't1',
+        consumeToolApproval: vi.fn().mockReturnValue(false),
+        requestToolApproval: vi.fn(async (_agentId: string, r: any) => { requested.push(r); return 'posted'; }),
+      };
+      const agent: any = {
+        def: {
+          id: 'pm-agent',
+          mcpPolicy: { jira: { default: 'ask', tiers: { search: 'allow', delete_issue: 'deny' }, titles: {} } },
+        },
+      };
+      return { task, agent, requested };
+    }
+
+    const gate = (body: unknown, token = handle.token) =>
+      fetch(`${handle.url}/tool-gate`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+        body: JSON.stringify(body),
+      }).then((r) => r.json() as any);
+
+    it('refuses a deny-tiered MCP call and posts no approval', async () => {
+      const { task, agent } = gatedSession();
+      registry.set('s1', { task, agent, readOnly: false });
+
+      const body = await gate({ sessionId: 's1', tool: 'jira_delete_issue', args: {} });
+
+      expect(body.allow).toBe(false);
+      expect(body.reason).toContain('Nothing ran');
+      expect(task.requestToolApproval).not.toHaveBeenCalled();
+    });
+
+    it('allows an allow-tiered call and a tool no policy manages', async () => {
+      const { task, agent } = gatedSession();
+      registry.set('s1', { task, agent, readOnly: false });
+
+      expect((await gate({ sessionId: 's1', tool: 'jira_search', args: {} })).allow).toBe(true);
+      expect((await gate({ sessionId: 's1', tool: 'read', args: {} })).allow).toBe(true);
+    });
+
+    it('requests approval for an ask-tiered call and refuses this attempt', async () => {
+      const { task, agent, requested } = gatedSession();
+      registry.set('s1', { task, agent, readOnly: false });
+
+      const body = await gate({ sessionId: 's1', tool: 'jira_create', args: { summary: 'x' } });
+
+      expect(body.allow).toBe(false);
+      expect(body.reason).toContain('needs human approval');
+      expect(requested).toHaveLength(1);
+      expect(requested[0]).toMatchObject({ server: 'jira', tool: 'create' });
+    });
+
+    it('lets a call through once its grant is spendable', async () => {
+      const { task, agent } = gatedSession();
+      task.consumeToolApproval = vi.fn().mockReturnValue(true);
+      registry.set('s1', { task, agent, readOnly: false });
+
+      expect((await gate({ sessionId: 's1', tool: 'jira_create', args: { summary: 'x' } })).allow).toBe(true);
+    });
+
+    // The guard treats any non-allow answer as a refusal, so an unresolvable
+    // session must not be able to become an open door.
+    it('fails closed for an unknown session', async () => {
+      const body = await gate({ sessionId: 'nope', tool: 'jira_create', args: {} });
+
+      expect(body.allow).toBe(false);
+    });
+
+    it('rejects a request without the bearer token', async () => {
+      const res = await fetch(`${handle.url}/tool-gate`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ sessionId: 's1', tool: 'jira_create', args: {} }),
+      });
+
+      expect(res.status).toBe(401);
+    });
+  });
+
   describe('GET /policy', () => {
+    it('names the servers whose tools need the call-time gate, so ungated tools cost no round-trip', async () => {
+      const task: any = { taskId: 't1' };
+      const agent: any = {
+        def: { id: 'pm-agent', mcpPolicy: { jira: { default: 'ask', tiers: {}, titles: {} } } },
+      };
+      registry.set('s1', { task, agent, readOnly: false });
+
+      const res = await fetch(`${handle.url}/policy?sessionId=s1`, { headers: { authorization: `Bearer ${handle.token}` } });
+      const body: any = await res.json();
+
+      expect(body.gatedPrefixes).toEqual(['jira_']);
+    });
+
+    it('names none when the agent has no tool policy', async () => {
+      const { task, agent } = fakeSession();
+      registry.set('s1', { task, agent, readOnly: false });
+
+      const res = await fetch(`${handle.url}/policy?sessionId=s1`, { headers: { authorization: `Bearer ${handle.token}` } });
+      const body: any = await res.json();
+
+      expect(body.gatedPrefixes).toEqual([]);
+    });
+
     it('rejects a request without the bearer token', async () => {
       const res = await fetch(`${handle.url}/policy?sessionId=s1`);
       expect(res.status).toBe(401);
@@ -145,7 +251,7 @@ describe('bridge server', () => {
       const res = await fetch(`${handle.url}/policy?sessionId=s1`, { headers: { authorization: `Bearer ${handle.token}` } });
       expect(res.status).toBe(200);
       const body: any = await res.json();
-      expect(body).toEqual({ readOnly: true, blockedTools: RO_BUILTIN_BLOCK, editModeApplies: false });
+      expect(body).toEqual({ readOnly: true, blockedTools: RO_BUILTIN_BLOCK, editModeApplies: false, gatedPrefixes: [] });
     });
 
     it('returns readOnly:false with an empty blockedTools set for an edit-mode session', async () => {
@@ -154,7 +260,7 @@ describe('bridge server', () => {
       const res = await fetch(`${handle.url}/policy?sessionId=s1`, { headers: { authorization: `Bearer ${handle.token}` } });
       expect(res.status).toBe(200);
       const body: any = await res.json();
-      expect(body).toEqual({ readOnly: false, blockedTools: [], editModeApplies: false });
+      expect(body).toEqual({ readOnly: false, blockedTools: [], editModeApplies: false, gatedPrefixes: [] });
     });
 
     it('editModeApplies:true for a read-only REPO agent (edit mode would make it writable)', async () => {
@@ -163,7 +269,7 @@ describe('bridge server', () => {
       registry.set('s1', { task, agent, readOnly: true });
       const res = await fetch(`${handle.url}/policy?sessionId=s1`, { headers: { authorization: `Bearer ${handle.token}` } });
       const body: any = await res.json();
-      expect(body).toEqual({ readOnly: true, blockedTools: RO_BUILTIN_BLOCK, editModeApplies: true });
+      expect(body).toEqual({ readOnly: true, blockedTools: RO_BUILTIN_BLOCK, editModeApplies: true, gatedPrefixes: [] });
     });
 
     it('returns not-ok for an unknown session instead of throwing', async () => {

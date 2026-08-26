@@ -140,21 +140,41 @@ export const ArchieBridgePlugin = async (pluginCtx) => {
         headers: { authorization: "Bearer " + BRIDGE_TOKEN },
       });
     } catch {
-      return { blockedTools: FAIL_CLOSED_BLOCKED_TOOLS, editModeApplies: false };
+      return { blockedTools: FAIL_CLOSED_BLOCKED_TOOLS, editModeApplies: false, gatedPrefixes: [], gateAll: true };
     }
     if (!r.ok) {
-      return { blockedTools: FAIL_CLOSED_BLOCKED_TOOLS, editModeApplies: false };
+      return { blockedTools: FAIL_CLOSED_BLOCKED_TOOLS, editModeApplies: false, gatedPrefixes: [], gateAll: true };
     }
     let j;
     try {
       j = await r.json();
     } catch {
-      return { blockedTools: FAIL_CLOSED_BLOCKED_TOOLS, editModeApplies: false };
+      return { blockedTools: FAIL_CLOSED_BLOCKED_TOOLS, editModeApplies: false, gatedPrefixes: [], gateAll: true };
     }
     if (!j || !Array.isArray(j.blockedTools)) {
-      return { blockedTools: FAIL_CLOSED_BLOCKED_TOOLS, editModeApplies: false };
+      return { blockedTools: FAIL_CLOSED_BLOCKED_TOOLS, editModeApplies: false, gatedPrefixes: [], gateAll: true };
     }
-    return { blockedTools: j.blockedTools, editModeApplies: j.editModeApplies === true };
+    return {
+      blockedTools: j.blockedTools,
+      editModeApplies: j.editModeApplies === true,
+      gatedPrefixes: Array.isArray(j.gatedPrefixes) ? j.gatedPrefixes : [],
+      gateAll: false,
+    };
+  }
+
+  // Which tools have to clear the MCP approval gate before running. Normally the
+  // bridge names the <server>_ prefixes of the servers this session has a policy
+  // for, so an ungated tool costs nothing beyond the /policy call already made.
+  //
+  // When the policy could not be resolved we do not know which those are, and an
+  // empty list would be an open door: MCP servers live in opencode's own config and
+  // keep working while the bridge is unreachable. So gate anything whose name
+  // carries an underscore — every MCP tool is <server>_<tool> — which closes that
+  // door while leaving opencode's single-word read built-ins (read, glob, grep)
+  // usable, exactly as FAIL_CLOSED_BLOCKED_TOOLS already leaves them.
+  function needsGate(tool, policy) {
+    if (policy.gateAll) return tool.includes("_");
+    return policy.gatedPrefixes.some((p) => tool.startsWith(p));
   }
 
   return {
@@ -170,6 +190,31 @@ export const ArchieBridgePlugin = async (pluginCtx) => {
             ? "read-only mode: " + input.tool + " not permitted — edit mode is not yet approved for this repo."
             : "read-only mode: " + input.tool + " not permitted. You cannot run shell commands or edit files, and edit mode does NOT grant this (it only lets repo agents change code) — do not request edit mode to run a command or script.",
         );
+      }
+
+      // MCP tool policy — the same deny-then-retry contract the Claude PreToolUse
+      // hook enforces, and the same decision function behind it: the bridge answers
+      // from decideToolCall, posts the approval and parks the task, and the
+      // agent's retry spends the single-use grant. Throwing is how this hook
+      // refuses; opencode surfaces it to the model as a tool error.
+      //
+      // Fail-closed: an unreachable or non-2xx gate refuses. Answering "allow" on a
+      // resolution failure is the one shape that would turn the gate into an open
+      // door, so it is never produced here.
+      if (!needsGate(input.tool, policy)) return;
+      let verdict;
+      try {
+        const r = await fetch(BRIDGE_URL + "/tool-gate", {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: "Bearer " + BRIDGE_TOKEN },
+          body: JSON.stringify({ sessionId: input.sessionID, tool: input.tool, args: output.args }),
+        });
+        verdict = r.ok ? await r.json() : { allow: false, reason: "tool policy could not be resolved" };
+      } catch {
+        verdict = { allow: false, reason: "tool policy could not be resolved" };
+      }
+      if (!verdict || verdict.allow !== true) {
+        throw new Error((verdict && verdict.reason) || "tool policy could not be resolved");
       }
     },
   };
