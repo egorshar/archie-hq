@@ -248,14 +248,34 @@ describe('OpencodeRuntime.spawn', () => {
 
   it('registers a resumed session (no session.create call) under its existing id', async () => {
     const agent = makeAgent();
-    agent.session = { active: true, session_id: 'sess-existing' } as any;
+    // opencode-shaped: the runtime discards any other shape as a foreign-runtime id.
+    agent.session = { active: true, session_id: 'ses_existing' } as any;
     const task = makeTask();
     await new OpencodeRuntime().spawn(agent as any, task as any);
     agent.queue.addMessage('continue');
     await new Promise((r) => setTimeout(r, 0));
 
     expect(create).not.toHaveBeenCalled();
-    expect(registrySet).toHaveBeenCalledWith('sess-existing', { task, agent, readOnly: true });
+    expect(registrySet).toHaveBeenCalledWith('ses_existing', { task, agent, readOnly: true });
+  });
+
+  // Cross-runtime resume: a task first run under the Claude runtime persists a UUID
+  // session id into the SHARED session store. opencode's session API rejects anything
+  // not `ses_`-prefixed and every turn 500s, so the id has to be treated as absent.
+  it('discards a session id from another runtime and mints a fresh opencode session', async () => {
+    const agent = makeAgent();
+    agent.session = { active: true, session_id: '6f9619ff-8b86-d011-b42d-00c04fc964ff' } as any;
+    const task = makeTask();
+
+    await new OpencodeRuntime().spawn(agent as any, task as any);
+    agent.queue.addMessage('continue');
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(registrySet).not.toHaveBeenCalledWith(
+      '6f9619ff-8b86-d011-b42d-00c04fc964ff',
+      expect.anything(),
+    );
   });
 
   it('de-registers the session from the bridge registry when the queue stops', async () => {
