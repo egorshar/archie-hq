@@ -45,7 +45,7 @@ const OTHER_DIGEST = 'd2'.padEnd(16, '0');
 type FakeTask = {
   taskId: string;
   metadata: Partial<TaskMetadata>;
-  agentProcesses: Map<string, { clearPendingTeardown: ReturnType<typeof vi.fn>; deferTeardown: ReturnType<typeof vi.fn> }>;
+  agentProcesses: Map<string, { clearPendingTeardown: ReturnType<typeof vi.fn>; deferTeardown: ReturnType<typeof vi.fn>; session: { active: boolean } }>;
   debouncedSave: ReturnType<typeof vi.fn>;
   save: ReturnType<typeof vi.fn>;
   sendMessage: ReturnType<typeof vi.fn>;
@@ -59,8 +59,8 @@ function makeFakeTask(metadata: Partial<TaskMetadata> = {}): FakeTask {
     taskId: 'task-123',
     metadata,
     agentProcesses: new Map([
-      ['release-manager-agent', { clearPendingTeardown: vi.fn(), deferTeardown: vi.fn() }],
-      ['pm-agent', { clearPendingTeardown: vi.fn(), deferTeardown: vi.fn() }],
+      ['release-manager-agent', { clearPendingTeardown: vi.fn(), deferTeardown: vi.fn(), session: { active: false } }],
+      ['pm-agent', { clearPendingTeardown: vi.fn(), deferTeardown: vi.fn(), session: { active: false } }],
     ]),
     debouncedSave: vi.fn(),
     save: vi.fn().mockResolvedValue(undefined),
@@ -217,6 +217,49 @@ describe('handleToolCallApproval', () => {
     expect(prompt).not.toBe(AGENT_PROMPTS.existingTask);
     expect(prompt).toMatch(/approved/i);
     expect(prompt).toMatch(/\bonce\b/i);
+  });
+
+  /**
+   * The approval can land while the requester is still mid-turn — the gate refuses the
+   * call but the model keeps going, and a human (or the e2e check) can click before that
+   * turn ends. Waking it then is a no-op: the message queues behind a turn that is about
+   * to finish, the park has already been cleared, so nothing stops the task and nothing
+   * re-issues the call. Observed live on opencode, where the same run retried once and
+   * failed to retry the next time — the difference was purely timing.
+   *
+   * So when the requester is still running, the park is re-armed to stop the task AND
+   * deliver the wake once its turn ends, which is the only moment the wake can start a
+   * fresh turn.
+   */
+  it('defers the wake to the end of the turn when the requester is still running', async () => {
+    const task = makeFakeTask();
+    await request(task);
+    const agent = task.agentProcesses.get('release-manager-agent')!;
+    agent.session.active = true;
+    agent.deferTeardown.mockClear();
+
+    await approve(task, REQUEST.digest);
+
+    expect(task.sendMessage).not.toHaveBeenCalled();
+    expect(agent.deferTeardown).toHaveBeenCalledTimes(1);
+
+    // Running the re-armed teardown is what a turn ending does.
+    await agent.deferTeardown.mock.calls[0][0]();
+
+    expect(task.stop).toHaveBeenCalled();
+    expect(task.sendMessage).toHaveBeenCalledWith(AGENT_PROMPTS.toolCallApproved, 'release-manager-agent');
+  });
+
+  it('wakes immediately when the requester is already idle', async () => {
+    const task = makeFakeTask();
+    await request(task);
+    const agent = task.agentProcesses.get('release-manager-agent')!;
+    agent.session.active = false;
+
+    await approve(task, REQUEST.digest);
+
+    expect(agent.clearPendingTeardown).toHaveBeenCalled();
+    expect(task.sendMessage).toHaveBeenCalledWith(AGENT_PROMPTS.toolCallApproved, 'release-manager-agent');
   });
 
   it('is a stale no-op for a digest that does not match the slot', async () => {

@@ -1795,7 +1795,18 @@ export class Task {
     // Cancel the park armed by the gate hook on the requesting agent —
     // approval means "continue", so the deferred stop must not fire and tear
     // down the task we just approved.
-    this.agentProcesses.get(pending.requested_by as AgentName)?.clearPendingTeardown();
+    //
+    // Unless that agent is STILL MID-TURN. The gate refuses the call but the model
+    // keeps going, so an approval can land before the turn ends — and then clearing
+    // the park leaves nothing to stop the task while the wake below queues behind a
+    // turn that is already finishing, which starts no fresh turn and re-issues
+    // nothing. Observed live on opencode: the same scenario retried on one run and
+    // did not on the next, decided purely by timing. Re-arm the park instead, so the
+    // turn's end both stops the task and delivers the wake — the one moment the wake
+    // can actually begin a turn.
+    const requesterAgent = this.agentProcesses.get(pending.requested_by as AgentName);
+    const deferWake = requesterAgent?.session.active === true;
+    requesterAgent?.clearPendingTeardown();
 
     // Durable, not debounced: the agent's retry reads this from a reloaded
     // instance, so the grant has to be on disk before the reactivation below.
@@ -1813,6 +1824,13 @@ export class Task {
     // re-delegation hop to the TTL clock.
     const requester = (pending.requested_by || 'pm-agent') as AgentName;
     emitEvent('approval:resolved', this.taskId, { type: 'tool_call', approve: true });
+    if (deferWake && requesterAgent) {
+      requesterAgent.deferTeardown(async () => {
+        await this.stop();
+        await this.sendMessage(AGENT_PROMPTS.toolCallApproved, requester);
+      });
+      return 'resolved';
+    }
     await this.sendMessage(AGENT_PROMPTS.toolCallApproved, requester);
     return 'resolved';
   }
