@@ -103,7 +103,18 @@ export function decideGate(observed: {
 // ---- CLI main ----
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
-const MARKER_FILE = join(REPO_ROOT, 'workdir', 'e2e', 'gate-marker.log');
+/**
+ * Where the gatecheck fixture appends, kept in lockstep with `GATECHECK_MARKER_FILE`
+ * in examples/plugins/.mcp.json.
+ *
+ * Under CACHES_DIR rather than a directory of its own because this has to be a path the
+ * MCP server can actually write on BOTH runtimes. opencode spawns a local (stdio) MCP
+ * server inside the agent's bwrap jail, so its writes only land where the child has an
+ * rw bind; CACHES_DIR is the one static path in `allowWritePaths` for every agent, and
+ * it sits under the bind-mounted workdir, so the write is visible from the host. The
+ * claude runtime spawns the same server outside the jail and is unaffected either way.
+ */
+const MARKER_FILE = join(REPO_ROOT, 'workdir', 'caches', 'e2e', 'gate-marker.log');
 
 function markerText(): string {
   return existsSync(MARKER_FILE) ? readFileSync(MARKER_FILE, 'utf8') : '';

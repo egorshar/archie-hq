@@ -4,6 +4,9 @@
       "description": "Gate-check stub — one read tool and one gated mutation, used by the tool-approval-gate e2e check",
       "command": "node",
       "args": ["/workdir/plugins/gatecheck/server.mjs"],
+      "env": {
+        "GATECHECK_MARKER_FILE": "/workdir/caches/e2e/gate-marker.log"
+      },
       "archie": {
         "default": "ask",
         "allow": ["get_status"],
