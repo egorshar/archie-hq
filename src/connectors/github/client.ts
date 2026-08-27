@@ -200,8 +200,12 @@ export class GitHubClient implements RepoHost {
     return GITHUB_CAPABILITIES;
   }
 
-  botIdentity(): { name: string; email: string } | null {
-    return getGitHubAppIdentity();
+  botIdentity(): { name: string; email: string; mention?: string } | null {
+    // The attribution account, not the App bot: a bot cannot be @mentioned at all,
+    // and its synthetic address resolves to no account. `getArchieAttributionIdentity`
+    // already falls back to the App bot when the attribution vars are unset, so this
+    // is never less configured than before.
+    return getArchieAttributionIdentity();
   }
 
   cloneUrl(repo: string): string {

@@ -19,7 +19,7 @@ import type { Agent } from './agent.js';
 import { getVisiblePeerIdsForSender, findAgentDefsContainingRepo, synthesizeDynamicAgentDef, isAutoMergeRepo } from './registry.js';
 import { PENDING_APPROVAL_TTL_MS } from './tool-approval-gate.js';
 import { getRepoHost } from '../system/backends.js';
-import { parseCheckRef, getArchieAttributionIdentity } from '../connectors/github/client.js';
+import { parseCheckRef } from '../connectors/github/client.js';
 import { buildAttributedBody } from '../connectors/github/pr-attribution.js';
 import { parseGitLabCheckRef } from '../connectors/gitlab/status-map.js';
 import { gitExec } from '../connectors/github/repo-clone.js';
@@ -1351,16 +1351,16 @@ const createPullRequestArgsSchema = {
  * authored as (`buildCommitAuthorEnv`) — so the PR names exactly whoever
  * `git blame` will name. Their Slack display name is used as-is.
  *
- * Host-neutral in shape, but the mention it stamps is GitHub-specific today —
- * `getArchieAttributionIdentity()` reads ARCHIE_GITHUB_* and yields null on
- * GitLab, which leaves the body as the agent wrote it. See the upstream audit
- * for the RepoHost.botIdentity() extension this wants.
+ * The mention comes from the active repo host, so a GitLab MR is attributed by the
+ * same code path: each adapter answers who Archie is credited as on it. A host with
+ * no mentionable identity yields null and the body is left exactly as written —
+ * nothing invents a handle.
  */
 function attributePrBody(task: Task, body: string): string {
   return buildAttributedBody(
     body,
     task.metadata.edit_approved_by?.name ?? null,
-    getArchieAttributionIdentity()?.mention ?? null,
+    getRepoHost()?.botIdentity()?.mention ?? null,
   );
 }
 

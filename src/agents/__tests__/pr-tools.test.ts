@@ -87,6 +87,7 @@ const mockGitHubClient = {
   requestReReview: vi.fn(),
   getCheckRunById: vi.fn(),
   getWorkflowRunById: vi.fn(),
+  botIdentity: vi.fn(),
 };
 
 function makeAgent(overrides: Partial<AgentDef> = {}): Agent {
@@ -858,6 +859,7 @@ describe('PR attribution', () => {
     vi.clearAllMocks();
     vi.mocked(getGitHubClient).mockReturnValue(mockGitHubClient as any);
     vi.mocked(getArchieAttributionIdentity).mockReturnValue(ARCHIE as any);
+    mockGitHubClient.botIdentity.mockReturnValue(ARCHIE);
     vi.mocked(isAutoMergeRepo).mockReturnValue(true);
     mockGitHubClient.createPullRequest.mockResolvedValue({ pr_number: 42, pr_url: 'https://gh/pr/42' });
   });
@@ -872,6 +874,30 @@ describe('PR attribution', () => {
       expect(sentBody()).toContain('Opened by @archie-hq on behalf of **Bandita Parida**.');
       expect(sentBody()).toContain('Description.');
     });
+  });
+
+  /**
+   * Taken from the repo host rather than the GitHub-only resolver, so a GitLab MR can
+   * be attributed by the same code. The GitHub adapter's `botIdentity()` returns the
+   * same attribution account it always did, so nothing about the GitHub render moves.
+   */
+  it('takes the mention from the active repo host, not from the GitHub resolver', async () => {
+    vi.mocked(getArchieAttributionIdentity).mockReturnValue(null as any);
+    mockGitHubClient.botIdentity.mockReturnValue({ name: 'Archie', email: 'x', mention: '@gl-bot' });
+    const tool = getRepoTool(makeAgent(), makeTask({ edit_approved_by: APPROVER }), 'create_pull_request');
+
+    await tool({ title: 'T', body: 'Description.' }, {});
+
+    expect(sentBody()).toContain('Opened by @gl-bot on behalf of **Bandita Parida**.');
+  });
+
+  it('leaves the body as written when the host has no mentionable identity', async () => {
+    mockGitHubClient.botIdentity.mockReturnValue({ name: 'Archie', email: 'x' });
+    const tool = getRepoTool(makeAgent(), makeTask({ edit_approved_by: APPROVER }), 'create_pull_request');
+
+    await tool({ title: 'T', body: 'Description.' }, {});
+
+    expect(sentBody()).toBe('Description.');
   });
 
   it('names nobody when no approver was recorded', async () => {

@@ -16,6 +16,37 @@ describe('GitLabHost skeleton', () => {
     expect(host.capabilities().securityAlerts).toBe(false);
   });
 
+  /**
+   * The mention is what an attribution line can @-link. It travels with the committer
+   * identity because both answer "who is Archie here", but it is optional: a deployment
+   * that never set GITLAB_BOT_USERNAME still gets a committer, just no attribution.
+   */
+  it('carries an @mention built from the bot username', () => {
+    process.env.GITLAB_BOT_NAME = 'Archie';
+    process.env.GITLAB_BOT_EMAIL = 'archie@example.com';
+    process.env.GITLAB_BOT_USERNAME = 'archie-bot';
+
+    expect(new GitLabHost().botIdentity()).toEqual({
+      name: 'Archie', email: 'archie@example.com', mention: '@archie-bot',
+    });
+  });
+
+  it('omits the mention when no bot username is configured, keeping the committer', () => {
+    process.env.GITLAB_BOT_NAME = 'Archie';
+    process.env.GITLAB_BOT_EMAIL = 'archie@example.com';
+    delete process.env.GITLAB_BOT_USERNAME;
+
+    expect(new GitLabHost().botIdentity()).toEqual({ name: 'Archie', email: 'archie@example.com' });
+  });
+
+  it('is still null without a committer name and email — GitLab push rules need both', () => {
+    delete process.env.GITLAB_BOT_NAME;
+    process.env.GITLAB_BOT_EMAIL = 'archie@example.com';
+    process.env.GITLAB_BOT_USERNAME = 'archie-bot';
+
+    expect(new GitLabHost().botIdentity()).toBeNull();
+  });
+
   it('builds a clone URL from GITLAB_BASE_URL', () => {
     process.env.GITLAB_BASE_URL = 'https://gl.example';
     const host = new GitLabHost();

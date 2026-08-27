@@ -36,11 +36,16 @@ export class GitLabHost implements RepoHost {
    * Capability probe hook. GitLab capabilities are used as-is from
    * GITLAB_CAPABILITIES_DEFAULT (securityAlerts: false) — no license-tier probing.
    */
-  botIdentity(): { name: string; email: string } | null {
+  botIdentity(): { name: string; email: string; mention?: string } | null {
     const name = process.env.GITLAB_BOT_NAME;
     const email = process.env.GITLAB_BOT_EMAIL;
     if (!name || !email) return null;
-    return { name, email };
+    // The committer is what GitLab push rules check, so name+email stay required.
+    // The mention is a separate, optional affordance: GITLAB_BOT_USERNAME is the
+    // token account's handle, already configured for webhook self-event filtering,
+    // and `@handle` is what GitLab links in an MR body.
+    const username = process.env.GITLAB_BOT_USERNAME?.trim();
+    return username ? { name, email, mention: `@${username}` } : { name, email };
   }
 
   cloneUrl(repo: string): string {

@@ -28,7 +28,13 @@ import type { PrCardData } from '../types/task.js';
 export interface RepoHost {
   readonly kind: 'github' | 'gitlab';
   capabilities(): RepoHostCapabilities;
-  botIdentity(): { name: string; email: string } | null;
+  /**
+   * Who Archie is credited as on this host: the git committer, plus the `@mention`
+   * form when the host has one to link. `mention` is optional — a deployment can have
+   * a committer identity without a mentionable account, and an attribution line then
+   * simply names nobody rather than inventing a handle.
+   */
+  botIdentity(): { name: string; email: string; mention?: string } | null;
   cloneUrl(repo: string): string;
 
   // Git clone/fetch/push credentials are provided by the host-aware
