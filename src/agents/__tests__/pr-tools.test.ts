@@ -88,6 +88,7 @@ const mockGitHubClient = {
   getCheckRunById: vi.fn(),
   getWorkflowRunById: vi.fn(),
   botIdentity: vi.fn(),
+  kind: 'github' as 'github' | 'gitlab',
 };
 
 function makeAgent(overrides: Partial<AgentDef> = {}): Agent {
@@ -860,6 +861,7 @@ describe('PR attribution', () => {
     vi.mocked(getGitHubClient).mockReturnValue(mockGitHubClient as any);
     vi.mocked(getArchieAttributionIdentity).mockReturnValue(ARCHIE as any);
     mockGitHubClient.botIdentity.mockReturnValue(ARCHIE);
+    mockGitHubClient.kind = 'github';
     vi.mocked(isAutoMergeRepo).mockReturnValue(true);
     mockGitHubClient.createPullRequest.mockResolvedValue({ pr_number: 42, pr_url: 'https://gh/pr/42' });
   });
@@ -898,6 +900,26 @@ describe('PR attribution', () => {
     await tool({ title: 'T', body: 'Description.' }, {});
 
     expect(sentBody()).toBe('Description.');
+  });
+
+  it('writes a GitHub Alert on GitHub', async () => {
+    const tool = getRepoTool(makeAgent(), makeTask({ edit_approved_by: APPROVER }), 'create_pull_request');
+
+    await tool({ title: 'T', body: 'Description.' }, {});
+
+    expect(sentBody()).toContain('> [!NOTE]');
+  });
+
+  // GitHub Alerts are a GitHub-flavour extension; on a host that does not implement them
+  // the syntax degrades to an unlabelled quote and the label is lost without a trace.
+  it('spells the label out on GitLab instead of relying on a GitHub Alert', async () => {
+    mockGitHubClient.kind = 'gitlab';
+    const tool = getRepoTool(makeAgent(), makeTask({ edit_approved_by: APPROVER }), 'create_pull_request');
+
+    await tool({ title: 'T', body: 'Description.' }, {});
+
+    expect(sentBody()).toContain('> **Note:** Opened by @archie-hq on behalf of **Bandita Parida**.');
+    expect(sentBody()).not.toContain('[!NOTE]');
   });
 
   it('names nobody when no approver was recorded', async () => {

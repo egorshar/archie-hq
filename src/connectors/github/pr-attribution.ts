@@ -48,10 +48,22 @@ export function stripAttribution(body: string): string {
  * tasks): the line still names Archie, but nothing invents a human. `mention` is
  * null only when no identity is configured, leaving the body as the agent wrote it.
  */
+/**
+ * How the line is set off from the description.
+ *
+ * `alert` is GitHub's own `> [!NOTE]` extension — a coloured box with an icon, and the
+ * only way to make a line prominent where `style` and CSS are sanitized away. It is not
+ * portable: on a host that does not implement it the syntax degrades to an unlabelled
+ * blockquote, silently losing the label. `quote` writes the label in the text instead,
+ * which every Markdown flavour renders identically. The caller picks by host.
+ */
+export type AttributionStyle = 'alert' | 'quote';
+
 export function buildAttributedBody(
   body: string,
   humanName: string | null,
   mention: string | null,
+  style: AttributionStyle = 'alert',
 ): string {
   const prose = stripAttribution(body);
   if (!mention) return prose;
@@ -59,6 +71,8 @@ export function buildAttributedBody(
   const line = humanName
     ? `Opened by ${mention} on behalf of **${humanName}**.`
     : `Opened by ${mention}.`;
-  const alert = `${ATTRIBUTION_MARKER}\n> [!NOTE]\n> ${line}`;
-  return [alert, prose].filter(Boolean).join('\n\n');
+  const note = style === 'alert'
+    ? `${ATTRIBUTION_MARKER}\n> [!NOTE]\n> ${line}`
+    : `${ATTRIBUTION_MARKER}\n> **Note:** ${line}`;
+  return [note, prose].filter(Boolean).join('\n\n');
 }

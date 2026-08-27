@@ -1357,10 +1357,15 @@ const createPullRequestArgsSchema = {
  * nothing invents a handle.
  */
 function attributePrBody(task: Task, body: string): string {
+  const host = getRepoHost();
+  // GitHub Alerts are GitHub's own extension. Asking the host which flavour it speaks
+  // keeps the coloured box where it renders and writes the label in plain text where it
+  // would otherwise degrade to an unlabelled quote.
   return buildAttributedBody(
     body,
     task.metadata.edit_approved_by?.name ?? null,
-    getRepoHost()?.botIdentity()?.mention ?? null,
+    host?.botIdentity()?.mention ?? null,
+    host?.kind === 'github' ? 'alert' : 'quote',
   );
 }
 

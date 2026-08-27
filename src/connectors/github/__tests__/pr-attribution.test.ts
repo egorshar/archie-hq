@@ -22,6 +22,29 @@ describe('buildAttributedBody', () => {
     );
   });
 
+  /**
+   * `> [!NOTE]` is a GitHub-flavour extension. Whether a given GitLab version renders it
+   * is not something this code should bet on: unsupported, it degrades to an unlabelled
+   * blockquote and the "Note" affordance upstream wanted disappears silently. The quote
+   * style spells the label out, which both flavours render the same way.
+   */
+  it('spells the label out in the quote style, for hosts without GitHub Alerts', () => {
+    const out = buildAttributedBody('Body.', 'Bandita Parida', MENTION, 'quote');
+
+    expect(out).toBe(
+      `${ATTRIBUTION_MARKER}\n> **Note:** Opened by @archie-hq on behalf of **Bandita Parida**.\n\nBody.`,
+    );
+    expect(out).not.toContain('[!NOTE]');
+  });
+
+  it('still strips its own quote-style stamp rather than stacking a second one', () => {
+    const once = buildAttributedBody('Body.', 'Bandita Parida', MENTION, 'quote');
+
+    const twice = buildAttributedBody(once, 'Bandita Parida', MENTION, 'quote');
+
+    expect(twice).toBe(once);
+  });
+
   it('invents no human when no approver was recorded', () => {
     // CLI approvals and pre-feature tasks have no edit_approved_by.
     const out = buildAttributedBody('Body.', null, MENTION);
